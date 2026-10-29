@@ -188,6 +188,21 @@ curl.exe -H "Authorization: Bearer $token" http://127.0.0.1:6701/api/status
 `/api/logs`、`/api/stats`、`/api/personas`、`/api/llm/test`、`/api/actions`、
 `/api/events/stream`（SSE）。完整列表见 [docs/api.md](docs/api.md)。
 
+## 自带 WebUI
+
+FLLBot 自带一个单页控制台，零外部依赖、可直接被桌面端 iframe 嵌入：
+
+```
+http://127.0.0.1:6701/ui?token=<data/admin_token.txt 里的令牌>
+```
+
+- 展示运行时长、NapCat 连接、插件与分发统计、LLM 状态、最近日志
+- 插件可直接启用/停用；数据每 5 秒自动刷新
+- 页面本身公开，数据请求都带令牌；也可不带参数打开，页面会提示手工输入
+- 不依赖 CDN，断网、内网环境都能用
+
+桌面端的「切换 WebUI」菜单里已经加了 **FLLBot WebUI** 一项，点击后在面板内嵌打开。
+
 ## 与桌面端（qq-bot-starter）集成
 
 FLLBot 在 OneBot 体系里扮演「机器人框架」的位置，但连接方向相反：**NapCat 主动连 FLLBot**。
