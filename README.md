@@ -207,8 +207,8 @@ FLLBot 在 OneBot 体系里扮演「机器人框架」的位置，但连接方�
 桌面端 `qq-bot-starter` 的「插件管理 → FLLBot 插件」tab 已经接好：
 
 - 管理服务通过 `/api/fllbot/*` 反向代理访问本机 FLLBot，前端 CSP 保持只放行 6700
-- 填一次地址（默认 `http://127.0.0.1:6701`）与 `data/admin_token.txt` 里的令牌即可；
-  令牌用 Windows DPAPI 加密存在桌面端的 `data/admin/fllbot.json`，不会回传到页面
+- 侧边栏「服务 → FLLBot」选择 FLLBot 目录后，会自动读取该目录的 `data/admin_token.txt`，
+  不需要手工填令牌；手工填写时用 Windows DPAPI 加密存在 `data/admin/fllbot.json`，不会回传到页面
 - 插件列表支持启停；配置弹窗按 `plugin.setting(...)` 声明的 schema 自动渲染
   （bool / int / float / text / select / 多选 / 列表，密文不回显）
 - 可切换「全局默认」或指定群做覆盖，只提交改动过的字段，避免把群覆盖写成整份全局值
