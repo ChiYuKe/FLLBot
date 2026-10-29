@@ -152,3 +152,14 @@ def test_action_requires_connection(tmp_path: Path) -> None:
     with TestClient(create_app(bot)) as client:
         response = client.post("/api/actions", headers=AUTH, json={"action": "get_login_info"})
         assert response.status_code == 503
+
+
+def test_webui_served(tmp_path: Path) -> None:
+    bot = build_bot(tmp_path, builtin=False)
+    with TestClient(create_app(bot)) as client:
+        response = client.get("/ui")
+        assert response.status_code == 200
+        assert "text/html" in response.headers["content-type"]
+        assert "FLLBot 控制台" in response.text
+        assert "__VERSION__" not in response.text
+        assert client.get("/ui/?token=demo").status_code == 200

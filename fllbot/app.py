@@ -14,6 +14,7 @@ from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import HTMLResponse
 
 from . import __version__
 from .config import AppConfig, ConfigStore, mask_secrets, resolve_path
@@ -28,6 +29,7 @@ from .onebot.server import ConnectionManager, create_ws_router
 from .permission import PermissionManager
 from .plugin.loader import PluginLoader
 from .storage import Storage
+from .webui import render_index
 
 
 class FLLBot:
@@ -284,6 +286,13 @@ def create_app(bot: FLLBot) -> FastAPI:
     )
     app.include_router(create_api_router(bot))
     app.include_router(create_ws_router(bot))
+
+    @app.get("/ui", include_in_schema=False)
+    @app.get("/ui/", include_in_schema=False)
+    async def webui() -> HTMLResponse:
+        """自带控制台页面；数据仍走 /api/*，由页面自己带令牌。"""
+        return HTMLResponse(render_index())
+
     return app
 
 
