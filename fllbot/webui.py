@@ -9,12 +9,18 @@ from __future__ import annotations
 
 from . import __version__
 
-_HTML = """<!doctype html>
+_HTML = r"""<!doctype html>
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>FLLBot 控制台</title>
+<script>
+  (function () {
+    var theme = new URLSearchParams(location.search).get('theme');
+    if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+  })();
+</script>
 <style>
   :root {
     color-scheme: dark;
@@ -133,6 +139,32 @@ _HTML = """<!doctype html>
   #auth code { padding: 1px 5px; border-radius: 5px; background: var(--panel-soft); }
   #auth input { width: 100%; height: 36px; padding: 0 11px; margin-bottom: 10px; color: var(--ink); background: var(--bg); border: 1px solid var(--line); border-radius: 8px; outline: none; font: inherit; font-size: 12px; }
   #auth input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+  .modal-backdrop { position: fixed; inset: 0; z-index: 20; display: none; align-items: center; justify-content: center; padding: 24px; background: rgba(6, 8, 12, .62); }
+  .modal-backdrop.open { display: flex; }
+  .readme-modal { width: min(720px, 100%); max-height: 82vh; display: flex; flex-direction: column; background: var(--panel); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; box-shadow: 0 30px 80px rgba(0, 0, 0, .45); }
+  .readme-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 18px 20px 13px; border-bottom: 1px solid var(--line); }
+  .readme-head .eyebrow { color: var(--muted); font-size: 10px; letter-spacing: .08em; }
+  .readme-head h2 { margin: 4px 0 2px; font-size: 16px; }
+  .readme-head p { margin: 0; color: var(--muted); font-size: 11px; }
+  .readme-body { min-height: 0; padding: 16px 20px 24px; overflow: auto; color: var(--ink); font-size: 12px; line-height: 1.8; }
+  .readme-body h1, .readme-body h2, .readme-body h3 { margin: 18px 0 8px; line-height: 1.35; }
+  .readme-body h1 { font-size: 17px; }
+  .readme-body h2 { font-size: 14px; }
+  .readme-body h3 { font-size: 12.5px; }
+  .readme-body p { margin: 8px 0; }
+  .readme-body ul, .readme-body ol { margin: 8px 0; padding-left: 22px; }
+  .readme-body li { margin: 3px 0; }
+  .readme-body code { padding: 1px 5px; border-radius: 5px; background: var(--panel-soft); font: 11px "Cascadia Mono", Consolas, monospace; }
+  .readme-body pre { margin: 10px 0; padding: 12px 14px; max-height: none; overflow: auto; background: var(--panel-soft); border: 1px solid var(--line); border-radius: 9px; }
+  .readme-body pre code { padding: 0; background: none; font-size: 11px; line-height: 1.7; }
+  .readme-body table { width: 100%; margin: 10px 0; border-collapse: collapse; font-size: 11px; }
+  .readme-body th, .readme-body td { padding: 6px 10px; text-align: left; vertical-align: top; border: 1px solid var(--line); }
+  .readme-body th { background: var(--panel-soft); font-weight: 650; }
+  .readme-body blockquote { margin: 10px 0; padding: 6px 12px; color: var(--muted); border-left: 3px solid var(--line); }
+  .readme-body a { color: var(--accent); text-decoration: none; }
+  .readme-body hr { margin: 16px 0; border: 0; border-top: 1px solid var(--line); }
+  .plugin-actions { display: flex; align-items: center; gap: 8px; flex: none; }
 </style>
 </head>
 <body>
@@ -161,6 +193,20 @@ _HTML = """<!doctype html>
     <pre id="logs">加载中…</pre>
   </section>
 </main>
+
+<div class="modal-backdrop" id="readme">
+  <div class="readme-modal" role="dialog" aria-modal="true" aria-labelledby="readme-title">
+    <div class="readme-head">
+      <div>
+        <span class="eyebrow">插件说明</span>
+        <h2 id="readme-title">README</h2>
+        <p id="readme-sub"></p>
+      </div>
+      <button class="btn" id="readme-close" type="button">关闭</button>
+    </div>
+    <div class="readme-body" id="readme-body"></div>
+  </div>
+</div>
 
 <div id="auth">
   <h2>需要管理令牌</h2>
@@ -329,10 +375,132 @@ _HTML = """<!doctype html>
             plugin.has_readme ? h('span', { text: '有 README' }) : null
           )
         ),
-        toggle
+        h('div', { class: 'plugin-actions' },
+          plugin.has_readme ? h('button', {
+            type: 'button',
+            class: 'btn',
+            text: '说明',
+            onclick: function () { openReadme(plugin); }
+          }) : null,
+          toggle
+        )
       ));
     });
   }
+
+  function escapeHtml(text) {
+    return String(text)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;');
+  }
+
+  function inlineMd(text) {
+    var value = escapeHtml(text);
+    value = value.replace(/`([^`]+)`/g, function (_, code) { return '<code>' + code + '</code>'; });
+    value = value.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
+    value = value.replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>');
+    value = value.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, function (match, label, href) {
+      if (!/^https?:\/\//i.test(href)) return match;
+      return '<a href="' + href + '" target="_blank" rel="noreferrer noopener">' + label + '</a>';
+    });
+    return value;
+  }
+
+  function renderMarkdown(source) {
+    var text = String(source || '').replace(/\r\n?/g, '\n').trim();
+    if (!text) return '<p class="empty">这个插件还没有说明</p>';
+    var blocks = [];
+    var stash = function (html) {
+      blocks.push(html);
+      return '@@BLOCK' + (blocks.length - 1) + '@@';
+    };
+    text = text.replace(/```[^\n]*\n([\s\S]*?)```/g, function (_, code) {
+      return stash('<pre><code>' + escapeHtml(code.replace(/\n$/, '')) + '</code></pre>');
+    });
+    text = text.replace(/(?:^\|.*\|[ \t]*\n?)+/gm, function (block) {
+      var rows = block.trim().split('\n').map(function (row) { return row.trim(); }).filter(Boolean);
+      if (rows.length < 2 || !/^\|[\s:|-]+\|$/.test(rows[1])) return block;
+      var cells = function (row) { return row.replace(/^\|/, '').replace(/\|$/, '').split('|').map(function (c) { return c.trim(); }); };
+      var head = cells(rows[0]).map(function (c) { return '<th>' + inlineMd(c) + '</th>'; }).join('');
+      var body = rows.slice(2).map(function (row) {
+        return '<tr>' + cells(row).map(function (c) { return '<td>' + inlineMd(c) + '</td>'; }).join('') + '</tr>';
+      }).join('');
+      return stash('<table><thead><tr>' + head + '</tr></thead><tbody>' + body + '</tbody></table>') + '\n';
+    });
+
+    var out = [];
+    var list = '';
+    var paragraph = [];
+    var quote = [];
+    var flush = function () {
+      if (paragraph.length) { out.push('<p>' + inlineMd(paragraph.join(' ')) + '</p>'); paragraph = []; }
+      if (quote.length) { out.push('<blockquote>' + inlineMd(quote.join(' ')) + '</blockquote>'); quote = []; }
+      if (list) { out.push('</' + list + '>'); list = ''; }
+    };
+
+    text.split('\n').forEach(function (raw) {
+      var line = raw.trimEnd();
+      var block = line.match(/^@@BLOCK(\d+)@@$/);
+      if (block) {
+        flush();
+        out.push(blocks[Number(block[1])]);
+        return;
+      }
+      if (!line.trim()) { flush(); return; }
+      var heading = line.match(/^(#{1,6})\s+(.*)$/);
+      if (heading) {
+        flush();
+        var level = Math.min(heading[1].length, 4);
+        out.push('<h' + level + '>' + inlineMd(heading[2]) + '</h' + level + '>');
+        return;
+      }
+      if (/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())) { flush(); out.push('<hr />'); return; }
+      if (line.indexOf('>') === 0) { flush(); quote.push(line.replace(/^>\s?/, '')); return; }
+      var bullet = line.match(/^[-*+]\s+(.*)$/);
+      var ordered = line.match(/^\d+[.)]\s+(.*)$/);
+      if (bullet || ordered) {
+        if (quote.length || paragraph.length) flush();
+        var kind = bullet ? 'ul' : 'ol';
+        if (list !== kind) {
+          if (list) out.push('</' + list + '>');
+          out.push('<' + kind + '>');
+          list = kind;
+        }
+        out.push('<li>' + inlineMd((bullet || ordered)[1]) + '</li>');
+        return;
+      }
+      if (quote.length) flush();
+      paragraph.push(line.trim());
+    });
+    flush();
+    return out.join('\n');
+  }
+
+  function closeReadme() {
+    document.getElementById('readme').classList.remove('open');
+  }
+
+  function openReadme(plugin) {
+    var backdrop = document.getElementById('readme');
+    var body = document.getElementById('readme-body');
+    document.getElementById('readme-title').textContent = plugin.name;
+    document.getElementById('readme-sub').textContent = 'v' + (plugin.version || '?') + ' · ' + (plugin.description || '');
+    body.textContent = '正在读取 README…';
+    backdrop.classList.add('open');
+    request('/api/plugins/' + encodeURIComponent(plugin.name) + '/readme')
+      .then(function (data) { body.innerHTML = renderMarkdown(data && data.content); })
+      .catch(function (error) { body.textContent = error.message || '读取 README 失败'; });
+  }
+
+  document.getElementById('readme-close').addEventListener('click', closeReadme);
+  document.getElementById('readme').addEventListener('click', function (event) {
+    if (event.target === event.currentTarget) closeReadme();
+  });
+  document.addEventListener('keydown', function (event) {
+    if (event.key === 'Escape') closeReadme();
+  });
 
   function renderLogs(items) {
     var logs = document.getElementById('logs');
@@ -342,7 +510,7 @@ _HTML = """<!doctype html>
     }
     logs.textContent = items.map(function (item) {
       return '[' + formatTime(item.ts) + '] ' + String(item.level || 'INFO').padEnd(7) + ' ' + (item.logger || '') + ': ' + (item.message || '');
-    }).join('\\n');
+    }).join('\n');
   }
 
   function refresh() {
