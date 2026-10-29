@@ -134,6 +134,8 @@ class PluginLoader:
         plugin.bot = self.bot
         plugin.module = module
         plugin.path = path
+        if not plugin.readme:
+            plugin.readme = self._read_readme(path)
 
         for spec in plugin.handlers:
             self.bot.dispatcher.register(spec)
@@ -310,6 +312,23 @@ class PluginLoader:
             return "plugin" in path.read_text(encoding="utf-8", errors="ignore")
         except OSError:
             return False
+
+    @staticmethod
+    def _read_readme(path: Path) -> str:
+        """读取插件说明：目录插件用 ``README.md``，单文件插件用同名 ``.md``。"""
+        max_chars = 64 * 1024
+        candidates: list[Path] = []
+        if path.is_dir():
+            candidates = [path / "README.md", path / "readme.md"]
+        elif path.is_file() and path.suffix == ".py":
+            candidates = [path.with_suffix(".md")]
+        for candidate in candidates:
+            try:
+                if candidate.is_file():
+                    return candidate.read_text(encoding="utf-8", errors="replace")[:max_chars]
+            except OSError:
+                continue
+        return ""
 
     @staticmethod
     def _iter_candidates(directory: Path) -> list[Path]:

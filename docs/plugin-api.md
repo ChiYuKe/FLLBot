@@ -159,6 +159,24 @@ await ctx.settings.set("keywords", ["广告", "re:加\\s*群"])
 > 写入会做类型校验，非法值抛 `ValueError` 且不落库；批量更新用
 > `plugin.settings.update({...}, group_id)`，任一字段非法则整体不生效。
 
+## 插件说明（README）
+
+插件可以带一份 Markdown 说明，管理端通过 `/api/plugins/{name}/readme` 读取并展示：
+
+- 目录插件：`plugins/<name>/README.md`
+- 单文件插件：`plugins/<name>.md`
+- 代码里直接赋值（优先级最高）：`plugin.readme = "# 标题\n..."`
+
+`/api/plugins` 返回的每个插件带 `has_readme`，管理端据此决定是否显示「说明」入口。
+
+```python
+plugin = Plugin(name="demo", version="1.0.0")
+plugin.readme = """# demo
+
+用法：`/demo`
+"""
+```
+
 ## Context
 
 | 成员 | 说明 |

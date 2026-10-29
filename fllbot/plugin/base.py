@@ -106,6 +106,9 @@ class Plugin:
         self.bot: Any = None
         self.module: Any = None
         self.path: Any = None
+        # 插件自带的说明文档（Markdown）。可以在代码里直接赋值，或由加载器
+        # 从插件目录的 README.md / 同名 .md 读取。
+        self.readme: str = ""
         self.logger = logging.getLogger(f"fllbot.plugin.{self.name or 'unnamed'}")
 
     # -- 元信息 ----------------------------------------------------------- #
@@ -165,6 +168,7 @@ class Plugin:
             "loops": [{"name": spec.name, "seconds": spec.seconds} for spec in self._loops],
             "settings": self._settings.schema(),
             "has_settings": bool(self._settings.fields),
+            "has_readme": bool(self.readme.strip()),
             "path": str(self.path) if self.path else None,
         }
 

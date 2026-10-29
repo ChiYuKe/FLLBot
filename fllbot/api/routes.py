@@ -91,6 +91,15 @@ def create_api_router(bot: FLLBot) -> APIRouter:
                 return item
         raise HTTPException(404, f"插件不存在: {name}")
 
+    @protected.get("/plugins/{name}/readme", summary="插件说明（Markdown）")
+    async def plugin_readme(name: str) -> dict[str, Any]:
+        plugin = bot.plugins.get(name)
+        if plugin is None:
+            raise HTTPException(404, f"插件不存在: {name}")
+        if not plugin.readme.strip():
+            raise HTTPException(404, f"插件没有 README: {name}")
+        return {"name": name, "format": "markdown", "content": plugin.readme}
+
     @protected.post("/plugins/reload", summary="重载全部插件或指定插件")
     async def reload_plugins(payload: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
         name = (payload or {}).get("name")

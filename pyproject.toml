@@ -34,7 +34,7 @@ license-files = ["LICENSE"]
 include = ["fllbot*"]
 
 [tool.setuptools.package-data]
-fllbot = ["personas/*.md"]
+fllbot = ["personas/*.md", "builtin_plugins/*/README.md"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

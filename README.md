@@ -22,6 +22,7 @@
 - **反向 WebSocket 服务端**：任意路径接入、Token 鉴权、多账号连接、心跳超时清理、`echo` 关联的 API 调用
 - **插件系统**：`plugins/*.py` 或 `plugins/<包>/__init__.py` 自动扫描、装饰器注册命令/消息/通知/请求、优先级与阻断、文件改动热重载、周期任务
 - **插件声明式配置**：`plugin.setting(...)` 声明 schema（bool/int/float/select/list/secret），支持全局值与按群覆盖，管理端可直接渲染成表单（`/api/plugins/{name}/settings`）
+- **插件 README**：支持 `plugins/<name>/README.md`、单文件插件同名 `.md` 或 `plugin.readme`，管理端用 `/api/plugins/{name}/readme` 读取（Markdown）
 - **权限**：超管、群主/管理员、私聊开关、群白名单/黑名单、按群启用或停用某个插件、每用户冷却
 - **持久化**：SQLite + `PRAGMA user_version` 迁移；插件配置、群配置、插件状态、聊天历史、消息统计、定时提醒
 - **LLM 对话**：OpenAI 兼容接口，多轮上下文裁剪、人格文件（`personas/*.md`）、@ 或前缀触发、长回复分条、限流、按群切换人格
@@ -200,6 +201,7 @@ http://127.0.0.1:6701/ui?token=<data/admin_token.txt 里的令牌>
 - 插件可直接启用/停用；数据每 5 秒自动刷新
 - 页面本身公开，数据请求都带令牌；也可不带参数打开，页面会提示手工输入
 - 不依赖 CDN，断网、内网环境都能用
+- 风格与桌面端对齐：深色卡片布局，支持 `?theme=light|dark`（桌面端会按当前主题自动带上）
 
 桌面端的「切换 WebUI」菜单里已经加了 **FLLBot WebUI** 一项，点击后在面板内嵌打开。
 

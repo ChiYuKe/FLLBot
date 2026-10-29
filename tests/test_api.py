@@ -163,3 +163,51 @@ def test_webui_served(tmp_path: Path) -> None:
         assert "FLLBot 控制台" in response.text
         assert "__VERSION__" not in response.text
         assert client.get("/ui/?token=demo").status_code == 200
+
+
+def test_builtin_plugin_readme(tmp_path: Path) -> None:
+    bot = build_bot(tmp_path, builtin=True)
+    with TestClient(create_app(bot)) as client:
+        plugins = {item["name"]: item for item in client.get("/api/plugins", headers=AUTH).json()}
+        assert plugins["ping"]["has_readme"] is True
+
+        response = client.get("/api/plugins/ping/readme", headers=AUTH)
+        assert response.status_code == 200
+        body = response.json()
+        assert body["format"] == "markdown"
+        assert body["content"].startswith("# ping")
+
+        assert client.get("/api/plugins/ping/readme").status_code == 401
+        assert client.get("/api/plugins/no-such-plugin/readme", headers=AUTH).status_code == 404
+
+
+def test_custom_plugin_readme_from_file(tmp_path: Path) -> None:
+    directory = tmp_path / "plugins" / "demo"
+    directory.mkdir(parents=True)
+    (directory / "__init__.py").write_text(
+        "from fllbot.plugin import Plugin\n\nplugin = Plugin(name='demo', version='1.0.0')\n",
+        encoding="utf-8",
+    )
+    (directory / "README.md").write_text("# demo\n\n用法：/demo\n", encoding="utf-8")
+
+    bot = build_bot(tmp_path, builtin=False, plugin_dirs=[tmp_path / "plugins"])
+    with TestClient(create_app(bot)) as client:
+        response = client.get("/api/plugins/demo/readme", headers=AUTH)
+        assert response.status_code == 200
+        assert "用法：/demo" in response.json()["content"]
+
+
+def test_single_file_plugin_readme(tmp_path: Path) -> None:
+    directory = tmp_path / "plugins"
+    directory.mkdir()
+    (directory / "plain.py").write_text(
+        "from fllbot.plugin import Plugin\n\nplugin = Plugin(name='plain', version='1.0.0')\n",
+        encoding="utf-8",
+    )
+    (directory / "plain.md").write_text("# plain\n", encoding="utf-8")
+
+    bot = build_bot(tmp_path, builtin=False, plugin_dirs=[directory])
+    with TestClient(create_app(bot)) as client:
+        response = client.get("/api/plugins/plain/readme", headers=AUTH)
+        assert response.status_code == 200
+        assert "# plain" in response.json()["content"]
