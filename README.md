@@ -276,4 +276,4 @@ tests/                  # pytest：单元 + API + 端到端 WS
 
 ## License
 
-MIT
+[MIT](LICENSE)

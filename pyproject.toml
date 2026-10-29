@@ -27,6 +27,9 @@ dev = [
 [project.scripts]
 fllbot = "fllbot.cli:main"
 
+[tool.setuptools]
+license-files = ["LICENSE"]
+
 [tool.setuptools.packages.find]
 include = ["fllbot*"]
 
