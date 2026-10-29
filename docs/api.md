@@ -45,6 +45,28 @@ Invoke-RestMethod -Headers @{ Authorization = "Bearer $token" } http://127.0.0.1
 | POST | `/api/plugins/reload` | body `{"name": "ping"}` 指定重载；空 body 重载全部 |
 | POST | `/api/plugins/{name}/reload` | 重载指定插件 |
 | POST | `/api/plugins/{name}/enabled` | body `{"enabled": false, "group_id": 123}`；`group_id` 省略表示全局 |
+| GET | `/api/plugins/{name}/settings` | 插件配置：`{"schema": [...], "values": {...}}`，可带 `?group_id=` 取群级生效值 |
+| PATCH | `/api/plugins/{name}/settings` | body `{"values": {...}, "group_id": 123?}`；校验失败 `400` 且整体不生效 |
+
+插件配置的 schema 由插件用 `plugin.setting(...)` 声明，字段含
+`key` / `type` / `label` / `default` / `description` / `options` / `min` / `max` / `secret` / `group_scoped`，
+桌面端可以据此直接渲染表单。`secret=true` 的字段返回值会打码成 `******`。
+
+```powershell
+# 查看 group_guard 的配置 schema
+Invoke-RestMethod -Headers @{Authorization="Bearer $token"} `
+  http://127.0.0.1:6701/api/plugins/group_guard/settings
+
+# 全局修改违禁词
+Invoke-RestMethod -Method Patch -Headers @{Authorization="Bearer $token"} -ContentType "application/json" `
+  -Uri http://127.0.0.1:6701/api/plugins/group_guard/settings `
+  -Body '{"values": {"badwords": ["广告", "re:加\\s*群"]}}'
+
+# 只给 20002 群设置专属欢迎语
+Invoke-RestMethod -Method Patch -Headers @{Authorization="Bearer $token"} -ContentType "application/json" `
+  -Uri http://127.0.0.1:6701/api/plugins/group_guard/settings `
+  -Body '{"group_id": 20002, "values": {"welcome_template": "本群专属欢迎 {nickname}"}}'
+```
 
 ### 群
 

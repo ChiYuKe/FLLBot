@@ -10,7 +10,7 @@ from typing import Any
 
 import aiosqlite
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 MIGRATIONS: dict[int, list[str]] = {
     1: [
@@ -70,7 +70,23 @@ MIGRATIONS: dict[int, list[str]] = {
             value TEXT NOT NULL
         )
         """,
-    ]
+    ],
+    2: [
+        """
+        CREATE TABLE IF NOT EXISTS reminders (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            scene      TEXT NOT NULL,
+            scene_id   INTEGER NOT NULL,
+            creator    INTEGER NOT NULL,
+            content    TEXT NOT NULL,
+            due_at     REAL NOT NULL,
+            created_at REAL NOT NULL,
+            fired      INTEGER NOT NULL DEFAULT 0
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (fired, due_at)",
+        "CREATE INDEX IF NOT EXISTS idx_reminders_scene ON reminders (scene, scene_id, fired)",
+    ],
 }
 
 
@@ -188,26 +204,39 @@ class Storage:
         enabled: bool | None = None,
         config: dict[str, Any] | None = None,
     ) -> None:
+        """登记或局部更新群设置；``None`` 表示该字段保持不变。
+
+        使用单条 upsert 语句，避免并发首次登记时撞 UNIQUE 约束。
+        """
         now = time.time()
-        cursor = await self.db.execute("SELECT group_id, enabled, config FROM groups WHERE group_id = ?", (group_id,))
-        row = await cursor.fetchone()
-        if row is None:
+        gid = int(group_id)
+        if enabled is None and config is None:
             await self.db.execute(
-                "INSERT INTO groups (group_id, enabled, config, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                (
-                    group_id,
-                    int(bool(enabled)) if enabled is not None else 1,
-                    json.dumps(config or {}, ensure_ascii=False),
-                    now,
-                    now,
-                ),
+                "INSERT OR IGNORE INTO groups (group_id, enabled, config, created_at, updated_at) "
+                "VALUES (?, 1, '{}', ?, ?)",
+                (gid, now, now),
+            )
+        elif config is None:
+            await self.db.execute(
+                "INSERT INTO groups (group_id, enabled, config, created_at, updated_at) "
+                "VALUES (?, ?, '{}', ?, ?) "
+                "ON CONFLICT(group_id) DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at",
+                (gid, int(bool(enabled)), now, now),
+            )
+        elif enabled is None:
+            await self.db.execute(
+                "INSERT INTO groups (group_id, enabled, config, created_at, updated_at) "
+                "VALUES (?, 1, ?, ?, ?) "
+                "ON CONFLICT(group_id) DO UPDATE SET config = excluded.config, updated_at = excluded.updated_at",
+                (gid, json.dumps(config, ensure_ascii=False), now, now),
             )
         else:
-            new_enabled = row["enabled"] if enabled is None else int(bool(enabled))
-            new_config = row["config"] if config is None else json.dumps(config, ensure_ascii=False)
             await self.db.execute(
-                "UPDATE groups SET enabled = ?, config = ?, updated_at = ? WHERE group_id = ?",
-                (new_enabled, new_config, now, group_id),
+                "INSERT INTO groups (group_id, enabled, config, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(group_id) DO UPDATE SET "
+                "enabled = excluded.enabled, config = excluded.config, updated_at = excluded.updated_at",
+                (gid, int(bool(enabled)), json.dumps(config, ensure_ascii=False), now, now),
             )
         await self.db.commit()
 
@@ -320,6 +349,85 @@ class Storage:
         )
         return [{"user_id": int(row["user_id"]), "count": int(row["count"])} for row in await cursor.fetchall()]
 
+    # -- 提醒 ------------------------------------------------------------- #
+    async def add_reminder(
+        self,
+        *,
+        scene: str,
+        scene_id: int,
+        creator: int,
+        content: str,
+        due_at: float,
+    ) -> int:
+        cursor = await self.db.execute(
+            "INSERT INTO reminders (scene, scene_id, creator, content, due_at, created_at, fired) "
+            "VALUES (?, ?, ?, ?, ?, ?, 0)",
+            (scene, int(scene_id), int(creator), content, float(due_at), time.time()),
+        )
+        await self.db.commit()
+        return int(cursor.lastrowid or 0)
+
+    async def due_reminders(self, now: float | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        cursor = await self.db.execute(
+            "SELECT id, scene, scene_id, creator, content, due_at, created_at FROM reminders "
+            "WHERE fired = 0 AND due_at <= ? ORDER BY due_at LIMIT ?",
+            (float(now if now is not None else time.time()), int(limit)),
+        )
+        return [_reminder_row(row) for row in await cursor.fetchall()]
+
+    async def mark_reminder_fired(self, reminder_id: int) -> None:
+        await self.db.execute("UPDATE reminders SET fired = 1 WHERE id = ?", (int(reminder_id),))
+        await self.db.commit()
+
+    async def list_reminders(
+        self,
+        scene: str,
+        scene_id: int,
+        *,
+        include_fired: bool = False,
+    ) -> list[dict[str, Any]]:
+        query = (
+            "SELECT id, scene, scene_id, creator, content, due_at, created_at FROM reminders "
+            "WHERE scene = ? AND scene_id = ?"
+        )
+        if not include_fired:
+            query += " AND fired = 0"
+        query += " ORDER BY due_at"
+        cursor = await self.db.execute(query, (scene, int(scene_id)))
+        return [_reminder_row(row) for row in await cursor.fetchall()]
+
+    async def delete_reminder(
+        self,
+        reminder_id: int,
+        *,
+        scene: str | None = None,
+        scene_id: int | None = None,
+    ) -> bool:
+        query = "DELETE FROM reminders WHERE id = ?"
+        params: list[Any] = [int(reminder_id)]
+        if scene is not None and scene_id is not None:
+            query += " AND scene = ? AND scene_id = ?"
+            params.extend([scene, int(scene_id)])
+        cursor = await self.db.execute(query, params)
+        await self.db.commit()
+        return bool(cursor.rowcount)
+
+    async def count_reminders(self, scene: str, scene_id: int) -> int:
+        cursor = await self.db.execute(
+            "SELECT COUNT(*) AS count FROM reminders WHERE scene = ? AND scene_id = ? AND fired = 0",
+            (scene, int(scene_id)),
+        )
+        row = await cursor.fetchone()
+        return int(row["count"]) if row else 0
+
+    async def purge_fired_reminders(self, older_than_days: int = 7) -> int:
+        cutoff = time.time() - max(1, int(older_than_days)) * 86400
+        cursor = await self.db.execute(
+            "DELETE FROM reminders WHERE fired = 1 AND due_at < ?", (cutoff,)
+        )
+        await self.db.commit()
+        return int(cursor.rowcount or 0)
+
     # -- 维护 ------------------------------------------------------------- #
     async def summary(self) -> dict[str, Any]:
         size = self.path.stat().st_size if self.path.exists() else 0
@@ -333,6 +441,18 @@ class Storage:
     async def vacuum(self) -> None:
         await self.db.execute("VACUUM")
         await self.db.commit()
+
+
+def _reminder_row(row: aiosqlite.Row) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "scene": row["scene"],
+        "scene_id": int(row["scene_id"]),
+        "creator": int(row["creator"]),
+        "content": row["content"],
+        "due_at": float(row["due_at"]),
+        "created_at": float(row["created_at"]),
+    }
 
 
 __all__ = ["MIGRATIONS", "SCHEMA_VERSION", "Storage"]

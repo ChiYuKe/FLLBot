@@ -18,13 +18,18 @@ from ..rules import (
 )
 from .base import HandlerKind, HandlerSpec, LoopSpec, Plugin
 from .context import Context
+from .settings import MASK, PluginSettings, SettingField, SettingsView
 
 __all__ = [
+    "MASK",
     "Context",
     "HandlerKind",
     "HandlerSpec",
     "LoopSpec",
     "Plugin",
+    "PluginSettings",
+    "SettingField",
+    "SettingsView",
     "all_rules",
     "any_rule",
     "command",

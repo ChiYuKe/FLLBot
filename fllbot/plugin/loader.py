@@ -139,6 +139,11 @@ class PluginLoader:
             self.bot.dispatcher.register(spec)
 
         try:
+            await plugin.settings.load(self.bot.storage)
+        except Exception:
+            self.logger.exception("插件 %s 的配置加载失败", plugin.name)
+
+        try:
             await plugin.on_load(self.bot)
         except Exception:
             self.logger.exception("插件 %s 的 on_load 失败", plugin.name)

@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import socket
 import sys
 from pathlib import Path
 from typing import Any
@@ -120,6 +121,16 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     store = ConfigStore(base)
     config = store.current
+
+    if not port_available(config.server.host, config.server.port):
+        print(
+            f"端口已被占用：{config.server.host}:{config.server.port}\n"
+            "可能是 NapCat 的端口，或已有一个 FLLBot 在运行。\n"
+            "换一个端口：fllbot run --port 6702",
+            file=sys.stderr,
+        )
+        return 2
+
     configure_logging(
         level=config.logging.level,
         log_dir=resolve_path(root, config.logging.dir),
@@ -263,6 +274,20 @@ def _find_example() -> Path | None:
         if candidate.is_file():
             return candidate
     return None
+
+
+def port_available(host: str, port: int) -> bool:
+    """尝试绑定端口，判断能否启动（被占用返回 False）。"""
+    if not port:
+        return False
+    host = host or "127.0.0.1"
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as sock:
+            sock.bind((host, int(port)))
+    except OSError:
+        return False
+    return True
 
 
 if __name__ == "__main__":  # pragma: no cover

@@ -65,17 +65,30 @@ class FakeConnection:
 
     def __init__(self, self_id: int = 10001) -> None:
         self.self_id = self_id
+        self.client_role = ""
+        self.client_name = ""
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.sent: list[tuple[str, int, list[MessageSegment]]] = []
         self._message_id = 1000
+        self._closed = False
 
     @property
     def online(self) -> bool:
-        return True
+        return not self._closed
 
     @property
     def closed(self) -> bool:
-        return False
+        return self._closed
+
+    @property
+    def label(self) -> str:
+        return str(self.self_id)
+
+    def summary(self) -> dict[str, Any]:
+        return {"self_id": self.self_id, "online": self.online}
+
+    async def close(self, code: int = 1000, reason: str = "") -> None:
+        self._closed = True
 
     async def send_group_msg(self, group_id: int, message: Any, **extra: Any) -> dict[str, Any]:
         segments = _as_list(message)
@@ -120,6 +133,12 @@ class FakeConnection:
     ) -> dict[str, Any]:
         self.calls.append(
             ("set_group_add_request", {"flag": flag, "sub_type": sub_type, "approve": approve, "reason": reason})
+        )
+        return {}
+
+    async def set_group_ban(self, group_id: int, user_id: int, duration: int = 600) -> dict[str, Any]:
+        self.calls.append(
+            ("set_group_ban", {"group_id": group_id, "user_id": user_id, "duration": duration})
         )
         return {}
 

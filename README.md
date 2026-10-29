@@ -21,11 +21,15 @@
 
 - **反向 WebSocket 服务端**：任意路径接入、Token 鉴权、多账号连接、心跳超时清理、`echo` 关联的 API 调用
 - **插件系统**：`plugins/*.py` 或 `plugins/<包>/__init__.py` 自动扫描、装饰器注册命令/消息/通知/请求、优先级与阻断、文件改动热重载、周期任务
+- **插件声明式配置**：`plugin.setting(...)` 声明 schema（bool/int/float/select/list/secret），支持全局值与按群覆盖，管理端可直接渲染成表单（`/api/plugins/{name}/settings`）
 - **权限**：超管、群主/管理员、私聊开关、群白名单/黑名单、按群启用或停用某个插件、每用户冷却
-- **持久化**：SQLite + `PRAGMA user_version` 迁移；插件 KV、群配置、插件状态、聊天历史、消息统计
+- **持久化**：SQLite + `PRAGMA user_version` 迁移；插件配置、群配置、插件状态、聊天历史、消息统计、定时提醒
 - **LLM 对话**：OpenAI 兼容接口，多轮上下文裁剪、人格文件（`personas/*.md`）、@ 或前缀触发、长回复分条、限流、按群切换人格
-- **管理 API**：状态/连接/插件/群/配置/日志/统计/人格、通用 OneBot 调用、KV 读写、SSE 实时事件流
-- **开箱内置插件**：`ping`、`echo`、`help`、`llm_chat`、`request_notify`（好友/入群请求审批）
+- **群治理**：入群欢迎/退群提示、违禁词（支持正则）、刷屏检测与自动撤回/禁言
+- **定时提醒**：`/remind 10m 喝水`，按会话持久化，断线后恢复继续触发
+- **管理 API**：状态/连接/插件/群/配置/日志/统计/人格/插件配置、通用 OneBot 调用、KV 读写、SSE 实时事件流
+- **可靠性**：事件短窗去重（防重连重放）、端口占用自检、处理器超时与异常隔离
+- **开箱内置插件**：`ping`、`echo`、`help`、`llm_chat`、`request_notify`、`group_guard`、`reminder`、`admin`
 
 ## 快速开始（Windows）
 
@@ -111,8 +115,20 @@ INFO  fllbot: FLLBot 0.1.0 已启动：WS /onebot/v11/ws | 插件 6 个 | LLM �
 | `/requests` | 待处理好友/入群请求 | 超管 |
 | `/approve <标记>` | 同意请求 | 超管 |
 | `/reject <标记> [理由]` | 拒绝请求 | 超管 |
+| `/guard` | 查看群治理配置 | 群管 |
+| `/welcome on\|off\|set <模板>` | 入群欢迎开关与文案 | 群管 |
+| `/badword add\|del\|list [词]` | 违禁词管理（`re:` 开头按正则） | 群管 |
+| `/remind 10m 喝水` | 定时提醒 | 所有人 |
+| `/remind list` / `/remind del <编号>` | 查看 / 删除提醒 | 所有人 |
+| `/status` | 运行状态（连接、插件、LLM、消息量） | 超管 |
+| `/reload <插件>` | 热重载插件 | 超管 |
+| `/plugin on\|off <插件>` | 全局启停插件 | 超管 |
+| `/group on\|off` | 启停本群的机器人 | 群管 |
 
 LLM 对话默认 **群里 @ 机器人** 或 **私聊直接说话** 触发；改成前缀触发：`llm.trigger = "prefix"` + `llm.trigger_prefix = "ai"`。
+
+> 群治理的欢迎语、违禁词、刷屏阈值都支持按群覆盖：群里用 `/welcome`、`/badword` 设置，
+> 或调用 `PATCH /api/plugins/group_guard/settings`（带 `group_id`）。
 
 ## 写插件
 
@@ -121,12 +137,19 @@ LLM 对话默认 **群里 @ 机器人** 或 **私聊直接说话** 触发；改�
 ```python
 from fllbot.plugin import Context, Plugin, keyword
 
-plugin = Plugin(name="welcome", version="0.1.0", description="入群欢迎")
+plugin = Plugin(name="welcome", version="0.2.0", description="入群欢迎")
+
+# 声明配置项：管理端会自动渲染成表单，也可以按群覆盖
+plugin.setting("text", type="text", label="欢迎语", default="欢迎 {nickname} 加入本群～", group_scoped=True)
+plugin.setting("enabled", type="bool", label="启用", default=True, group_scoped=True)
 
 
 @plugin.on_notice("group_increase")
 async def welcome(ctx: Context) -> None:
-    await ctx.reply(f"欢迎 {ctx.user_id} 加入本群～")
+    if not ctx.settings.get("enabled"):
+        return
+    text = ctx.settings.get("text").replace("{nickname}", str(ctx.user_id))
+    await ctx.reply(text)
 
 
 @plugin.on_command("card", aliases=("名片",))
@@ -147,7 +170,8 @@ async def morning(ctx: Context) -> None:
 
 - 模块里必须导出 `plugin = Plugin(...)` 实例（名字唯一）
 - 装饰器：`on_command` / `on_message` / `on_notice` / `on_request` / `on_meta_event` / `on_startup` / `on_shutdown` / `on_loop`
-- `ctx` 提供 `reply()` `finish()` `send()` `delete()` `get_member()`，以及 `db`（SQLite）、`llm`、`config`、`is_superuser`
+- `ctx` 提供 `reply()` `finish()` `send()` `delete()` `get_member()`，以及 `db`（SQLite）、`settings`（插件配置）、`llm`、`config`、`is_superuser`
+- 配置项用 `plugin.setting(...)` 声明，群里读取 `ctx.settings.get("key")` 会自动取本群覆盖值
 - 详细 API 见 [docs/plugin-api.md](docs/plugin-api.md)
 
 ## 管理 API
@@ -192,7 +216,7 @@ fllbot/
 ├── storage/            # SQLite + 迁移 + 仓储
 ├── llm/                # 客户端、人格、多轮对话
 ├── api/                # 管理 REST + SSE
-├── builtin_plugins/    # ping / echo / help / llm_chat / request_notify
+├── builtin_plugins/    # ping / echo / help / llm_chat / request_notify / group_guard / reminder / admin
 └── personas/           # 内置人格
 plugins/                # 用户插件（运行时加载，已 gitignore 之外）
 personas/               # 用户人格（同名覆盖内置）

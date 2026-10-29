@@ -9,6 +9,7 @@ from typing import Any, Literal
 
 from ..rules import Rule, evaluate
 from ..rules import command as command_rule
+from .settings import PluginSettings, SettingField
 
 HandlerKind = Literal["message", "notice", "request", "meta_event", "startup", "shutdown"]
 
@@ -101,6 +102,7 @@ class Plugin:
 
         self._handlers: list[HandlerSpec] = []
         self._loops: list[LoopSpec] = []
+        self._settings = PluginSettings(lambda: self.name)
         self.bot: Any = None
         self.module: Any = None
         self.path: Any = None
@@ -118,6 +120,40 @@ class Plugin:
     def loops(self) -> tuple[LoopSpec, ...]:
         return tuple(self._loops)
 
+    @property
+    def settings(self) -> PluginSettings:
+        return self._settings
+
+    def setting(
+        self,
+        key: str,
+        *,
+        type: str = "string",
+        label: str = "",
+        default: Any = None,
+        description: str = "",
+        options: tuple[Any, ...] | list[Any] = (),
+        min: float | None = None,
+        max: float | None = None,
+        secret: bool = False,
+        group_scoped: bool = False,
+    ) -> SettingField:
+        """声明一个可被管理端渲染与修改的配置项。"""
+        return self._settings.define(
+            SettingField(
+                key=key,
+                type=type,
+                label=label,
+                default=default,
+                description=description,
+                options=tuple(options),
+                minimum=min,
+                maximum=max,
+                secret=secret,
+                group_scoped=group_scoped,
+            )
+        )
+
     def metadata(self) -> dict[str, Any]:
         return {
             "name": self.name,
@@ -127,6 +163,8 @@ class Plugin:
             "enabled_by_default": self.enabled_by_default,
             "handlers": [spec.describe() for spec in self._handlers],
             "loops": [{"name": spec.name, "seconds": spec.seconds} for spec in self._loops],
+            "settings": self._settings.schema(),
+            "has_settings": bool(self._settings.fields),
             "path": str(self.path) if self.path else None,
         }
 

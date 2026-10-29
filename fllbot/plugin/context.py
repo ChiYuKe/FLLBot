@@ -59,7 +59,10 @@ class Context:
 
     @property
     def is_group(self) -> bool:
-        return isinstance(self.event, MessageEvent) and self.event.is_group
+        """群消息，或带群号的群通知/请求。"""
+        if isinstance(self.event, MessageEvent):
+            return self.event.is_group
+        return getattr(self.event, "group_id", None) is not None
 
     @property
     def is_private(self) -> bool:
@@ -121,6 +124,13 @@ class Context:
     @property
     def llm(self) -> Any:
         return self.bot.chat
+
+    @property
+    def settings(self) -> Any:
+        """当前插件的配置视图；群级字段自动读取本群覆盖值。"""
+        if self.plugin is None:
+            raise RuntimeError("当前上下文没有关联插件，无法读取配置")
+        return self.plugin.settings.view(self.group_id if self.is_group else None)
 
     @property
     def logger(self) -> logging.Logger:

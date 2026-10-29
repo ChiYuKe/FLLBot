@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -20,9 +21,9 @@ async def storage(tmp_path: Path):
 
 
 async def test_migration_creates_schema(storage: Storage) -> None:
-    assert await storage.schema_version() == 1
+    assert await storage.schema_version() == 2
     summary = await storage.summary()
-    assert summary["schema_version"] == 1
+    assert summary["schema_version"] == 2
     assert summary["messages"] == 0
 
 
@@ -101,3 +102,38 @@ async def test_reconnect_keeps_data(tmp_path: Path) -> None:
     await second.connect()
     assert await second.kv_get("demo", "k") == "v"
     await second.close()
+
+
+async def test_reminders(storage: Storage) -> None:
+    due_id = await storage.add_reminder(
+        scene="group", scene_id=20002, creator=30003, content="到点了", due_at=time.time() - 5
+    )
+    future_id = await storage.add_reminder(
+        scene="group", scene_id=20002, creator=30003, content="以后", due_at=time.time() + 3600
+    )
+    assert await storage.count_reminders("group", 20002) == 2
+
+    due = await storage.due_reminders()
+    assert [item["id"] for item in due] == [due_id]
+    assert due[0]["content"] == "到点了"
+
+    await storage.mark_reminder_fired(due_id)
+    assert await storage.due_reminders() == []
+    assert len(await storage.list_reminders("group", 20002)) == 1
+
+    assert await storage.delete_reminder(future_id, scene="group", scene_id=20002) is True
+    assert await storage.delete_reminder(future_id, scene="group", scene_id=20002) is False
+    assert await storage.list_reminders("group", 20002) == []
+
+
+async def test_reminder_scoped_to_scene(storage: Storage) -> None:
+    await storage.add_reminder(
+        scene="group", scene_id=20002, creator=1, content="群里的", due_at=time.time() + 60
+    )
+    await storage.add_reminder(
+        scene="private", scene_id=30003, creator=1, content="私聊的", due_at=time.time() + 60
+    )
+    group_rows = await storage.list_reminders("group", 20002)
+    private_rows = await storage.list_reminders("private", 30003)
+    assert [item["content"] for item in group_rows] == ["群里的"]
+    assert [item["content"] for item in private_rows] == ["私聊的"]

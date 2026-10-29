@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import TYPE_CHECKING, Any
@@ -23,6 +24,8 @@ class PermissionManager:
         self._plugin_state: dict[tuple[str, int], bool] = {}
         # (plugin, handler, user) -> 上次触发时间
         self._cooldowns: dict[tuple[str, str, int], float] = {}
+        # 首次登记群时防止并发重复插入
+        self._group_lock = asyncio.Lock()
 
     # -- 装载 ------------------------------------------------------------- #
     async def load(self) -> None:
@@ -70,15 +73,20 @@ class PermissionManager:
     async def ensure_group(self, group_id: int) -> dict[str, Any]:
         """登记一个群（首次见到时自动入库）。"""
         gid = int(group_id)
-        if gid in self._groups:
-            return self._groups[gid]
-        state = {
-            "enabled": bool(self.bot.config.permission.default_group_enabled),
-            "config": {},
-        }
-        await self.bot.storage.upsert_group(gid, enabled=state["enabled"], config={})
-        self._groups[gid] = state
-        return state
+        state = self._groups.get(gid)
+        if state is not None:
+            return state
+        async with self._group_lock:
+            state = self._groups.get(gid)
+            if state is not None:
+                return state
+            state = {
+                "enabled": bool(self.bot.config.permission.default_group_enabled),
+                "config": {},
+            }
+            await self.bot.storage.upsert_group(gid, enabled=state["enabled"], config={})
+            self._groups[gid] = state
+            return state
 
     async def set_group_enabled(self, group_id: int, enabled: bool) -> None:
         gid = int(group_id)

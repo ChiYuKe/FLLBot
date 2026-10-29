@@ -18,12 +18,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from . import __version__
 from .config import AppConfig, ConfigStore, mask_secrets, resolve_path
 from .dispatcher import Dispatcher
-from .events import EventHub
+from .events import DedupCache, EventHub
 from .llm.chat import ChatService
 from .llm.personas import PersonaStore
 from .logging_setup import configure_logging
 from .onebot.connection import OneBotConnection
-from .onebot.models import MessageEvent, MetaEvent, parse_event
+from .onebot.models import MessageEvent, MetaEvent, NoticeEvent, parse_event
 from .onebot.server import ConnectionManager, create_ws_router
 from .permission import PermissionManager
 from .plugin.loader import PluginLoader
@@ -41,6 +41,7 @@ class FLLBot:
         config = config_store.current
         self.storage = Storage(resolve_path(self.root, config.storage.path))
         self.hub = EventHub()
+        self._dedupe = DedupCache(size=1024, ttl=180.0)
         self.permissions = PermissionManager(self)
         self.dispatcher = Dispatcher(self)
         self.personas = PersonaStore(
@@ -159,6 +160,11 @@ class FLLBot:
             event = parse_event(payload)
         except Exception:
             self.logger.exception("事件解析失败")
+            return
+
+        dedupe_key = _dedupe_key(event)
+        if dedupe_key and self._dedupe.seen(dedupe_key):
+            self.logger.debug("忽略重复事件：%s", dedupe_key)
             return
 
         if isinstance(event, MetaEvent):
@@ -283,6 +289,18 @@ def create_app(bot: FLLBot) -> FastAPI:
 
 def _iso(timestamp: float) -> str:
     return datetime.fromtimestamp(timestamp).astimezone().isoformat(timespec="seconds")
+
+
+def _dedupe_key(event: Any) -> str | None:
+    """同一条消息 / 通知在重连后被重放时用于去重。"""
+    if isinstance(event, MessageEvent) and event.message_id:
+        return f"message:{event.self_id}:{event.message_id}"
+    if isinstance(event, NoticeEvent) and event.notice_type:
+        return (
+            f"notice:{event.self_id}:{event.notice_type}:{event.sub_type}:"
+            f"{event.group_id}:{event.user_id}:{event.time}"
+        )
+    return None
 
 
 __all__ = ["FLLBot", "create_app"]

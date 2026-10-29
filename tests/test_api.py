@@ -57,6 +57,50 @@ def test_plugin_toggle_and_reload(tmp_path: Path) -> None:
         assert missing.status_code == 404
 
 
+def test_plugin_settings_endpoints(tmp_path: Path) -> None:
+    bot = build_bot(tmp_path, builtin=True)
+    with TestClient(create_app(bot)) as client:
+        detail = client.get("/api/plugins/group_guard/settings", headers=AUTH)
+        assert detail.status_code == 200
+        keys = {item["key"] for item in detail.json()["schema"]}
+        assert {"welcome_enabled", "badwords", "spam_limit"} <= keys
+
+        patched = client.patch(
+            "/api/plugins/group_guard/settings",
+            headers=AUTH,
+            json={"values": {"welcome_enabled": False, "badwords": ["广告"], "spam_limit": 9}},
+        )
+        assert patched.status_code == 200
+        assert patched.json()["values"]["welcome_enabled"] is False
+        assert patched.json()["values"]["badwords"] == ["广告"]
+
+        override = client.patch(
+            "/api/plugins/group_guard/settings",
+            headers=AUTH,
+            json={"group_id": 20002, "values": {"welcome_template": "本群专属欢迎"}},
+        )
+        assert override.status_code == 200
+        grouped = client.get("/api/plugins/group_guard/settings?group_id=20002", headers=AUTH).json()
+        assert grouped["values"]["welcome_template"] == "本群专属欢迎"
+
+        global_values = client.get("/api/plugins/group_guard/settings", headers=AUTH).json()
+        assert global_values["values"]["welcome_template"] != "本群专属欢迎"
+
+        assert (
+            client.patch(
+                "/api/plugins/group_guard/settings", headers=AUTH, json={"values": {"spam_limit": 999}}
+            ).status_code
+            == 400
+        )
+        assert (
+            client.patch(
+                "/api/plugins/group_guard/settings", headers=AUTH, json={"values": {"nope": 1}}
+            ).status_code
+            == 400
+        )
+        assert client.get("/api/plugins/nope/settings", headers=AUTH).status_code == 404
+
+
 def test_config_patch(tmp_path: Path) -> None:
     bot = build_bot(tmp_path, builtin=False)
     with TestClient(create_app(bot)) as client:

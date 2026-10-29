@@ -122,6 +122,41 @@ def create_api_router(bot: FLLBot) -> APIRouter:
         await bot.permissions.set_plugin_enabled(name, payload.enabled, payload.group_id)
         return {"ok": True, "name": name, "enabled": payload.enabled, "group_id": payload.group_id}
 
+    @protected.get("/plugins/{name}/settings", summary="插件配置（schema + 当前值）")
+    async def get_plugin_settings(name: str, group_id: int | None = None) -> dict[str, Any]:
+        plugin = bot.plugins.get(name)
+        if plugin is None:
+            raise HTTPException(404, f"插件不存在: {name}")
+        return {
+            "name": name,
+            "group_id": group_id,
+            "schema": plugin.settings.schema(),
+            "values": plugin.settings.values_for_api(group_id),
+        }
+
+    @protected.patch("/plugins/{name}/settings", summary="修改插件配置")
+    async def patch_plugin_settings(name: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        plugin = bot.plugins.get(name)
+        if plugin is None:
+            raise HTTPException(404, f"插件不存在: {name}")
+        group_id = payload.get("group_id")
+        values = payload.get("values")
+        if not isinstance(values, dict):
+            values = {key: value for key, value in payload.items() if key != "group_id"}
+        if not values:
+            raise HTTPException(400, "缺少要修改的配置项")
+        try:
+            effective = await plugin.settings.update(values, int(group_id) if group_id is not None else None)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {
+            "ok": True,
+            "name": name,
+            "group_id": group_id,
+            "values": plugin.settings.values_for_api(int(group_id) if group_id is not None else None),
+            "effective": effective,
+        }
+
     # -- 群 --------------------------------------------------------------- #
     @protected.get("/groups", summary="已知群列表与开关状态")
     async def list_groups() -> list[dict[str, Any]]:

@@ -112,6 +112,53 @@ async def cleanup(bot) -> None:
 
 卸载插件时会自动取消任务。
 
+## 声明式配置
+
+插件可以声明自己的配置项，管理端（含你的桌面端）能用 `/api/plugins/{name}/settings`
+拿到 schema 并直接渲染表单，不需要为每个插件写界面。
+
+```python
+plugin = Plugin(name="welcome", description="入群欢迎")
+
+plugin.setting("enabled", type="bool", label="启用欢迎", default=True, group_scoped=True)
+plugin.setting("text", type="text", label="欢迎语", default="欢迎 {nickname} 加入～", group_scoped=True)
+plugin.setting("max_len", type="int", label="最长字数", default=100, min=10, max=1000)
+plugin.setting("mode", type="select", label="模式", default="all", options=["all", "admin"])
+plugin.setting("keywords", type="list", label="关键词", default=[])
+```
+
+字段参数：
+
+| 参数 | 说明 |
+| --- | --- |
+| `key` | 配置键，读写时使用 |
+| `type` | `bool` / `int` / `float` / `string` / `text` / `select` / `multiselect` / `list` |
+| `label` | 表单里显示的标题 |
+| `default` | 默认值 |
+| `description` | 帮助文字 |
+| `options` | `select` / `multiselect` 的可选值 |
+| `min` / `max` | 数值范围（越界会拒绝写入） |
+| `secret` | 标记为敏感值，管理 API 返回值会打码 |
+| `group_scoped` | 允许按群覆盖 |
+
+读取（自动应用本群覆盖）：
+
+```python
+enabled = ctx.settings.get("enabled")
+text = ctx.settings.get("text")
+全部 = ctx.settings.all()
+```
+
+写入（群级字段写到当前群，其他写全局）：
+
+```python
+await ctx.settings.set("enabled", False)
+await ctx.settings.set("keywords", ["广告", "re:加\\s*群"])
+```
+
+> 写入会做类型校验，非法值抛 `ValueError` 且不落库；批量更新用
+> `plugin.settings.update({...}, group_id)`，任一字段非法则整体不生效。
+
 ## Context
 
 | 成员 | 说明 |
@@ -121,6 +168,7 @@ async def cleanup(bot) -> None:
 | `ctx.bot` | FLLBot 实例 |
 | `ctx.config` | 当前生效配置（`AppConfig`） |
 | `ctx.db` | `Storage`，见下文 |
+| `ctx.settings` | 当前插件的配置视图（`get` / `set` / `all`），群级字段自动取本群值 |
 | `ctx.llm` | `ChatService` |
 | `ctx.self_id` / `ctx.user_id` / `ctx.group_id` / `ctx.message_id` | 常用标识 |
 | `ctx.is_group` / `ctx.is_private` / `ctx.to_me` | 场景判断 |
@@ -198,6 +246,13 @@ await ctx.db.upsert_group(123, enabled=True, config={"llm": {"persona": "concise
 groups = await ctx.db.list_group_states()
 
 await ctx.db.daily_message_counts(days=7)
+
+# 定时提醒（reminder 插件用的就是这套）
+await ctx.db.add_reminder(scene="group", scene_id=123, creator=456, content="喝水", due_at=ts)
+await ctx.db.due_reminders()
+await ctx.db.mark_reminder_fired(1)
+await ctx.db.list_reminders("group", 123)
+await ctx.db.delete_reminder(1, scene="group", scene_id=123)
 ```
 
 `kv` 也可以从管理 API 读写：`GET /api/kv/demo`、`PUT /api/kv/demo/count`。
