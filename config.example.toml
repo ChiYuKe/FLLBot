@@ -1,0 +1,98 @@
+# FLLBot 配置示例。复制为 config.toml 后按需修改：
+#   Copy-Item config.example.toml config.toml
+# 所有键都可以用环境变量覆盖，规则：FLLBOT_ + 段落 + __ + 键名（全大写），
+# 例如 FLLBOT_SERVER__PORT=6702、FLLBOT_LLM__API_KEY=sk-xxx。
+
+[server]
+# 监听地址。NapCat 与本程序在同一台机器时保持 127.0.0.1 即可。
+host = "127.0.0.1"
+port = 6701
+# 反向 WebSocket 路径。NapCat 侧填 ws://127.0.0.1:6701/onebot/v11/ws
+# 为兼容性，程序实际接受任意路径的 WS 连接。
+ws_path = "/onebot/v11/ws"
+# 留空表示不校验。强烈建议非回环地址部署时设置，并与 NapCat 的 Token 保持一致。
+access_token = ""
+# 超过该秒数没有收到心跳/事件则判定连接失联。
+heartbeat_timeout = 120.0
+# 单次 OneBot API 调用等待响应的秒数。
+call_timeout = 30.0
+# 管理面板前端跨域来源；本机自用可保留 ["*"]。
+cors_origins = ["*"]
+
+[admin]
+enabled = true
+# 留空则启动时自动生成，并写入 data/admin_token.txt。
+token = ""
+token_file = "data/admin_token.txt"
+
+[bot]
+# 超级管理员 QQ 号，拥有最高权限。
+superusers = []
+# 命令前缀，可配置多个；加入 "" 表示允许无前缀裸命令。
+command_prefix = ["/"]
+# 被 @ 时允许省略前缀（@机器人 ping 等价于 /ping）。
+allow_bare_command = true
+# 插件抛出异常时回给用户的话；留空则静默失败（只写日志）。
+error_reply = ""
+
+[permission]
+# 非空时只处理这些群（白名单），留空表示不限制。
+allow_groups = []
+# 这些群一律忽略（黑名单）。
+deny_groups = []
+# 未在数据库中登记过的群默认是否启用。
+default_group_enabled = true
+# 群主/管理员是否被视为高权限用户。
+group_admin_permission = true
+# 是否允许私聊触发命令。
+allow_private = true
+
+[plugin]
+# 用户插件目录，相对路径基于项目根目录。
+dirs = ["plugins"]
+# 是否加载内置插件（ping / echo / help / llm_chat）。
+builtin = true
+# 检测插件文件改动并自动重载。
+hot_reload = true
+watch_interval = 2.0
+# 全局并发处理上限，防止刷屏把进程打满。
+max_concurrency = 8
+# 单个处理器超时秒数。
+handler_timeout = 60.0
+
+[storage]
+path = "data/fllbot.db"
+
+[logging]
+level = "INFO"
+dir = "logs"
+json_lines = true
+file = "fllbot.log"
+# 保留在内存里的日志条数，供 /api/logs 查询。
+ring_size = 500
+
+[llm]
+enabled = false
+# OpenAI 兼容接口。DeepSeek: https://api.deepseek.com  /v1 可选
+base_url = "https://api.deepseek.com"
+api_key = ""
+model = "deepseek-chat"
+timeout = 60.0
+max_tokens = 800
+temperature = 0.8
+# 上下文预算：最多带多少条历史、多少字符。
+max_context_messages = 16
+max_context_chars = 4000
+enable_private = true
+enable_group = true
+# 群聊触发方式：at（@机器人）| prefix（以 trigger_prefix 开头）| always
+trigger = "at"
+trigger_prefix = "ai"
+# 默认人格，对应 personas/ 目录下的文件名（不含 .md）。
+persona = "fllbot"
+# 超长回复按该长度分条发送。
+chunk_size = 500
+# 同一用户两次对话的最小间隔（秒）。
+cooldown_seconds = 3.0
+# 追加到系统提示词末尾的额外内容。
+system_extra = ""
