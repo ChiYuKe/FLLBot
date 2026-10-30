@@ -8,12 +8,17 @@ from typing import Any
 
 import httpx
 import pytest
+from fastapi.testclient import TestClient
 
+from fllbot.app import create_app
+from fllbot.config import LLMConfig
 from fllbot.llm.chat import split_text
 from fllbot.llm.client import LLMClient
 from fllbot.onebot.models import parse_event
 from fllbot.plugin.context import Context
-from helpers import FakeConnection, group_message, make_bot
+from helpers import FakeConnection, build_bot, group_message, make_bot
+
+AUTH = {"Authorization": "Bearer admin-token"}
 
 LLM_CONFIG = {
     "enabled": True,
@@ -156,3 +161,99 @@ def test_endpoint_normalization() -> None:
     assert LLMClient.endpoint("https://api.deepseek.com") == "https://api.deepseek.com/v1/chat/completions"
     assert LLMClient.endpoint("https://api.openai.com/v1") == "https://api.openai.com/v1/chat/completions"
     assert LLMClient.endpoint("http://x/chat/completions") == "http://x/chat/completions"
+
+
+def test_legacy_config_maps_to_default_provider() -> None:
+    config = LLMConfig.model_validate({"enabled": True, "api_key": "k", "model": "m1", "base_url": "http://x"})
+    assert config.provider_names() == ["default"]
+    name, provider = config.resolve()
+    assert name == "default"
+    assert provider.model == "m1"
+    assert provider.api_key == "k"
+    assert provider.base_url == "http://x"
+
+
+def test_provider_routing_and_inheritance() -> None:
+    config = LLMConfig.model_validate(
+        {
+            "enabled": True,
+            "api_key": "legacy-key",
+            "model": "legacy-model",
+            "default": "deepseek",
+            "providers": {
+                "deepseek": {"base_url": "http://a", "model": "chat", "api_key_env": "DEEPSEEK_KEY"},
+                "local": {"base_url": "http://b", "model": "qwen", "api_key": "local-key"},
+            },
+            "routes": {"summary": "local", "group": "local"},
+        }
+    )
+    assert config.route(task="summary") == "local"
+    assert config.route(scene="group") == "local"
+    assert config.route(scene="private") == "deepseek"
+
+    name, provider = config.resolve("deepseek")
+    assert name == "deepseek"
+    assert provider.model == "chat"
+    assert provider.api_key == "legacy-key"  # 未单独配置时继承 [llm]
+    assert provider.api_key_env == "DEEPSEEK_KEY"
+
+    # 名字不存在时退回第一个 provider
+    name, provider = config.resolve("missing")
+    assert name == "deepseek"
+
+
+def test_providers_status(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = LLMConfig.model_validate(
+        {
+            "enabled": True,
+            "default": "a",
+            "providers": {
+                "a": {"base_url": "http://a", "model": "m-a", "api_key": "key-a"},
+                "b": {"base_url": "http://b", "model": "m-b", "api_key_env": "FLLBOT_TEST_LLM_KEY"},
+            },
+        }
+    )
+    client = LLMClient(lambda: config)
+    status = {item["name"]: item for item in client.providers_status()}
+    assert status["a"]["configured"] is True
+    assert status["a"]["is_default"] is True
+
+    monkeypatch.delenv("FLLBOT_TEST_LLM_KEY", raising=False)
+    status = {item["name"]: item for item in client.providers_status()}
+    assert status["b"]["configured"] is False
+
+    monkeypatch.setenv("FLLBOT_TEST_LLM_KEY", "env-key")
+    status = {item["name"]: item for item in client.providers_status()}
+    assert status["b"]["configured"] is True
+
+
+async def test_usage_is_recorded(llm_bot) -> None:
+    captured: list[dict[str, Any]] = []
+    patch_client(llm_bot, make_transport("用量测试", captured))
+    conn = FakeConnection()
+    ctx = Context(bot=llm_bot, connection=conn, event=parse_event(group_message("hi", at=10001)))  # type: ignore[arg-type]
+    await llm_bot.chat.respond(ctx, "hi")
+
+    summary = await llm_bot.storage.llm_usage_summary(0)
+    assert summary["requests"] == 1
+    assert summary["total_tokens"] == 15
+    assert summary["by_model"][0]["model"] == "test-model"
+
+
+def test_usage_api_endpoint(tmp_path: Path) -> None:
+    bot = build_bot(tmp_path, builtin=False, llm=LLM_CONFIG)
+    with TestClient(create_app(bot)) as client:
+        http = httpx.AsyncClient(transport=make_transport("ok", []))
+        bot.chat.client = LLMClient(lambda: bot.config.llm, http_client=http)
+
+        providers = client.get("/api/llm/providers", headers=AUTH).json()
+        assert providers[0]["name"] == "default"
+
+        response = client.post("/api/llm/test", headers=AUTH, json={"prompt": "hi"})
+        assert response.status_code == 200
+        assert response.json()["usage"]["total_tokens"] == 15
+
+        usage = client.get("/api/llm/usage?range=all", headers=AUTH).json()
+        assert usage["requests"] == 1
+        assert usage["total_tokens"] == 15
+        assert usage["by_model"][0]["model"] == "test-model"

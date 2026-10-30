@@ -92,6 +92,21 @@ class LoggingConfig(BaseModel):
     ring_size: int = 500
 
 
+class LLMProviderConfig(BaseModel):
+    """单个模型提供方（OpenAI 兼容协议）。留空的字段继承 ``[llm]`` 里的默认值。"""
+
+    base_url: str = ""
+    api_key: str = ""
+    api_key_env: str = ""
+    model: str = ""
+    timeout: float | None = None
+    max_tokens: int | None = None
+    temperature: float | None = None
+    no_stream: bool = False
+    input_price: float = 0.0
+    output_price: float = 0.0
+
+
 class LLMConfig(BaseModel):
     """大模型对话配置（OpenAI 兼容接口）。"""
 
@@ -112,6 +127,45 @@ class LLMConfig(BaseModel):
     chunk_size: int = 500
     cooldown_seconds: float = 3.0
     system_extra: str = ""
+    default: str = "default"
+    providers: dict[str, LLMProviderConfig] = Field(default_factory=dict)
+    routes: dict[str, str] = Field(default_factory=dict)
+
+    def provider_names(self) -> list[str]:
+        return list(self.providers) or ["default"]
+
+    def resolve(self, name: str | None = None) -> tuple[str, LLMProviderConfig]:
+        """返回 ``(provider 名, 合并默认值后的配置)``。"""
+        requested = (name or self.default or "default").strip() or "default"
+        raw = self.providers.get(requested)
+        if raw is None:
+            # 名字不存在时退回第一个已配置的 provider，兼容旧配置或手误。
+            if self.providers:
+                requested = next(iter(self.providers))
+                raw = self.providers[requested]
+            else:
+                raw = LLMProviderConfig()
+        return requested, LLMProviderConfig(
+            base_url=raw.base_url or self.base_url,
+            api_key=raw.api_key or self.api_key,
+            api_key_env=raw.api_key_env,
+            model=raw.model or self.model,
+            timeout=raw.timeout if raw.timeout is not None else self.timeout,
+            max_tokens=raw.max_tokens if raw.max_tokens is not None else self.max_tokens,
+            temperature=raw.temperature if raw.temperature is not None else self.temperature,
+            no_stream=raw.no_stream,
+            input_price=raw.input_price,
+            output_price=raw.output_price,
+        )
+
+    def route(self, *, scene: str | None = None, task: str | None = None) -> str:
+        """按任务 / 场景路由到 provider 名，最后退回 ``default``。"""
+        for key in (task, scene):
+            if key:
+                target = self.routes.get(key)
+                if target:
+                    return target
+        return self.default or "default"
 
 
 class AppConfig(BaseModel):
@@ -256,6 +310,8 @@ def mask_secrets(config: AppConfig) -> dict[str, Any]:
     """导出配置用于 API 展示，隐藏密钥。"""
     data = config.model_dump()
     data["llm"]["api_key"] = _mask(config.llm.api_key)
+    for provider in data["llm"].get("providers", {}).values():
+        provider["api_key"] = _mask(provider.get("api_key", ""))
     data["admin"]["token"] = _mask(config.admin.token)
     data["server"]["access_token"] = _mask(config.server.access_token)
     return data

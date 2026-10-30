@@ -96,3 +96,25 @@ chunk_size = 500
 cooldown_seconds = 3.0
 # 追加到系统提示词末尾的额外内容。
 system_extra = ""
+
+# ---- 多 provider（可选） --------------------------------------------------
+# 不写 [llm.providers] 时，上面的 base_url / api_key / model 就是唯一的 provider（名为 default）。
+# default 指定默认 provider；routes 按任务/场景覆盖。
+# default = "deepseek"
+#
+# [llm.providers.deepseek]
+# base_url = "https://api.deepseek.com"
+# api_key_env = "DEEPSEEK_API_KEY"   # 与 api_key 二选一，优先读环境变量
+# model = "deepseek-chat"
+# input_price = 0.27                 # 元/百万 token，用于费用估算
+# output_price = 1.10
+#
+# [llm.providers.local]
+# base_url = "http://127.0.0.1:11434/v1"
+# model = "qwen2.5:7b"
+# no_stream = true                   # 本地模型可关流式
+#
+# [llm.routes]
+# group = "deepseek"
+# private = "deepseek"
+# summary = "local"                  # 以后摘要任务用便宜模型

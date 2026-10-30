@@ -10,7 +10,7 @@ from typing import Any
 
 import aiosqlite
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MIGRATIONS: dict[int, list[str]] = {
     1: [
@@ -86,6 +86,25 @@ MIGRATIONS: dict[int, list[str]] = {
         """,
         "CREATE INDEX IF NOT EXISTS idx_reminders_due ON reminders (fired, due_at)",
         "CREATE INDEX IF NOT EXISTS idx_reminders_scene ON reminders (scene, scene_id, fired)",
+    ],
+    3: [
+        """
+        CREATE TABLE IF NOT EXISTS llm_usage (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            scene             TEXT NOT NULL DEFAULT '',
+            scene_id          INTEGER NOT NULL DEFAULT 0,
+            provider          TEXT NOT NULL DEFAULT '',
+            model             TEXT NOT NULL DEFAULT '',
+            prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            latency_ms        REAL NOT NULL DEFAULT 0,
+            cost              REAL NOT NULL DEFAULT 0,
+            ok                INTEGER NOT NULL DEFAULT 1,
+            error             TEXT NOT NULL DEFAULT '',
+            created_at        REAL NOT NULL
+        )
+        """,
+        "CREATE INDEX IF NOT EXISTS idx_llm_usage_time ON llm_usage (created_at DESC)",
     ],
 }
 
@@ -292,6 +311,86 @@ class Storage:
         cursor = await self.db.execute(
             "DELETE FROM chat_messages WHERE scene = ? AND scene_id = ?", (scene, int(scene_id))
         )
+        await self.db.commit()
+        return cursor.rowcount or 0
+
+    # -- LLM 用量 --------------------------------------------------------- #
+    async def record_llm_usage(
+        self,
+        *,
+        scene: str,
+        scene_id: int,
+        provider: str,
+        model: str,
+        prompt_tokens: int,
+        completion_tokens: int,
+        latency_ms: float,
+        cost: float = 0.0,
+        ok: bool = True,
+        error: str = "",
+    ) -> None:
+        await self.db.execute(
+            "INSERT INTO llm_usage (scene, scene_id, provider, model, prompt_tokens, completion_tokens,"
+            " latency_ms, cost, ok, error, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                scene,
+                int(scene_id),
+                provider,
+                model,
+                int(prompt_tokens),
+                int(completion_tokens),
+                float(latency_ms),
+                float(cost),
+                1 if ok else 0,
+                error[:500],
+                time.time(),
+            ),
+        )
+        await self.db.commit()
+
+    async def llm_usage_summary(self, since: float) -> dict[str, Any]:
+        """聚合某时间点之后的调用次数、token、延迟与费用。"""
+        cursor = await self.db.execute(
+            "SELECT COUNT(*) AS requests, COALESCE(SUM(ok), 0) AS ok_count,"
+            " COALESCE(SUM(prompt_tokens), 0) AS prompt_tokens,"
+            " COALESCE(SUM(completion_tokens), 0) AS completion_tokens,"
+            " COALESCE(AVG(latency_ms), 0) AS avg_latency, COALESCE(SUM(cost), 0) AS cost"
+            " FROM llm_usage WHERE created_at >= ?",
+            (float(since),),
+        )
+        row = await cursor.fetchone()
+        cursor = await self.db.execute(
+            "SELECT model, provider, COUNT(*) AS requests,"
+            " COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS tokens"
+            " FROM llm_usage WHERE created_at >= ? GROUP BY model, provider ORDER BY requests DESC LIMIT 10",
+            (float(since),),
+        )
+        by_model = [
+            {
+                "model": item["model"],
+                "provider": item["provider"],
+                "requests": int(item["requests"]),
+                "tokens": int(item["tokens"]),
+            }
+            for item in await cursor.fetchall()
+        ]
+        requests = int(row["requests"] if row else 0)
+        ok_count = int(row["ok_count"] if row else 0)
+        prompt = int(row["prompt_tokens"] if row else 0)
+        completion = int(row["completion_tokens"] if row else 0)
+        return {
+            "requests": requests,
+            "failures": max(0, requests - ok_count),
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": prompt + completion,
+            "avg_latency_ms": round(float(row["avg_latency"] if row else 0), 1),
+            "cost": round(float(row["cost"] if row else 0), 6),
+            "by_model": by_model,
+        }
+
+    async def clear_llm_usage(self) -> int:
+        cursor = await self.db.execute("DELETE FROM llm_usage")
         await self.db.commit()
         return cursor.rowcount or 0
 

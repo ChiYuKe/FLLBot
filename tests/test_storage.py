@@ -21,10 +21,55 @@ async def storage(tmp_path: Path):
 
 
 async def test_migration_creates_schema(storage: Storage) -> None:
-    assert await storage.schema_version() == 2
+    assert await storage.schema_version() == 3
     summary = await storage.summary()
-    assert summary["schema_version"] == 2
+    assert summary["schema_version"] == 3
     assert summary["messages"] == 0
+
+
+async def test_llm_usage_roundtrip(storage: Storage) -> None:
+    await storage.record_llm_usage(
+        scene="group",
+        scene_id=20002,
+        provider="deepseek",
+        model="deepseek-chat",
+        prompt_tokens=120,
+        completion_tokens=30,
+        latency_ms=800.0,
+        cost=0.0001,
+        ok=True,
+    )
+    await storage.record_llm_usage(
+        scene="private",
+        scene_id=1,
+        provider="deepseek",
+        model="deepseek-chat",
+        prompt_tokens=0,
+        completion_tokens=0,
+        latency_ms=200.0,
+        ok=False,
+        error="timeout",
+    )
+
+    summary = await storage.llm_usage_summary(0)
+    assert summary["requests"] == 2
+    assert summary["failures"] == 1
+    assert summary["prompt_tokens"] == 120
+    assert summary["completion_tokens"] == 30
+    assert summary["total_tokens"] == 150
+    assert summary["by_model"][0]["model"] == "deepseek-chat"
+    assert summary["by_model"][0]["requests"] == 2
+
+    assert await storage.llm_usage_summary(time.time() + 60) == {
+        "requests": 0,
+        "failures": 0,
+        "prompt_tokens": 0,
+        "completion_tokens": 0,
+        "total_tokens": 0,
+        "avg_latency_ms": 0.0,
+        "cost": 0.0,
+        "by_model": [],
+    }
 
 
 async def test_kv_roundtrip(storage: Storage) -> None:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -26,12 +26,16 @@ class ChatReply:
     persona: str
     model: str
     latency_ms: float = 0.0
+    provider: str = ""
+    usage: dict[str, int] = field(default_factory=dict)
 
     def summary(self) -> dict[str, Any]:
         return {
             "text": self.text,
             "persona": self.persona,
             "model": self.model,
+            "provider": self.provider,
+            "usage": dict(self.usage),
             "latency_ms": round(self.latency_ms, 1),
         }
 
@@ -61,7 +65,9 @@ class ChatService:
     @property
     def available(self) -> bool:
         config = self.config
-        return bool(config.enabled and config.api_key)
+        if not config.enabled:
+            return False
+        return any(item["configured"] for item in self.client.providers_status())
 
     def scene_enabled(self, scene: str, scene_id: int) -> bool:
         config = self.config
@@ -83,11 +89,14 @@ class ChatService:
 
     def status(self) -> dict[str, Any]:
         config = self.config
+        name, provider = config.resolve(config.route())
         return {
             "enabled": bool(config.enabled),
             "available": self.available,
-            "model": config.model,
-            "base_url": config.base_url,
+            "model": provider.model,
+            "base_url": provider.base_url,
+            "provider": name,
+            "providers": self.client.providers_status(),
             "trigger": config.trigger,
             "persona": config.persona,
             "requests": self.requests,
@@ -168,22 +177,86 @@ class ChatService:
         return [system, *selected, user]
 
     # -- 调用 ------------------------------------------------------------- #
-    async def complete(self, messages: list[dict[str, str]], *, max_tokens: int | None = None) -> ChatReply:
+    async def complete(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        max_tokens: int | None = None,
+        provider: str | None = None,
+        scene: str | None = None,
+        scene_id: int = 0,
+    ) -> ChatReply:
         started = time.perf_counter()
         self.requests += 1
+        name = provider or self.config.route(scene=scene)
         try:
-            text = await self.client.chat(messages, max_tokens=max_tokens)
+            result = await self.client.chat_result(messages, max_tokens=max_tokens, provider=name)
         except LLMError as exc:
             self.failures += 1
             self.last_error = str(exc)
             self.logger.warning("模型调用失败: %s", exc)
+            await self._record_usage(
+                scene or "",
+                scene_id,
+                name,
+                "",
+                {},
+                (time.perf_counter() - started) * 1000,
+                ok=False,
+                error=str(exc),
+            )
             raise
         latency = (time.perf_counter() - started) * 1000
         self.last_latency_ms = latency
         self.last_error = None
-        return ChatReply(text=text, persona="", model=self.config.model, latency_ms=latency)
+        await self._record_usage(scene or "", scene_id, result.provider, result.model, result.usage, latency, ok=True)
+        return ChatReply(
+            text=result.text,
+            persona="",
+            model=result.model,
+            latency_ms=latency,
+            provider=result.provider,
+            usage=result.usage,
+        )
 
-    async def test(self, prompt: str, *, persona_name: str | None = None) -> ChatReply:
+    def _cost(self, provider: str, usage: dict[str, int]) -> float:
+        try:
+            _, config = self.config.resolve(provider)
+        except KeyError:  # pragma: no cover - resolve 已兜底
+            return 0.0
+        prompt = int(usage.get("prompt_tokens", 0))
+        completion = int(usage.get("completion_tokens", 0))
+        return (prompt * config.input_price + completion * config.output_price) / 1_000_000
+
+    async def _record_usage(
+        self,
+        scene: str,
+        scene_id: int,
+        provider: str,
+        model: str,
+        usage: dict[str, int],
+        latency_ms: float,
+        *,
+        ok: bool,
+        error: str = "",
+    ) -> None:
+        try:
+            await self.bot.storage.record_llm_usage(
+                scene=scene,
+                scene_id=scene_id,
+                provider=provider,
+                model=model,
+                prompt_tokens=int(usage.get("prompt_tokens", 0)),
+                completion_tokens=int(usage.get("completion_tokens", 0)),
+                latency_ms=latency_ms,
+                cost=self._cost(provider, usage) if ok else 0.0,
+                ok=ok,
+                error=error,
+            )
+        except Exception:  # pragma: no cover - 统计失败不影响对话
+            self.logger.exception("记录 LLM 用量失败")
+
+    async def test(self, prompt: str, *, persona_name: str | None = None, provider: str | None = None) -> ChatReply:
         """管理端自测：不带历史，直接用默认人格回答。"""
         config = self.config
         system = {
@@ -194,7 +267,12 @@ class ChatService:
         self.requests += 1
         started = time.perf_counter()
         try:
-            text = await self.client.chat(messages, max_tokens=config.max_tokens)
+            result = await self.client.chat_result(
+                messages,
+                max_tokens=config.max_tokens,
+                provider=provider,
+                task="chat",
+            )
         except LLMError as exc:
             self.failures += 1
             self.last_error = str(exc)
@@ -202,11 +280,14 @@ class ChatService:
         latency = (time.perf_counter() - started) * 1000
         self.last_latency_ms = latency
         self.last_error = None
+        await self._record_usage("test", 0, result.provider, result.model, result.usage, latency, ok=True)
         return ChatReply(
-            text=text,
+            text=result.text,
             persona=persona_name or config.persona,
-            model=config.model,
+            model=result.model,
             latency_ms=latency,
+            provider=result.provider,
+            usage=result.usage,
         )
 
     # -- QQ 对话 ---------------------------------------------------------- #
@@ -239,7 +320,7 @@ class ChatService:
         async with lock:
             try:
                 messages = await self.build_messages(scene, scene_id, content, persona_name=persona, ctx=ctx)
-                reply = await self.complete(messages, max_tokens=config.max_tokens)
+                reply = await self.complete(messages, max_tokens=config.max_tokens, scene=scene, scene_id=scene_id)
             except LLMError:
                 return None
 

@@ -35,6 +35,7 @@ class GroupToggle(BaseModel):
 class LLMTestRequest(BaseModel):
     prompt: str
     persona: str | None = None
+    provider: str | None = None
 
 
 class LLMChatRequest(BaseModel):
@@ -44,6 +45,7 @@ class LLMChatRequest(BaseModel):
     persona: str | None = None
     include_history: bool = True
     save: bool = False
+    provider: str | None = None
 
 
 class ActionRequest(BaseModel):
@@ -246,7 +248,7 @@ def create_api_router(bot: FLLBot) -> APIRouter:
         if not bot.chat.available:
             raise HTTPException(400, "尚未启用 LLM 或未配置 API Key")
         try:
-            reply = await bot.chat.test(payload.prompt, persona_name=payload.persona)
+            reply = await bot.chat.test(payload.prompt, persona_name=payload.persona, provider=payload.provider)
         except LLMError as exc:
             raise HTTPException(502, str(exc)) from exc
         return reply.summary()
@@ -264,13 +266,44 @@ def create_api_router(bot: FLLBot) -> APIRouter:
             include_history=payload.include_history,
         )
         try:
-            reply = await bot.chat.complete(messages)
+            reply = await bot.chat.complete(
+                messages,
+                provider=payload.provider,
+                scene=scene,
+                scene_id=payload.scene_id,
+            )
         except LLMError as exc:
             raise HTTPException(502, str(exc)) from exc
         if payload.save:
             await bot.storage.add_chat_message(scene, payload.scene_id, "user", payload.message)
             await bot.storage.add_chat_message(scene, payload.scene_id, "assistant", reply.text)
         return {**reply.summary(), "messages": len(messages)}
+
+    @protected.get("/llm/providers", summary="模型提供方状态")
+    async def llm_providers() -> list[dict[str, Any]]:
+        return bot.chat.client.providers_status()
+
+    @protected.get("/llm/models", summary="可选模型列表")
+    async def llm_models(provider: str | None = None) -> list[str]:
+        try:
+            return await bot.chat.client.list_models(provider)
+        except LLMError as exc:
+            raise HTTPException(502, str(exc)) from exc
+
+    @protected.get("/llm/usage", summary="模型用量统计")
+    async def llm_usage(range: str = "today") -> dict[str, Any]:
+        from datetime import datetime
+
+        now = time.time()
+        midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+        since = {
+            "today": midnight,
+            "7d": now - 7 * 86400,
+            "30d": now - 30 * 86400,
+            "all": 0.0,
+        }.get(range, midnight)
+        summary = await bot.storage.llm_usage_summary(since)
+        return {"range": range, "since": since, **summary}
 
     # -- 会话历史 --------------------------------------------------------- #
     @protected.get("/chat/{scene}/{scene_id}", summary="会话历史")

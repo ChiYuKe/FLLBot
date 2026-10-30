@@ -101,8 +101,14 @@ Invoke-RestMethod -Method Patch -Headers @{Authorization="Bearer $token"} -Conte
 | GET | `/api/personas` | 人格列表（`name`、`title`、`description`、`preview`） |
 | GET | `/api/personas/{name}` | 含完整内容 |
 | POST | `/api/personas/reload` | 重新扫描 `personas/` |
-| POST | `/api/llm/test` | body `{"prompt": "...", "persona": "fllbot"}`，单轮直连 |
-| POST | `/api/llm/chat` | body `{"message","scene","scene_id","persona","include_history","save"}`，走上下文 |
+| POST | `/api/llm/test` | body `{"prompt": "...", "persona": "fllbot", "provider": "deepseek"}`，单轮直连 |
+| POST | `/api/llm/chat` | body `{"message","scene","scene_id","persona","include_history","save","provider"}`，走上下文 |
+| GET | `/api/llm/providers` | 各 provider 的 model / base_url / 是否已配置（不返回密钥） |
+| GET | `/api/llm/models?provider=` | 透传上游 `/models` |
+| GET | `/api/llm/usage?range=today\|7d\|30d\|all` | 调用次数、失败数、token、平均延迟、费用、按模型分组 |
+
+`provider` 省略时按 `llm.routes` / `llm.default` 路由。每次调用都会写入 `llm_usage` 表，
+失败记录会带上错误摘要。
 
 LLM 未启用或没配 Key 时返回 `400`；上游报错返回 `502`（含错误摘要）。
 
