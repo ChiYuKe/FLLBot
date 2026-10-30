@@ -189,6 +189,8 @@ curl.exe -H "Authorization: Bearer $token" http://127.0.0.1:6701/api/status
 `/api/logs`、`/api/stats`、`/api/personas`、`/api/llm/test`、`/api/actions`、
 `/api/events/stream`（SSE）。完整列表见 [docs/api.md](docs/api.md)。
 
+LLM 子系统（多 provider、记忆、工具调用）的设计见 [docs/llm.md](docs/llm.md)。
+
 ## 自带 WebUI
 
 FLLBot 自带一个单页控制台，零外部依赖、可直接被桌面端 iframe 嵌入：
