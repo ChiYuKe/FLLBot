@@ -29,6 +29,7 @@ plugin = Plugin.from_manifest(__file__)
 # 不给用户看的默认值；表达能力交给智能体在每次调用时决定
 LANG = "zh"
 MAX_CHARS = 120
+MAX_CHUNKS = 8
 PAUSE_MS = 200
 TIMEOUT = 180.0
 DEFAULT_ALPHA = 0.9
@@ -123,7 +124,7 @@ def _parse_emotion(text: str) -> tuple[str | None, str]:
 
 
 def _split_text(text: str, limit: int) -> list[str]:
-    """按句切分，尽量每段不超过 limit 字；最多 4 段。"""
+    """按句切分，尽量每段不超过 limit 字；最多 MAX_CHUNKS 段。"""
     sentences = [s for s in re.split(r"(?<=[。！？!?…；;\n])", text) if s.strip()]
     chunks: list[str] = []
     current = ""
@@ -142,7 +143,7 @@ def _split_text(text: str, limit: int) -> list[str]:
         current = sentence
     if current.strip():
         chunks.append(current.strip())
-    return [c for c in chunks if c][:4]
+    return [c for c in chunks if c][:MAX_CHUNKS]
 
 
 def _data_dir(ctx: Context) -> Path:
@@ -232,7 +233,9 @@ async def _send(
 
     chunks = _split_text(clean, MAX_CHARS)
     if len(chunks) > 1:
-        log.info("文本超过 %s 字，拆成 %s 段", MAX_CHARS, len(chunks))
+        log.info("文本 %s 字，拆成 %s 段语音", len(clean), len(chunks))
+    if len(clean) > MAX_CHARS * MAX_CHUNKS:
+        log.warning("文本超过上限（%s 字），只发送前 %s 段", MAX_CHARS * MAX_CHUNKS, MAX_CHUNKS)
 
     for index, chunk in enumerate(chunks):
         try:
@@ -326,6 +329,8 @@ async def health(ctx: Context) -> None:
     title="语音朗读",
     description=(
         "把一段文字用语音念出来并发送到当前会话。用户要求“用语音说/念出来/发条语音”时调用。"
+        "可以一次传入完整的长文本（故事、说明、多段回复都可以），插件会按句自动拆成多条语音逐条发送，"
+        "所以不要为了缩短语音而总结、删减或改写原文，用户要听的就是你原本要说的话。"
         "调用前根据上下文判断该用什么语气：道谢、夸奖用 happy；被冒犯、警告用 angry；"
         "安慰、遗憾用 sad 或 melancholic；平静叙述用 natural。"
         "如果不确定该选哪一档，或需要更细腻的语气（比如“嘴上嫌弃但有点开心”），用 emotion_text 自由描述，它会覆盖 emotion。"
@@ -333,7 +338,7 @@ async def health(ctx: Context) -> None:
     parameters={
         "type": "object",
         "properties": {
-            "text": {"type": "string", "description": "要念的文字，30 字以内最好"},
+            "text": {"type": "string", "description": "要念的完整文本；长故事直接整段传入，插件负责分段"},
             "emotion": {
                 "type": "string",
                 "enum": ["natural", "happy", "angry", "sad", "afraid", "melancholic", "surprised", "calm"],
