@@ -10,7 +10,7 @@ from typing import Any
 
 import aiosqlite
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 MIGRATIONS: dict[int, list[str]] = {
     1: [
@@ -106,7 +106,45 @@ MIGRATIONS: dict[int, list[str]] = {
         """,
         "CREATE INDEX IF NOT EXISTS idx_llm_usage_time ON llm_usage (created_at DESC)",
     ],
+    4: [
+        # 记录每条聊天消息的发送者，供群聊上下文还原「谁在说话」。
+        "ALTER TABLE chat_messages ADD COLUMN user_id INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE chat_messages ADD COLUMN nickname TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE chat_messages ADD COLUMN sender_role TEXT NOT NULL DEFAULT ''",
+    ],
 }
+
+
+class ChatRecord(tuple):
+    """一条聊天历史：主体仍是 ``(role, content)``，并附带发送者信息。
+
+    继承自 ``tuple`` 以兼容旧代码的拆包与比较；新代码可用 ``.role``、
+    ``.content``、``.user_id``、``.nickname``、``.sender_role`` 读取。
+    """
+
+    def __new__(
+        cls,
+        role: str,
+        content: str,
+        user_id: int = 0,
+        nickname: str = "",
+        sender_role: str = "",
+        created_at: float = 0,
+    ) -> ChatRecord:
+        record = super().__new__(cls, (role, content))
+        record.user_id = int(user_id or 0)
+        record.nickname = nickname or ""
+        record.sender_role = sender_role or ""
+        record.created_at = float(created_at or 0)
+        return record
+
+    @property
+    def role(self) -> str:
+        return self[0]
+
+    @property
+    def content(self) -> str:
+        return self[1]
 
 
 class Storage:
@@ -222,6 +260,7 @@ class Storage:
         *,
         enabled: bool | None = None,
         config: dict[str, Any] | None = None,
+        clear_settings_scope: str | None = None,
     ) -> None:
         """登记或局部更新群设置；``None`` 表示该字段保持不变。
 
@@ -257,6 +296,8 @@ class Storage:
                 "enabled = excluded.enabled, config = excluded.config, updated_at = excluded.updated_at",
                 (gid, int(bool(enabled)), json.dumps(config, ensure_ascii=False), now, now),
             )
+        if clear_settings_scope:
+            await self.db.execute("DELETE FROM kv WHERE scope = ? AND key LIKE ?", (clear_settings_scope, f"{gid}:%"))
         await self.db.commit()
 
     async def list_group_states(self) -> dict[int, dict[str, Any]]:
@@ -292,20 +333,65 @@ class Storage:
         await self.db.commit()
 
     # -- 聊天历史 --------------------------------------------------------- #
-    async def add_chat_message(self, scene: str, scene_id: int, role: str, content: str) -> None:
+    async def add_chat_message(
+        self,
+        scene: str,
+        scene_id: int,
+        role: str,
+        content: str,
+        *,
+        user_id: int = 0,
+        nickname: str = "",
+        sender_role: str = "",
+    ) -> None:
+        """写入一条历史；``role`` 是消息角色（user/assistant），发送者信息另存。"""
         await self.db.execute(
-            "INSERT INTO chat_messages (scene, scene_id, role, content, created_at) VALUES (?, ?, ?, ?, ?)",
-            (scene, int(scene_id), role, content, time.time()),
+            "INSERT INTO chat_messages (scene, scene_id, role, content, user_id, nickname, sender_role, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                scene,
+                int(scene_id),
+                role,
+                content,
+                int(user_id or 0),
+                str(nickname or "")[:120],
+                str(sender_role or "")[:20],
+                time.time(),
+            ),
         )
         await self.db.commit()
 
-    async def recent_chat(self, scene: str, scene_id: int, limit: int = 20) -> list[tuple[str, str]]:
-        cursor = await self.db.execute(
-            "SELECT role, content FROM chat_messages WHERE scene = ? AND scene_id = ? ORDER BY id DESC LIMIT ?",
-            (scene, int(scene_id), int(limit)),
+    async def recent_chat(
+        self,
+        scene: str,
+        scene_id: int,
+        limit: int = 20,
+        *,
+        created_after: float | None = None,
+    ) -> list[ChatRecord]:
+        query = (
+            "SELECT role, content, user_id, nickname, sender_role, created_at FROM chat_messages "
+            "WHERE scene = ? AND scene_id = ?"
         )
+        params: list[Any] = [scene, int(scene_id)]
+        if created_after is not None:
+            query += " AND created_at >= ?"
+            params.append(float(created_after))
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(int(limit))
+        cursor = await self.db.execute(query, params)
         rows = await cursor.fetchall()
-        return [(row["role"], row["content"]) for row in reversed(rows)]
+        return [
+            ChatRecord(
+                role=row["role"],
+                content=row["content"],
+                user_id=int(row["user_id"] or 0),
+                nickname=row["nickname"] or "",
+                sender_role=row["sender_role"] or "",
+                created_at=row["created_at"],
+            )
+            for row in reversed(rows)
+        ]
 
     async def clear_chat(self, scene: str, scene_id: int) -> int:
         cursor = await self.db.execute(
@@ -430,8 +516,9 @@ class Storage:
         cursor = await self.db.execute(
             "SELECT date(created_at, 'unixepoch', 'localtime') AS day, COUNT(*) AS count, "
             "COUNT(DISTINCT user_id) AS users "
-            "FROM message_log GROUP BY day ORDER BY day DESC LIMIT ?",
-            (int(days),),
+            "FROM message_log WHERE date(created_at, 'unixepoch', 'localtime') >= "
+            "date('now', 'localtime', ?) GROUP BY day ORDER BY day DESC LIMIT ?",
+            (f"-{max(0, int(days) - 1)} days", int(days)),
         )
         rows = await cursor.fetchall()
         return [{"day": row["day"], "count": int(row["count"]), "users": int(row["users"])} for row in reversed(rows)]
@@ -554,4 +641,4 @@ def _reminder_row(row: aiosqlite.Row) -> dict[str, Any]:
     }
 
 
-__all__ = ["MIGRATIONS", "SCHEMA_VERSION", "Storage"]
+__all__ = ["ChatRecord", "MIGRATIONS", "SCHEMA_VERSION", "Storage"]

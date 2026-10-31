@@ -50,7 +50,7 @@ allow_private = true
 [plugin]
 # 用户插件目录，相对路径基于项目根目录。
 dirs = ["plugins"]
-# 是否加载内置插件（ping / echo / help / llm_chat）。
+# 是否加载内置插件（basic 命令与 agent 智能体）。
 builtin = true
 # 检测插件文件改动并自动重载。
 hot_reload = true
@@ -80,7 +80,11 @@ model = "deepseek-chat"
 timeout = 60.0
 max_tokens = 800
 temperature = 0.8
-# 上下文预算：最多带多少条历史、多少字符。
+# 可选：手动指定上下文窗口（Token），优先于模型目录自动发现；留空时跟随模型目录。
+# context_window = 1000000
+# 默认跟随模型接口返回的上下文窗口；未返回时使用 8192 Token 保守预算。
+context_mode = "model"
+# 仅 context_mode = "custom" 时使用下面的手工历史预算。
 max_context_messages = 16
 max_context_chars = 4000
 enable_private = true

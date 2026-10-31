@@ -21,9 +21,9 @@ async def storage(tmp_path: Path):
 
 
 async def test_migration_creates_schema(storage: Storage) -> None:
-    assert await storage.schema_version() == 3
+    assert await storage.schema_version() == 4
     summary = await storage.summary()
-    assert summary["schema_version"] == 3
+    assert summary["schema_version"] == 4
     assert summary["messages"] == 0
 
 
@@ -107,10 +107,14 @@ async def test_plugin_states(storage: Storage) -> None:
 
 
 async def test_chat_history(storage: Storage) -> None:
-    await storage.add_chat_message("group", 20002, "user", "你好")
+    await storage.add_chat_message(
+        "group", 20002, "user", "你好", user_id=30003, nickname="小明", sender_role="admin"
+    )
     await storage.add_chat_message("group", 20002, "assistant", "你好呀")
     rows = await storage.recent_chat("group", 20002, limit=10)
-    assert rows == [("user", "你好"), ("assistant", "你好呀")]
+    assert [(row.role, row.content) for row in rows] == [("user", "你好"), ("assistant", "你好呀")]
+    assert (rows[0].user_id, rows[0].nickname, rows[0].sender_role) == (30003, "小明", "admin")
+    assert (rows[1].user_id, rows[1].nickname, rows[1].sender_role) == (0, "", "")
     rooms = await storage.chat_rooms()
     assert rooms[0]["scene_id"] == 20002
     assert rooms[0]["messages"] == 2

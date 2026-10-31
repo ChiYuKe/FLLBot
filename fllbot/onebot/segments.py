@@ -93,6 +93,45 @@ class MessageSegment(BaseModel):
     def json_card(cls, payload: str) -> MessageSegment:
         return cls(type="json", data={"data": payload})
 
+    @classmethod
+    def record(cls, file: str) -> MessageSegment:
+        """语音：URL、file:/// 绝对路径或 base64:// 数据。"""
+        return cls(type="record", data={"file": file})
+
+    @classmethod
+    def video(cls, file: str) -> MessageSegment:
+        return cls(type="video", data={"file": file})
+
+    @classmethod
+    def file(cls, file: str, *, name: str | None = None) -> MessageSegment:
+        data: dict[str, Any] = {"file": file}
+        if name is not None:
+            data["name"] = name
+        return cls(type="file", data=data)
+
+    @classmethod
+    def forward(cls, message_id: str) -> MessageSegment:
+        return cls(type="forward", data={"id": str(message_id)})
+
+    @classmethod
+    def node(cls, user_id: int | str, nickname: str, content: str | Sequence[MessageSegment]) -> MessageSegment:
+        return cls(type="node", data={
+            "user_id": str(user_id), "nickname": nickname,
+            "content": [segment.to_dict() for segment in as_segments(content)],
+        })
+
+    @classmethod
+    def xml_card(cls, payload: str) -> MessageSegment:
+        return cls(type="xml", data={"data": payload})
+
+    @classmethod
+    def dice(cls) -> MessageSegment:
+        return cls(type="dice")
+
+    @classmethod
+    def rps(cls) -> MessageSegment:
+        return cls(type="rps")
+
     # -- 便捷查询 --------------------------------------------------------- #
     @property
     def is_text(self) -> bool:

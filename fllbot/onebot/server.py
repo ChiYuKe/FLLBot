@@ -162,11 +162,20 @@ async def serve_connection(websocket: WebSocket, bot: FLLBot) -> None:
             "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
         }
     )
+    async def sync_identity() -> None:
+        try:
+            await bot.bots.sync(conn)
+        except Exception as exc:
+            bot.logger.info("账号昵称暂未获取成功: %s", type(exc).__name__)
+
+    identity_task = asyncio.create_task(sync_identity())
     try:
         await conn.read_loop()
     except Exception:  # pragma: no cover - 防御式
         bot.logger.exception("WS 连接异常")
     finally:
+        identity_task.cancel()
+        await asyncio.gather(identity_task, return_exceptions=True)
         bot.manager.remove(conn)
         bot.hub.publish(
             {

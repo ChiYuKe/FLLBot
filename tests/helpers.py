@@ -69,6 +69,9 @@ class FakeConnection:
         self.client_name = ""
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.sent: list[tuple[str, int, list[MessageSegment]]] = []
+        self.forward_messages: list[dict[str, Any]] = []
+        self.forward_messages_by_id: dict[str, list[dict[str, Any]]] = {}
+        self.forward_error: Exception | None = None
         self._message_id = 1000
         self._closed = False
 
@@ -123,6 +126,12 @@ class FakeConnection:
 
     async def get_group_member_info(self, group_id: int, user_id: int, **_: Any) -> dict[str, Any]:
         return {"group_id": group_id, "user_id": user_id, "nickname": "测试成员", "role": "member"}
+
+    async def get_forward_msg(self, message_id: str) -> Any:
+        self.calls.append(("get_forward_msg", {"message_id": str(message_id)}))
+        if self.forward_error is not None:
+            raise self.forward_error
+        return {"messages": self.forward_messages_by_id.get(str(message_id), self.forward_messages)}
 
     async def set_friend_add_request(self, flag: str, approve: bool = True, remark: str = "") -> dict[str, Any]:
         self.calls.append(("set_friend_add_request", {"flag": flag, "approve": approve, "remark": remark}))
