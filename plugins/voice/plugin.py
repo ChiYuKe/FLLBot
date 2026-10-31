@@ -256,9 +256,9 @@ def _snapshot(ctx: Context) -> dict:
 async def _worker() -> None:
     assert _QUEUE is not None
     while True:
-        ctx, text, emotion, emotion_text, emo_alpha, speed, settings = await _QUEUE.get()
+        ctx, text, emotion, emotion_text, emo_alpha, speed, settings, segments = await _QUEUE.get()
         try:
-            await _send(ctx, text, emotion, emotion_text, emo_alpha, speed, settings)
+            await _send(ctx, text, emotion, emotion_text, emo_alpha, speed, settings, segments)
         except Exception:  # noqa: BLE001
             log.exception("语音任务执行失败")
         finally:
@@ -273,13 +273,16 @@ def _enqueue(
     emo_alpha: float | None = None,
     speed: float | None = None,
     settings: dict | None = None,
+    segments: list[str] | None = None,
 ) -> None:
     """把语音任务排进单消费者队列，按提交顺序逐条发送。"""
     global _QUEUE
     if _QUEUE is None:
         _QUEUE = asyncio.Queue()
         asyncio.create_task(_worker())
-    _QUEUE.put_nowait((ctx, text, emotion, emotion_text, emo_alpha, speed, settings or _snapshot(ctx)))
+    _QUEUE.put_nowait(
+        (ctx, text, emotion, emotion_text, emo_alpha, speed, settings or _snapshot(ctx), segments)
+    )
 
 
 def _payload_common(settings: dict, emotion: str | None, emotion_text: str | None,
@@ -354,6 +357,7 @@ async def _send(
     emo_alpha: float | None = None,
     speed: float | None = None,
     settings: dict | None = None,
+    segments: list[str] | None = None,
 ) -> None:
     settings = settings or _snapshot(ctx)
     if not settings.get("enabled"):
@@ -361,7 +365,7 @@ async def _send(
         return
 
     clean = _clean(text)
-    if not clean:
+    if not clean and not segments:
         await ctx.reply("要念什么？用法：/say 想说的话（可加 [开心] 前缀）")
         return
 
@@ -369,7 +373,24 @@ async def _send(
     estimated = estimate_seconds(clean, speed_value)
     # 按目标时长反推每段的字数：想让首条更快，就把段切小
     limit = max(30, min(MAX_CHARS, round(CHARS_PER_SECOND * TARGET_SECONDS * speed_value)))
-    chunks = _split_text(clean, limit)
+
+    chunks: list[str] = []
+    if segments:
+        # 模型自己切的段优先使用，保留它的场景/对白气口
+        for segment in segments:
+            piece = _clean(segment)
+            if not piece:
+                continue
+            if len(piece) <= limit * 2:
+                chunks.append(piece)
+            else:
+                chunks.extend(_split_text(piece, limit))
+            if len(chunks) >= MAX_CHUNKS:
+                break
+        chunks = chunks[:MAX_CHUNKS]
+        log.info("使用模型分段 %s 段", len(chunks))
+    if not chunks:
+        chunks = _split_text(clean, limit)
     plan = _plan_batches(chunks, speed_value)
     log.info(
         "文本 %s 字，预估 %.1fs，拆成 %s 段、%s 批，每段目标 %.0fs",
@@ -511,6 +532,8 @@ async def health(ctx: Context) -> None:
         "把一段文字用语音念出来并发送到当前会话。用户要求“用语音说/念出来/发条语音”时调用。"
         "可以一次传入完整的长文本（故事、说明、多段回复都可以），插件会按句自动拆成多条语音逐条发送，"
         "所以不要为了缩短语音而总结、删减或改写原文，用户要听的就是你原本要说的话。"
+        "如果文本较长，建议你顺便用 segments 切分成 3–8 个自然段：按场景转换、对白、情绪转折来切，"
+        "每段 20–60 字，保留原文措辞不要改写；短回复可以只传 text，让插件自己处理。"
         "调用前根据上下文判断该用什么语气：道谢、夸奖用 happy；被冒犯、警告用 angry；"
         "安慰、遗憾用 sad 或 melancholic；平静叙述用 natural。"
         "如果不确定该选哪一档，或需要更细腻的语气（比如“嘴上嫌弃但有点开心”），用 emotion_text 自由描述，它会覆盖 emotion。"
@@ -518,7 +541,12 @@ async def health(ctx: Context) -> None:
     parameters={
         "type": "object",
         "properties": {
-            "text": {"type": "string", "description": "要念的完整文本；长故事直接整段传入，插件负责分段"},
+            "text": {"type": "string", "description": "要念的完整文本；长故事直接整段传入"},
+            "segments": {
+                "type": "array",
+                "items": {"type": "string"},
+                "description": "可选：你切好的分段，按播放顺序排列。长文本建议切 3–8 段，每段 20–60 字，保留原文不要改写",
+            },
             "emotion": {
                 "type": "string",
                 "enum": ["natural", "happy", "angry", "sad", "afraid", "melancholic", "surprised", "calm"],
@@ -548,10 +576,22 @@ async def speak(
     emotion_text: str | None = None,
     emo_alpha: float | None = None,
     speed: float | None = None,
+    segments: list[str] | None = None,
 ) -> dict:
     settings = _snapshot(ctx)
-    log.info("工具调用 voice__speak，转入后台生成：%s", text[:40])
-    _enqueue(ctx, text, emotion, emotion_text, emo_alpha, speed, settings=settings)
-    return {"ok": True, "silent": True, "queued": True, "spoken": text, "emotion": emotion_text or emotion}
+    log.info(
+        "工具调用 voice__speak，转入后台生成：%s%s",
+        text[:40],
+        f"（模型分段 {len(segments)} 段）" if segments else "",
+    )
+    _enqueue(ctx, text, emotion, emotion_text, emo_alpha, speed, settings=settings, segments=segments)
+    return {
+        "ok": True,
+        "silent": True,
+        "queued": True,
+        "spoken": text,
+        "segments": len(segments or []),
+        "emotion": emotion_text or emotion,
+    }
 
 
