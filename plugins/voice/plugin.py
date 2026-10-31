@@ -127,14 +127,16 @@ _SOFT_BREAK = "，、；：,;:"
 
 
 def _split_long_sentence(sentence: str, limit: int, hard_max: int) -> list[str]:
-    """超长句优先在标点处切；实在没有标点才硬切，尽量不切碎短语。"""
+    """超长句优先在标点处切；没有标点才硬切，并补逗号收尾，避免突然断气。"""
     parts: list[str] = []
     while len(sentence) > hard_max:
         window = sentence[:hard_max]
         cut = max(window.rfind(p) for p in _SOFT_BREAK)
-        if cut <= 0:
+        if cut >= limit // 2:
+            parts.append(sentence[:cut].strip())
+        else:
             cut = hard_max
-        parts.append(sentence[:cut].strip())
+            parts.append(sentence[:cut].rstrip() + "，")
         sentence = sentence[cut:].lstrip(_SOFT_BREAK + " ")
     if sentence.strip():
         parts.append(sentence.strip())
@@ -143,7 +145,7 @@ def _split_long_sentence(sentence: str, limit: int, hard_max: int) -> list[str]:
 
 def _split_text(text: str, limit: int) -> list[str]:
     """按句切分；一句话不超过 hard_max 就整句保留，避免从词中间断开。"""
-    hard_max = max(limit, 180)
+    hard_max = max(limit, 220)
     sentences = [s for s in re.split(r"(?<=[。！？!?…；;\n])", text) if s.strip()]
     chunks: list[str] = []
     current = ""
