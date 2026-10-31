@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IndexTTS 音色调校台</title>
+<style>
+  :root {
+    --bg: #0e1116; --card: #161b23; --line: #242c37; --text: #e6edf3;
+    --muted: #8b98a9; --accent: #5eead4; --accent2: #60a5fa; --danger: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  header {
+    padding: 18px 24px 10px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap;
+  }
+  h1 { font-size: 18px; margin: 0; letter-spacing: .5px; }
+  header .muted { color: var(--muted); font-size: 12px; }
+  main {
+    display: grid; grid-template-columns: 340px minmax(0, 1fr);
+    gap: 18px; padding: 18px 24px 40px; max-width: 1280px; margin: 0 auto;
+  }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 16px; margin-bottom: 16px;
+  }
+  .card h2 { font-size: 13px; margin: 0 0 12px; color: var(--muted); font-weight: 600; letter-spacing: .4px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 4px; }
+  select, input[type=text], textarea {
+    width: 100%; background: #0b0f14; color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 8px 10px; font: inherit; outline: none;
+  }
+  select:focus, input:focus, textarea:focus { border-color: var(--accent); }
+  textarea { min-height: 120px; resize: vertical; }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  input[type=file] { width: 100%; color: var(--muted); font-size: 12px; }
+  button {
+    background: var(--accent); color: #06201b; border: 0; border-radius: 8px;
+    padding: 9px 16px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button:hover { filter: brightness(1.08); }
+  button.ghost {
+    background: transparent; color: var(--text); border: 1px solid var(--line); font-weight: 500;
+  }
+  button.ghost:hover { border-color: var(--accent); }
+  button.danger { background: transparent; border: 1px solid #4b2529; color: var(--danger); }
+  .row { display: flex; gap: 8px; align-items: center; }
+  .row > * { flex: 1; }
+  .val { color: var(--accent); font-variant-numeric: tabular-nums; }
+  .hint { color: var(--muted); font-size: 11px; margin-top: 4px; }
+  .slider-head { display: flex; justify-content: space-between; font-size: 12px; color: var(--muted); margin-top: 10px; }
+  audio { width: 100%; margin-top: 10px; }
+  #status { min-height: 20px; color: var(--muted); font-size: 12px; margin-top: 8px; }
+  #status.err { color: var(--danger); }
+  .pill {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    background: #12312b; color: var(--accent); font-size: 11px;
+  }
+  details { margin-top: 12px; }
+  summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+  .sample-btns { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 8px; }
+  .sample-btns button { padding: 5px 10px; font-size: 12px; }
+  .ref-line { display: flex; gap: 8px; align-items: center; margin-top: 10px; }
+  .ref-line button { flex: 0 0 auto; }
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>IndexTTS 音色调校台</h1>
+  <span class="muted">参考音频 + 情绪 + 采样参数 + 后期，全部本地</span>
+  <span class="pill" id="health">检查服务中…</span>
+</header>
+
+<main>
+  <section>
+    <div class="card">
+      <h2>音色</h2>
+      <label>参考音色</label>
+      <select id="voice"></select>
+      <div class="ref-line">
+        <button class="ghost" id="playRef" style="flex:1">试听参考</button>
+        <button class="danger" id="delVoice">删除</button>
+      </div>
+      <audio id="refAudio" controls style="display:none"></audio>
+
+      <label>新增参考音频（5–15 秒干净说话，自动转 24k 单声道）</label>
+      <input type="file" id="refFile" accept="audio/*">
+      <label>音色名</label>
+      <input type="text" id="refName" placeholder="例如 dongxuelian-soft">
+      <div style="margin-top:8px"><button class="ghost" id="uploadBtn">上传并标准化</button></div>
+      <div class="hint">上传后可直接在右上角选中试听；带 BGM 的素材请先做人声分离。</div>
+    </div>
+
+    <div class="card">
+      <h2>文本</h2>
+      <textarea id="text">这么晚还不睡呀？是在等我吗？</textarea>
+      <div class="sample-btns">
+        <button class="ghost" data-text="这么晚还不睡呀？是在等我吗？">夜聊</button>
+        <button class="ghost" data-text="今天也辛苦啦，要不要我陪你一会儿？">日常</button>
+        <button class="ghost" data-text="哼，你居然现在才来找我。">傲娇</button>
+        <button class="ghost" data-text="其实……我有点想你了。">低落</button>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <div class="card">
+      <h2>表达</h2>
+      <div class="grid2">
+        <div>
+          <label>情绪</label>
+          <select id="emotion">
+            <option value="natural">自然（不干预）</option>
+            <option value="happy">开心</option>
+            <option value="angry">生气</option>
+            <option value="sad">难过</option>
+            <option value="afraid">害怕</option>
+            <option value="disgusted">厌恶</option>
+            <option value="melancholic">低落</option>
+            <option value="surprised">惊讶</option>
+            <option value="calm">平静</option>
+          </select>
+        </div>
+        <div>
+          <label>后期</label>
+          <select id="fx">
+            <option value="warm-low">暖声 + 降调（推荐）</option>
+            <option value="warm">暖声（不降调）</option>
+            <option value="warm-low-space">暖声 + 降调 + 空间感</option>
+            <option value="none">干声</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="slider-head"><span>情绪强度 emo_alpha</span><span class="val" id="alphaVal">0.9</span></div>
+      <input type="range" id="alpha" min="0" max="1" step="0.05" value="0.9">
+
+      <div class="slider-head"><span>语速 speed</span><span class="val" id="speedVal">1.00</span></div>
+      <input type="range" id="speed" min="0.7" max="1.4" step="0.02" value="1.00">
+
+      <div class="slider-head"><span>句间停顿 ms</span><span class="val" id="pauseVal">200</span></div>
+      <input type="range" id="pause" min="0" max="600" step="20" value="200">
+
+      <details>
+        <summary>采样参数（决定稳不稳、有没有感情）</summary>
+        <div class="slider-head"><span>temperature</span><span class="val" id="tempVal">0.80</span></div>
+        <input type="range" id="temp" min="0.1" max="1.5" step="0.05" value="0.8">
+        <div class="slider-head"><span>top_p</span><span class="val" id="topPVal">0.80</span></div>
+        <input type="range" id="topP" min="0.1" max="1" step="0.05" value="0.8">
+        <div class="slider-head"><span>top_k</span><span class="val" id="topKVal">30</span></div>
+        <input type="range" id="topK" min="1" max="80" step="1" value="30">
+        <div class="slider-head"><span>repetition_penalty</span><span class="val" id="repVal">10.0</span></div>
+        <input type="range" id="rep" min="1" max="20" step="0.5" value="10">
+        <div class="hint">temperature / top_p 越高越发散、越有情绪但也越容易飘；repetition_penalty 高更稳、低更容易出现重复和怪调。</div>
+      </details>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <button id="synth" style="flex:2">合成试听</button>
+        <button class="ghost" id="download" disabled style="flex:1">下载 wav</button>
+      </div>
+      <div id="status"></div>
+      <audio id="out" controls></audio>
+      <div class="hint" id="meta"></div>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = { voices: [], lastUrl: null, lastName: "" };
+
+function bindSlider(id, out, digits, fmt) {
+  const el = $(id), outEl = $(out);
+  const render = () => { outEl.textContent = fmt ? fmt(el.value) : Number(el.value).toFixed(digits); };
+  el.addEventListener("input", render); render();
+  return el;
+}
+bindSlider("alpha", "alphaVal", 2);
+bindSlider("speed", "speedVal", 2, (v) => Number(v).toFixed(2));
+bindSlider("pause", "pauseVal", 0);
+bindSlider("temp", "tempVal", 2);
+bindSlider("topP", "topPVal", 2);
+bindSlider("topK", "topKVal", 0);
+bindSlider("rep", "repVal", 1, (v) => Number(v).toFixed(1));
+
+async function health() {
+  try {
+    const r = await fetch("/health"); const j = await r.json();
+    $("health").textContent = j.ok ? `服务就绪 · ${j.device}` : (j.error || "模型加载中");
+    $("health").style.background = j.ok ? "#12312b" : "#3a2a12";
+    $("health").style.color = j.ok ? "#5eead4" : "#fbbf24";
+  } catch { $("health").textContent = "服务未连接"; }
+}
+
+async function loadVoices(select) {
+  const r = await fetch("/voices"); const j = await r.json();
+  state.voices = j.voices || [];
+  const sel = $("voice"); const current = select || sel.value;
+  sel.innerHTML = state.voices.map(v => `<option value="${v.name}">${v.name}</option>`).join("");
+  if (state.voices.some(v => v.name === current)) sel.value = current;
+  else if (state.voices.length) sel.value = state.voices[0].name;
+}
+
+$("playRef").onclick = () => {
+  const name = $("voice").value; if (!name) return;
+  const audio = $("refAudio");
+  audio.src = `/voices/${encodeURIComponent(name)}/audio?t=${Date.now()}`;
+  audio.style.display = "block"; audio.play();
+};
+
+$("delVoice").onclick = async () => {
+  const name = $("voice").value;
+  if (!name || !confirm(`删除音色 ${name}？`)) return;
+  const r = await fetch(`/voices/${encodeURIComponent(name)}`, { method: "DELETE" });
+  if (!r.ok) { setStatus(await r.text(), true); return; }
+  await loadVoices();
+};
+
+$("uploadBtn").onclick = async () => {
+  const file = $("refFile").files[0];
+  if (!file) { setStatus("先选一个音频文件", true); return; }
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("name", $("refName").value.trim());
+  setStatus("上传并转码中…");
+  const r = await fetch("/voices/upload", { method: "POST", body: fd });
+  if (!r.ok) { setStatus(await r.text(), true); return; }
+  const j = await r.json();
+  await loadVoices(j.name);
+  setStatus(`已添加音色 ${j.name}（${Math.round(j.size / 1024)} KB）`);
+};
+
+document.querySelectorAll("[data-text]").forEach(b => {
+  b.onclick = () => { $("text").value = b.dataset.text; };
+});
+
+function setStatus(text, err = false) {
+  const el = $("status");
+  el.textContent = text;
+  el.className = err ? "err" : "";
+}
+
+async function synth() {
+  const text = $("text").value.trim();
+  if (!text) { setStatus("文本不能为空", true); return; }
+  const speed = Number($("speed").value);
+  const payload = {
+    text,
+    voice: $("voice").value,
+    lang: "zh",
+    emotion: $("emotion").value,
+    emo_alpha: Number($("alpha").value),
+    duration_factor: 1 / speed,
+    interval_silence: Number($("pause").value),
+    fx: $("fx").value,
+    temperature: Number($("temp").value),
+    top_p: Number($("topP").value),
+    top_k: Number($("topK").value),
+    repetition_penalty: Number($("rep").value),
+  };
+  $("synth").disabled = true;
+  setStatus("合成中…（首次会慢一点）");
+  const started = performance.now();
+  try {
+    const r = await fetch("/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) { setStatus(await r.text(), true); return; }
+    const blob = await r.blob();
+    if (state.lastUrl) URL.revokeObjectURL(state.lastUrl);
+    state.lastUrl = URL.createObjectURL(blob);
+    const audio = $("out");
+    audio.src = state.lastUrl;
+    audio.onloadedmetadata = () => {
+      $("meta").textContent = `时长 ${audio.duration.toFixed(2)}s · 音色 ${payload.voice} · ${payload.emotion} · fx=${payload.fx}`;
+      state.lastName = `${payload.voice}-${payload.emotion}-${Math.round(audio.duration * 10)}.wav`;
+    };
+    await audio.play().catch(() => {});
+    $("download").disabled = false;
+    const seconds = (performance.now() - started) / 1000;
+    setStatus(`完成 · ${seconds.toFixed(1)}s · ${(blob.size / 1024).toFixed(0)} KB · 缓存 ${r.headers.get("X-Cache") || "-"}`);
+  } catch (e) {
+    setStatus(String(e), true);
+  } finally {
+    $("synth").disabled = false;
+  }
+}
+
+$("synth").onclick = synth;
+$("download").onclick = () => {
+  if (!state.lastUrl) return;
+  const a = document.createElement("a");
+  a.href = state.lastUrl; a.download = state.lastName || "voice.wav"; a.click();
+};
+
+// 记住上次的参数
+const fields = ["voice","emotion","fx","alpha","speed","pause","temp","topP","topK","rep"];
+const saved = JSON.parse(localStorage.getItem("indextts-lab") || "{}");
+fields.forEach(k => {
+  if (saved[k] !== undefined) {
+    const el = $(k);
+    if (el) {
+      el.value = saved[k];
+      el.dispatchEvent(new Event("input"));
+    }
+  }
+});
+fields.forEach(k => { const el = $(k); if (el) el.addEventListener("change", save); });
+function save() {
+  const data = {}; fields.forEach(k => { const el = $(k); if (el) data[k] = el.value; });
+  localStorage.setItem("indextts-lab", JSON.stringify(data));
+}
+
+health(); loadVoices(saved.voice);
+setInterval(health, 15000);
+</script>
+</body>
+</html>

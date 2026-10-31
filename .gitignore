@@ -1,5 +1,8 @@
 # Python
 __pycache__/
+.pytest_cache/
+.pytest_*/
+.ruff_cache/
 *.py[cod]
 *.egg-info/
 .venv/
@@ -9,6 +12,8 @@ dist/
 # 运行数据（含数据库、日志、生成的 Admin Token）
 data/
 logs/
+.console-preview/
+.test-*/
 
 # 本地配置与密钥
 config.toml
@@ -21,3 +26,18 @@ config.toml
 .vscode/
 .DS_Store
 Thumbs.db
+
+# 本地 TTS 服务（模型、独立环境、缓存、个人参考音频）
+services/tts/vendor/
+services/tts/checkpoints/
+services/tts/cache/
+services/tts/voices/
+services/qwen-tts/.venv/
+services/qwen-tts/models/
+services/qwen-tts/cache/
+
+# 生成的音频样音
+services/qwen-tts/samples/*.wav
+
+# 本地服务日志
+services/**/*.log

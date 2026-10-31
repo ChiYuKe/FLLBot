@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>萝莉声线试听</title>
+<style>
+  :root { --bg:#0e1116; --card:#161b23; --line:#242c37; --text:#e6edf3; --muted:#8b98a9; --accent:#f0a6ca; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.6 "Segoe UI","Microsoft YaHei",system-ui,sans-serif; }
+  header { padding:22px 26px 8px; border-bottom:1px solid var(--line); }
+  h1 { margin:0 0 6px; font-size:20px; letter-spacing:.5px; }
+  header p { margin:0; color:var(--muted); font-size:12px; }
+  main { max-width:980px; margin:0 auto; padding:18px 26px 50px; }
+  .item { display:grid; grid-template-columns:64px 1fr; gap:14px; align-items:center;
+          background:var(--card); border:1px solid var(--line); border-radius:12px; padding:14px 16px; margin-bottom:10px; }
+  .no { font-size:22px; font-weight:700; color:var(--accent); text-align:center; font-variant-numeric:tabular-nums; }
+  .name { font-weight:600; margin-bottom:2px; }
+  .desc { color:var(--muted); font-size:12px; margin-bottom:8px; }
+  audio { width:100%; height:36px; }
+  .meta { color:var(--muted); font-size:11px; margin-top:4px; }
+  footer { color:var(--muted); font-size:12px; margin-top:18px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>萝莉声线试听 · Qwen3-TTS VoiceDesign</h1>
+  <p>同一句话「你回来啦，我等你好久了，今天想听我说点什么呀？」· 十种描述 · 点播放即可</p>
+</header>
+<main id="list"></main>
+<footer>把喜欢的编号告诉我，我把它接成 bot 的音色。</footer>
+<script>
+const VOICES = [
+  ["01","软糯","软糯甜美，音调偏高，语速偏慢，句尾轻轻上扬，像在撒娇"],
+  ["02","元气","清亮活泼，音调高，语速稍快，咬字轻快有弹性"],
+  ["03","气声","气声重，贴耳低语，音量偏小，气息柔软"],
+  ["04","奶音","奶音，咬字偏软，带一点鼻音，句尾黏黏的"],
+  ["05","傲娇","清脆傲娇，语速中等，尾音短促，带一点不耐烦"],
+  ["06","慵懒","慵懒软萌，语速慢，尾音拖长，像刚睡醒"],
+  ["07","温柔","甜而不腻，中低音区，温柔平稳，气息均匀"],
+  ["08","小恶魔","小恶魔系，语速快，句尾俏皮上挑，带笑意"],
+  ["09","安静","安静温柔，气息轻，语速慢，几乎没有攻击性"],
+  ["10","微沙","带一点沙哑，音调偏低，有磁性，说话松弛"]
+];
+const list = document.getElementById("list");
+for (const [no, name, desc] of VOICES) {
+  const file = `${no}-${name}.wav`;
+  const el = document.createElement("div");
+  el.className = "item";
+  el.innerHTML = `
+    <div class="no">${parseInt(no, 10)}</div>
+    <div>
+      <div class="name">${name}</div>
+      <div class="desc">${desc}</div>
+      <audio controls preload="none" src="${file}"></audio>
+    </div>`;
+  list.appendChild(el);
+}
+</script>
+</body>
+</html>
