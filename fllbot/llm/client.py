@@ -6,9 +6,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
+import time
 from collections.abc import AsyncIterator, Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -16,6 +18,11 @@ from typing import Any
 import httpx
 
 from ..config import LLMConfig, LLMProviderConfig
+
+DEFAULT_CONTEXT_WINDOW = 8192
+
+# 网络抖动/瞬断时重试的次数与间隔；只重试传输层错误，HTTP 4xx/5xx 不重试。
+TRANSIENT_RETRY_DELAYS: tuple[float, ...] = (0.6, 1.5)
 
 
 class LLMError(RuntimeError):
@@ -35,6 +42,7 @@ class ChatResult:
     provider: str
     usage: dict[str, int] = field(default_factory=dict)
     finish_reason: str = ""
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
 
 
 def estimate_tokens(text: str) -> int:
@@ -58,6 +66,7 @@ class LLMClient:
         self._http = http_client
         self._owns_client = http_client is None
         self.logger = logging.getLogger("fllbot.llm")
+        self._catalogs: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
 
     @property
     def config(self) -> LLMConfig:
@@ -145,8 +154,9 @@ class LLMClient:
         max_tokens: int | None,
         temperature: float | None,
         stream: bool,
+        tools: Sequence[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
-        return {
+        payload = {
             "model": provider.model,
             "messages": [dict(item) for item in messages],
             "max_tokens": int(max_tokens if max_tokens is not None else provider.max_tokens or 800),
@@ -155,6 +165,40 @@ class LLMClient:
             ),
             "stream": stream,
         }
+        if tools:
+            payload["tools"] = [dict(item) for item in tools]
+            payload["tool_choice"] = "auto"
+        return payload
+
+    async def _post_with_retry(
+        self,
+        url: str,
+        config: LLMProviderConfig,
+        payload: dict[str, Any],
+        timeout: float | None,
+    ) -> httpx.Response:
+        """发送请求；连接失败、超时等传输层错误按 ``TRANSIENT_RETRY_DELAYS`` 重试。"""
+        attempts = len(TRANSIENT_RETRY_DELAYS) + 1
+        for attempt in range(attempts):
+            try:
+                return await self._client().post(
+                    url,
+                    headers=self._headers(config),
+                    json=payload,
+                    timeout=timeout or config.timeout or 60.0,
+                )
+            except httpx.TransportError as exc:
+                if attempt + 1 >= attempts:
+                    raise
+                self.logger.warning(
+                    "模型请求网络异常，%.1f 秒后重试（%d/%d）：%s",
+                    TRANSIENT_RETRY_DELAYS[attempt],
+                    attempt + 1,
+                    attempts - 1,
+                    exc,
+                )
+                await asyncio.sleep(TRANSIENT_RETRY_DELAYS[attempt])
+        raise AssertionError("重试循环不应到达这里")
 
     # -- 调用 ------------------------------------------------------------- #
     async def chat_result(
@@ -167,18 +211,16 @@ class LLMClient:
         provider: str | None = None,
         scene: str | None = None,
         task: str | None = None,
+        tools: Sequence[dict[str, Any]] | None = None,
     ) -> ChatResult:
         """调用模型并返回文本与用量。"""
         name, config = self.resolve(provider=provider, scene=scene, task=task)
         url = self.endpoint(config.base_url)
-        payload = self._payload(config, messages, max_tokens=max_tokens, temperature=temperature, stream=False)
+        payload = self._payload(
+            config, messages, max_tokens=max_tokens, temperature=temperature, stream=False, tools=tools
+        )
         try:
-            response = await self._client().post(
-                url,
-                headers=self._headers(config),
-                json=payload,
-                timeout=timeout or config.timeout or 60.0,
-            )
+            response = await self._post_with_retry(url, config, payload, timeout)
         except httpx.HTTPError as exc:
             raise LLMError(f"网络请求失败: {exc}") from exc
 
@@ -194,9 +236,18 @@ class LLMClient:
             raise LLMError(f"返回中没有 choices: {str(data)[:200]}")
         message = choices[0].get("message") or {}
         content = message.get("content")
-        if not isinstance(content, str):
-            raise LLMError("返回内容缺少 message.content")
-        text = content.strip()
+        if content is None:
+            text = ""
+        elif isinstance(content, str):
+            text = content.strip()
+        else:
+            raise LLMError("返回内容 message.content 格式错误")
+        raw_tool_calls = message.get("tool_calls") or []
+        if not isinstance(raw_tool_calls, list):
+            raise LLMError("返回内容 message.tool_calls 格式错误")
+        if not text and not raw_tool_calls:
+            raise LLMError("返回内容缺少 message.content 和 tool_calls")
+        tool_calls = [item for item in raw_tool_calls if isinstance(item, dict)]
 
         usage = data.get("usage") or {}
         prompt_tokens = int(usage.get("prompt_tokens") or 0)
@@ -216,6 +267,7 @@ class LLMClient:
                 "total_tokens": prompt_tokens + completion_tokens,
             },
             finish_reason=str(choices[0].get("finish_reason") or ""),
+            tool_calls=tool_calls,
         )
 
     async def chat(
@@ -300,18 +352,67 @@ class LLMClient:
             raise LLMError(f"网络请求失败: {exc}") from exc
 
     async def list_models(self, provider: str | None = None) -> list[str]:
-        name, config = self.resolve(provider=provider)
-        base = config.base_url.rstrip("/")
-        url = f"{base}/models" if base.endswith("/v1") else f"{base}/v1/models"
-        response = await self._client().get(
-            url,
-            headers=self._headers(config),
-            timeout=config.timeout or 60.0,
-        )
+        return [item["id"] for item in await self.model_catalog(provider=provider)]
+
+    async def model_catalog(
+        self, *, provider: str | None = None, base_url: str | None = None, api_key: str | None = None,
+        cached: bool = False,
+    ) -> list[dict[str, Any]]:
+        """Discover using draft credentials without saving them or returning secrets."""
+        _, resolved = self.resolve(provider=provider)
+        config = resolved.model_copy(update={
+            "base_url": base_url.strip() if base_url is not None else resolved.base_url,
+            **({"api_key": api_key.strip(), "api_key_env": ""} if api_key else {}),
+        })
+        base = self.endpoint(config.base_url).removesuffix("/chat/completions")
+        key = (base, self._api_key(config))
+        previous = self._catalogs.get(key)
+        if cached and previous and time.monotonic() - previous[0] < 300:
+            return previous[1]
+        try:
+            response = await self._client().get(
+                f"{base}/models", headers=self._headers(config), timeout=min(config.timeout or 20.0, 20.0),
+            )
+        except httpx.HTTPError as exc:
+            raise LLMError("无法连接模型服务，请检查服务地址与网络") from exc
         if response.status_code >= 400:
-            raise LLMError(_error_text(response), status=response.status_code)
-        data = response.json()
-        return [item.get("id", "") for item in data.get("data", [])]
+            # Discovery errors must never echo upstream request credentials.
+            raise LLMError(f"获取模型列表失败（HTTP {response.status_code}），请检查地址、密钥和权限", status=response.status_code)
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise LLMError("模型列表接口未返回有效 JSON") from exc
+        if not isinstance(data, dict) or not isinstance(data.get("data"), list):
+            raise LLMError("模型列表格式错误：缺少 data 数组")
+        result: dict[str, dict[str, Any]] = {}
+        for item in data["data"]:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"].strip():
+                continue
+            window = None
+            for metadata in (item, item.get("top_provider"), item.get("limits")):
+                if not isinstance(metadata, dict):
+                    continue
+                for context_key in ("context_window", "context_length", "max_context_length", "max_input_tokens"):
+                    value = metadata.get(context_key)
+                    if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                        window = value
+                        break
+                if window:
+                    break
+            result[item["id"]] = {"id": item["id"], "context_window": window}
+        catalog = sorted(result.values(), key=lambda item: item["id"].lower())
+        self._catalogs[key] = (time.monotonic(), catalog)
+        return catalog
+
+    async def context_window(self, *, scene: str | None = None, provider: str | None = None) -> int | None:
+        name, config = self.resolve(scene=scene, provider=provider)
+        try:
+            catalog = await self.model_catalog(provider=name, cached=True)
+        except LLMError:
+            base = self.endpoint(config.base_url).removesuffix("/chat/completions")
+            self._catalogs[(base, self._api_key(config))] = (time.monotonic(), [])
+            return None
+        return next((item["context_window"] for item in catalog if item["id"] == config.model), None)
 
 
 def _error_text(response: httpx.Response) -> str:
@@ -325,4 +426,4 @@ def _error_text(response: httpx.Response) -> str:
     return f"{response.status_code}: {response.text[:300]}"
 
 
-__all__ = ["ChatResult", "LLMClient", "LLMError", "estimate_tokens"]
+__all__ = ["ChatResult", "DEFAULT_CONTEXT_WINDOW", "LLMClient", "LLMError", "estimate_tokens"]

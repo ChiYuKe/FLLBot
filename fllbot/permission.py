@@ -58,10 +58,13 @@ class PermissionManager:
         permission = self.bot.config.permission
         if gid in set(permission.deny_groups):
             return False
-        if permission.allow_groups and gid not in set(permission.allow_groups):
+        restricted = permission.group_access == "listed" or permission.group_access == "auto" and bool(permission.allow_groups)
+        if restricted and gid not in set(permission.allow_groups):
             return False
         state = self._groups.get(gid)
         if state is None:
+            return bool(permission.default_group_enabled)
+        if (state.get("config") or {}).get("_inherit_enabled"):
             return bool(permission.default_group_enabled)
         return bool(state.get("enabled", True))
 
@@ -91,14 +94,26 @@ class PermissionManager:
     async def set_group_enabled(self, group_id: int, enabled: bool) -> None:
         gid = int(group_id)
         await self.ensure_group(gid)
-        await self.bot.storage.upsert_group(gid, enabled=enabled, config=None)
-        self._groups.setdefault(gid, {})["enabled"] = bool(enabled)
+        config = self.group_config(gid)
+        config.pop("_inherit_enabled", None)
+        await self.save_group(gid, enabled=enabled, config=config)
 
     async def set_group_config(self, group_id: int, config: dict[str, Any]) -> None:
         gid = int(group_id)
         await self.ensure_group(gid)
         await self.bot.storage.upsert_group(gid, enabled=None, config=config)
         self._groups.setdefault(gid, {})["config"] = dict(config)
+
+    async def save_group(self, group_id: int, *, enabled: bool, config: dict[str, Any], reset_agent: bool = False) -> None:
+        """将一组单群设置作为一次数据库更新保存。"""
+        gid = int(group_id)
+        async with self._group_lock:
+            agent = self.bot.plugins.get("agent") if reset_agent else None
+            await self.bot.storage.upsert_group(gid, enabled=enabled, config=config,
+                                                clear_settings_scope=agent.settings.scope if agent else None)
+            if agent:
+                agent.settings.forget_group(gid)
+            self._groups[gid] = {"enabled": enabled, "config": dict(config)}
 
     def list_groups(self) -> list[dict[str, Any]]:
         result = []

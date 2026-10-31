@@ -13,10 +13,10 @@ from fastapi.testclient import TestClient
 from fllbot.app import create_app
 from fllbot.config import LLMConfig
 from fllbot.llm.chat import split_text
-from fllbot.llm.client import LLMClient
+from fllbot.llm.client import LLMClient, LLMError
 from fllbot.onebot.models import parse_event
 from fllbot.plugin.context import Context
-from helpers import FakeConnection, build_bot, group_message, make_bot
+from helpers import FakeConnection, build_bot, group_message, make_bot, private_message
 
 AUTH = {"Authorization": "Bearer admin-token"}
 
@@ -27,6 +27,7 @@ LLM_CONFIG = {
     "model": "test-model",
     "cooldown_seconds": 0,
     "max_context_messages": 6,
+    "context_mode": "custom",
     "max_context_chars": 2000,
     "chunk_size": 500,
 }
@@ -77,10 +78,14 @@ async def test_respond_saves_history(llm_bot) -> None:
     assert conn.texts() == ["你好呀"]
     assert captured[0]["model"] == "test-model"
     assert captured[0]["messages"][0]["role"] == "system"
-    assert captured[0]["messages"][-1] == {"role": "user", "content": "早上好"}
+    assert captured[0]["messages"][-1] == {
+        "role": "user",
+        "content": "测试用户(30003，成员)：早上好",
+    }
 
     rows = await llm_bot.storage.recent_chat("group", 20002)
-    assert rows == [("user", "早上好"), ("assistant", "你好呀")]
+    assert [(row.role, row.content) for row in rows] == [("user", "早上好"), ("assistant", "你好呀")]
+    assert (rows[0].user_id, rows[0].nickname, rows[0].sender_role) == (30003, "测试用户", "member")
 
 
 async def test_second_turn_includes_history(llm_bot) -> None:
@@ -95,7 +100,32 @@ async def test_second_turn_includes_history(llm_bot) -> None:
     second = captured[1]["messages"]
     roles = [item["role"] for item in second]
     assert roles == ["system", "user", "assistant", "user"]
-    assert second[1]["content"] == "第一句"
+    assert second[1]["content"] == "测试用户(30003，成员)：第一句"
+    assert second[3]["content"] == "测试用户(30003，成员)：第二句"
+
+
+async def test_group_history_labels_each_sender(llm_bot) -> None:
+    captured: list[dict[str, Any]] = []
+    patch_client(llm_bot, make_transport("好", captured))
+
+    first = parse_event(group_message("第一句", user_id=30003, nickname="小明", role="admin"))
+    second = parse_event(group_message("第二句", user_id=40004, nickname="小红", role="member"))
+    await llm_bot.chat.respond(Context(bot=llm_bot, connection=FakeConnection(), event=first), "第一句")  # type: ignore[arg-type]
+    await llm_bot.chat.respond(Context(bot=llm_bot, connection=FakeConnection(), event=second), "第二句")  # type: ignore[arg-type]
+
+    messages = captured[1]["messages"]
+    assert messages[1] == {"role": "user", "content": "小明(30003，管理员)：第一句"}
+    assert messages[3] == {"role": "user", "content": "小红(40004，成员)：第二句"}
+
+
+async def test_private_history_has_no_sender_label(llm_bot) -> None:
+    captured: list[dict[str, Any]] = []
+    patch_client(llm_bot, make_transport("嗯", captured))
+
+    ctx = Context(bot=llm_bot, connection=FakeConnection(), event=parse_event(private_message("你好")))  # type: ignore[arg-type]
+    await llm_bot.chat.respond(ctx, "你好")
+
+    assert captured[0]["messages"][-1] == {"role": "user", "content": "你好"}
 
 
 async def test_persona_is_rendered(llm_bot) -> None:
@@ -257,3 +287,42 @@ def test_usage_api_endpoint(tmp_path: Path) -> None:
         assert usage["requests"] == 1
         assert usage["total_tokens"] == 15
         assert usage["by_model"][0]["model"] == "test-model"
+
+
+async def test_transient_network_errors_are_retried(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("fllbot.llm.client.TRANSIENT_RETRY_DELAYS", (0.0, 0.0))
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls < 3:
+            raise httpx.ConnectError("temporary", request=request)
+        return httpx.Response(200, json={
+            "choices": [{"message": {"role": "assistant", "content": "重试成功"}}],
+            "usage": {"prompt_tokens": 3, "completion_tokens": 2},
+        })
+
+    config = LLMConfig(api_key="k", base_url="http://mock.local", model="m")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = LLMClient(lambda: config, http_client=http)
+        result = await client.chat_result([{"role": "user", "content": "hi"}])
+    assert result.text == "重试成功"
+    assert calls == 3
+
+
+async def test_network_error_still_fails_after_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("fllbot.llm.client.TRANSIENT_RETRY_DELAYS", (0.0, 0.0))
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        raise httpx.ConnectError("down", request=request)
+
+    config = LLMConfig(api_key="k", base_url="http://mock.local", model="m")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = LLMClient(lambda: config, http_client=http)
+        with pytest.raises(LLMError, match="网络请求失败"):
+            await client.chat_result([{"role": "user", "content": "hi"}])
+    assert calls == 3

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 _PLACEHOLDER = re.compile(r"\{([a-zA-Z_][a-zA-Z0-9_]*)\}")
+_PERSONA_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 _SKIP_STEMS = {"readme", "index", "_template", "example"}
 
 DEFAULT_PERSONA_TEXT = (
@@ -101,6 +102,48 @@ class PersonaStore:
 
     def names(self) -> list[str]:
         return sorted(self._personas)
+
+    def is_editable(self, name: str) -> bool:
+        persona = self._personas.get(name)
+        return bool(persona and persona.path and persona.path.resolve().parent == self.dirs[-1].resolve())
+
+    def save(self, name: str, title: str, description: str, content: str) -> Persona:
+        """Save a user-managed persona in the writable personas directory."""
+        if not _PERSONA_NAME.fullmatch(name):
+            raise ValueError("人格名称只能包含英文字母、数字、下划线和连字符，且不能以符号开头")
+        if not content.strip():
+            raise ValueError("人格提示词不能为空")
+        if len(title) > 100 or len(description) > 300 or len(content) > 50000:
+            raise ValueError("人格名称、简介或提示词超过允许长度")
+        directory = self.dirs[-1]
+        target = directory / f"{name}.md"
+        existing = self._personas.get(name)
+        if existing and not self.is_editable(name):
+            raise ValueError("内置人格不可覆盖，请使用其他名称另存")
+        if target.exists() and (not existing or not existing.path or existing.path.resolve() != target.resolve()):
+            raise ValueError("同名人格文件已存在")
+        clean_title = " ".join(title.splitlines()).strip() or name
+        clean_description = " ".join(description.splitlines()).strip()
+        directory.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            f"---\nname: {name}\ntitle: {clean_title}\ndescription: {clean_description}\n---\n\n{content.strip()}\n",
+            encoding="utf-8",
+        )
+        self.reload()
+        persona = self.find(name)
+        if persona is None:  # pragma: no cover - file was just written
+            raise RuntimeError("保存人格后无法重新载入")
+        return persona
+
+    def delete(self, name: str) -> None:
+        persona = self._personas.get(name)
+        if persona is None:
+            raise KeyError(name)
+        if not self.is_editable(name):
+            raise ValueError("内置人格不可删除")
+        assert persona.path is not None
+        persona.path.unlink()
+        self.reload()
 
     @property
     def fallback(self) -> Persona:
