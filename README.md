@@ -4,7 +4,7 @@
 
 - 协议：OneBot 11（反向 WebSocket，NapCat 主动连过来）
 - 运行时：Python 3.11+，FastAPI + asyncio + SQLite
-- 定位：本地 / 单机自用；管理 UI 交给桌面端（例如 `qq-bot-starter`），本项目只提供 API
+- 定位：本地 / 单机自用；内置管理后台，也可由桌面端（例如 `qq-bot-starter`）嵌入
 
 ```
 ┌──────────┐   反向 WS（OneBot 11）   ┌─────────────────────────────┐
@@ -24,13 +24,11 @@
 - **插件声明式配置**：`plugin.setting(...)` 声明 schema（bool/int/float/select/list/secret），支持全局值与按群覆盖，管理端可直接渲染成表单（`/api/plugins/{name}/settings`）
 - **插件 README**：支持 `plugins/<name>/README.md`、单文件插件同名 `.md` 或 `plugin.readme`，管理端用 `/api/plugins/{name}/readme` 读取（Markdown）
 - **权限**：超管、群主/管理员、私聊开关、群白名单/黑名单、按群启用或停用某个插件、每用户冷却
-- **持久化**：SQLite + `PRAGMA user_version` 迁移；插件配置、群配置、插件状态、聊天历史、消息统计、定时提醒
-- **LLM 对话**：OpenAI 兼容接口，支持多 provider 路由（按场景/任务），多轮上下文裁剪、人格文件（`personas/*.md`）、@ 或前缀触发、长回复分条、限流、按群切换人格、token/费用用量统计
-- **群治理**：入群欢迎/退群提示、违禁词（支持正则）、刷屏检测与自动撤回/禁言
-- **定时提醒**：`/remind 10m 喝水`，按会话持久化，断线后恢复继续触发
+- **持久化**：SQLite + `PRAGMA user_version` 迁移；插件配置、群配置、插件状态、聊天历史、消息统计
+- **LLM 子系统**：OpenAI 兼容接口、上下文与人格管理，可供管理 API 和自定义插件使用
 - **管理 API**：状态/连接/插件/群/配置/日志/统计/人格/插件配置、通用 OneBot 调用、KV 读写、SSE 实时事件流
 - **可靠性**：事件短窗去重（防重连重放）、端口占用自检、处理器超时与异常隔离
-- **开箱内置插件**：`ping`、`echo`、`help`、`llm_chat`、`request_notify`、`group_guard`、`reminder`、`admin`
+- **开箱内置插件**：`basic`（包含 `ping`、`echo`、`help`、`plugins` 命令）和 `agent`（群级自然语言智能体，按需调用插件工具）
 
 ## 快速开始（Windows）
 
@@ -54,7 +52,7 @@ notepad config.toml
 
 ```
 WARNING fllbot: 管理 API 令牌：xxxxx（文件：...\data\admin_token.txt）
-INFO  fllbot: FLLBot 0.1.0 已启动：WS /onebot/v11/ws | 插件 6 个 | LLM 未启用
+INFO  fllbot: FLLBot 0.1.0 已启动：WS /onebot/v11/ws | 插件 2 个 | LLM 未启用
 ```
 
 ### 配置 NapCat
@@ -99,7 +97,7 @@ INFO  fllbot: FLLBot 0.1.0 已启动：WS /onebot/v11/ws | 插件 6 个 | LLM �
 | `plugin` | `dirs` `builtin` `hot_reload` `max_concurrency` `handler_timeout` | 插件目录、内置插件、热重载与并发 |
 | `storage` | `path` | SQLite 路径（改动需重启） |
 | `logging` | `level` `dir` `json_lines` `ring_size` | 控制台 + JSONL 文件 + 内存环形缓冲 |
-| `llm` | `enabled` `base_url` `api_key` `model` `trigger` `persona` ... | 大模型对话 |
+| `llm` | `enabled` `base_url` `api_key` `model` `persona` ... | LLM 服务配置，供 API 与自定义插件使用 |
 
 > 运行时用 `PATCH /api/config` 修改的配置会存进数据库 `meta` 表并覆盖文件配置，重启后仍然生效；`storage.path`、`plugin.dirs` 这类启动期路径需要重启才能生效。
 
@@ -108,37 +106,42 @@ INFO  fllbot: FLLBot 0.1.0 已启动：WS /onebot/v11/ws | 插件 6 个 | LLM �
 | 命令 | 说明 | 权限 |
 | --- | --- | --- |
 | `/ping`（`在吗` `pong`） | 连通性测试 | 所有人 |
-| `/echo <内容>`（`复读`） | 原样复读 | 所有人 |
-| `/help`（`帮助` `菜单`） | 列出命令 | 所有人 |
+| `/echo <内容>`（`复读` `repeat`） | 原样复读 | 所有人 |
+| `/help`（`帮助` `菜单` `commands`） | 列出可用命令 | 所有人 |
 | `/plugins`（`插件`） | 插件状态 | 所有人 |
-| `/chat clear` | 清空本会话上下文 | 超管 / 群管 |
-| `/chat persona [名称]` | 查看/切换本群人格 | 超管 / 群管 |
-| `/requests` | 待处理好友/入群请求 | 超管 |
-| `/approve <标记>` | 同意请求 | 超管 |
-| `/reject <标记> [理由]` | 拒绝请求 | 超管 |
-| `/guard` | 查看群治理配置 | 群管 |
-| `/welcome on\|off\|set <模板>` | 入群欢迎开关与文案 | 群管 |
-| `/badword add\|del\|list [词]` | 违禁词管理（`re:` 开头按正则） | 群管 |
-| `/remind 10m 喝水` | 定时提醒 | 所有人 |
-| `/remind list` / `/remind del <编号>` | 查看 / 删除提醒 | 所有人 |
-| `/status` | 运行状态（连接、插件、LLM、消息量） | 超管 |
-| `/reload <插件>` | 热重载插件 | 超管 |
-| `/plugin on\|off <插件>` | 全局启停插件 | 超管 |
-| `/group on\|off` | 启停本群的机器人 | 群管 |
 
-LLM 对话默认 **群里 @ 机器人** 或 **私聊直接说话** 触发；改成前缀触发：`llm.trigger = "prefix"` + `llm.trigger_prefix = "ai"`。
+LLM 客户端和管理 API 可供自定义插件调用。WebUI 将行为与群聊规则收进“配置”，将模型和人格作为可复用资源管理。智能体默认不读取群消息；开启后可选择仅 @、唤醒词或自动参与群聊，并勾选可调用的插件工具。
 
-> 群治理的欢迎语、违禁词、刷屏阈值都支持按群覆盖：群里用 `/welcome`、`/badword` 设置，
-> 或调用 `PATCH /api/plugins/group_guard/settings`（带 `group_id`）。
+## 联网工具（web 插件）
+
+`plugins/web/` 插件包让机器人和智能体能查实时信息，命令和智能体工具共用同一套实现：
+
+| 命令 | 说明 |
+| --- | --- |
+| `/搜索 <关键词>`（`搜索` `联网`） | 网页搜索，返回标题、链接和摘要；默认必应，可切 Tavily / Serper / SearXNG |
+| `/天气 <城市>`（`天气`） | 实时天气 + 未来几天预报，数据来自 Open-Meteo，免密钥 |
+| `/现在 [城市]`（`时间` `几点`） | 当前日期和时间，可指定城市时区 |
+
+智能体工具：`web__web_search`、`web__read_webpage`、`web__get_weather`、`web__get_current_time`。
+需要阅读指定链接时授权「读取网页」；在「智能体 → 允许调用的工具」（或单群详细设置的“可用工具”）里勾选对应工具后，模型才会看到它们；配置项（搜索后端、
+API Key、默认城市、预报天数、超时）都在插件配置里，详见 [plugins/web/README.md](plugins/web/README.md)。
 
 ## 写插件
 
-在 `plugins/` 下新建文件（保存即热重载）：
+统一采用**一个文件夹一个插件包**，先生成完整目录、包头、配置和文档：
+
+```powershell
+.venv/Scripts/python.exe -m fllbot plugin new welcome --description "入群欢迎"
+.venv/Scripts/python.exe -m fllbot plugin check --builtin
+.venv/Scripts/python.exe -m fllbot plugin list
+```
+
+`--template tool` 可生成带 AI 工具的模板。以下是包内 `plugin.py` 的装饰器用法示例：
 
 ```python
 from fllbot.plugin import Context, Plugin, keyword
 
-plugin = Plugin(name="welcome", version="0.2.0", description="入群欢迎")
+plugin = Plugin.from_manifest(__file__)
 
 # 声明配置项：管理端会自动渲染成表单，也可以按群覆盖
 plugin.setting("text", type="text", label="欢迎语", default="欢迎 {nickname} 加入本群～", group_scoped=True)
@@ -169,11 +172,13 @@ async def morning(ctx: Context) -> None:
 
 要点：
 
-- 模块里必须导出 `plugin = Plugin(...)` 实例（名字唯一）
+- `__init__.py` 导出 plugin，包头统一放在 plugin.toml，name 与文件夹名一致
 - 装饰器：`on_command` / `on_message` / `on_notice` / `on_request` / `on_meta_event` / `on_startup` / `on_shutdown` / `on_loop`
 - `ctx` 提供 `reply()` `finish()` `send()` `delete()` `get_member()`，以及 `db`（SQLite）、`settings`（插件配置）、`llm`、`config`、`is_superuser`
 - 配置项用 `plugin.setting(...)` 声明，群里读取 `ctx.settings.get("key")` 会自动取本群覆盖值
 - 详细 API 见 [docs/plugin-api.md](docs/plugin-api.md)
+
+包内目录、文件头和文档要求见 [插件包规范](docs/plugin-packages.md)；宿主分层和新增功能放置约定见 [项目架构](docs/architecture.md)。
 
 ## 管理 API
 
@@ -199,11 +204,20 @@ FLLBot 自带一个单页控制台，零外部依赖、可直接被桌面端 ifr
 http://127.0.0.1:6701/ui?token=<data/admin_token.txt 里的令牌>
 ```
 
-- 展示运行时长、NapCat 连接、插件与分发统计、LLM 状态、最近日志
-- 插件可直接启用/停用，也能点「说明」查看插件 README（Markdown）
+- **概览**：连接、模型、回复与插件就绪检查，直接定位缺少的配置
+- **配置**：页内切换“群聊设置 / 默认行为”，只显示主动新增及已有的单群覆盖；未添加的群使用默认行为。常用项紧凑排列并自动保存，详细参数点击“编辑”；访问准入与默认访问范围也在同一张表内修改
+- **模型服务**：页内切换“模型接入 / 对话测试”，维护模型资源并测试回答
+- **人格库**：新建、编辑、删除自定义人格，设置默认人格，供群策略选择
+- **插件**：管理已安装插件、配置与使用说明
+- **数据与日志**：页内切换“运行日志 / 会话记录 / 用量统计”
+- **底部系统设置**：连接地址、管理员、命令前缀、私聊、黑名单、上下文和日志级别
+- 插件可直接启用/停用、编辑声明式配置，也能点「说明」查看插件 README（Markdown）；配置支持全局默认和群级覆盖
 - 数据每 5 秒自动刷新；页面本身公开，数据请求都带令牌，也可不带参数打开后手工输入
 - 不依赖 CDN，断网、内网环境都能用
-- 风格与桌面端对齐：深色卡片布局，支持 `?theme=light|dark`（桌面端会按当前主题自动带上）
+- 沿用 QQ 桌面控制台样式，内嵌时实时同步桌面主题和字体；支持明暗主题、窄屏布局和 `#models` 等页面链接，切换页面保留未保存草稿
+- 页面源码按 `fllbot/ui/` 下的 HTML、CSS、JS 分开维护，响应仍是零外部依赖的单个页面
+
+更详细的操作说明见 [后台使用指南](docs/console.md)。
 
 桌面端的「切换 WebUI」菜单里已经加了 **FLLBot WebUI** 一项，点击后在面板内嵌打开。
 
@@ -226,11 +240,10 @@ FLLBot 在 OneBot 体系里扮演「机器人框架」的位置，但连接方�
 桌面端 `qq-bot-starter` 的「插件管理 → FLLBot 插件」tab 已经接好：
 
 - 管理服务通过 `/api/fllbot/*` 反向代理访问本机 FLLBot，前端 CSP 保持只放行 6700
-- 侧边栏「服务 → FLLBot」选择 FLLBot 目录后，会自动读取该目录的 `data/admin_token.txt`，
-  不需要手工填令牌；手工填写时用 Windows DPAPI 加密存在 `data/admin/fllbot.json`，不会回传到页面
-- 插件列表支持启停；配置弹窗按 `plugin.setting(...)` 声明的 schema 自动渲染
-  （bool / int / float / text / select / 多选 / 列表，密文不回显）
-- 可切换「全局默认」或指定群做覆盖，只提交改动过的字段，避免把群覆盖写成整份全局值
+- 侧边栏「服务 → FLLBot」选择 FLLBot 目录后，会自动读取该目录的 `data/admin_token.txt`；
+  连接地址与令牌只由管理服务持有，插件页上没有填写令牌或地址的表单
+- 插件列表只做发现：按 `/api/plugins` 展示名称、版本、处理器、配置项数量与 README，
+  不在控制台里提供启停或配置入口；要改就到「切换 WebUI → FLLBot WebUI」里操作
 
 ## 目录结构
 
@@ -246,7 +259,7 @@ fllbot/
 ├── storage/            # SQLite + 迁移 + 仓储
 ├── llm/                # 客户端、人格、多轮对话
 ├── api/                # 管理 REST + SSE
-├── builtin_plugins/    # ping / echo / help / llm_chat / request_notify / group_guard / reminder / admin
+├── builtin_plugins/    # basic 与 agent
 └── personas/           # 内置人格
 plugins/                # 用户插件（运行时加载，已 gitignore 之外）
 personas/               # 用户人格（同名覆盖内置）
