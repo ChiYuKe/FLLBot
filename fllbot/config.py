@@ -11,9 +11,9 @@ import json
 import os
 import tomllib
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 DEFAULT_CONFIG_FILE = "config.toml"
 ENV_PREFIX = "FLLBOT_"
@@ -55,6 +55,8 @@ class PermissionConfig(BaseModel):
 
     # 非空时，只有列表内的群才会被处理（白名单）。
     allow_groups: list[int] = Field(default_factory=list)
+    # auto preserves existing allow-list semantics; listed also supports an empty list.
+    group_access: Literal["auto", "all", "listed"] = "auto"
     # 黑名单里的群一律忽略。
     deny_groups: list[int] = Field(default_factory=list)
     # 未登记过的群默认是否启用。
@@ -117,6 +119,8 @@ class LLMConfig(BaseModel):
     timeout: float = 60.0
     max_tokens: int = 800
     temperature: float = 0.8
+    context_window: int | None = Field(default=None, ge=1)
+    context_mode: Literal["model", "custom"] = "model"
     max_context_messages: int = 16
     max_context_chars: int = 4000
     enable_private: bool = True
@@ -168,6 +172,33 @@ class LLMConfig(BaseModel):
         return self.default or "default"
 
 
+class ChatConfig(BaseModel):
+    """What chat information may be included in outbound model messages."""
+
+    send_nickname: bool = True
+    send_user_id: bool = True
+    send_role: bool = True
+    send_time: bool = False
+    allow_images: bool = False
+    read_forward: bool = False
+    reply_mode: Literal["auto", "forward", "split"] = "auto"
+    forward_threshold: int = Field(default=1200, ge=200, le=20000)
+    reply_chunk_size: int = Field(default=0, ge=0, le=5000)
+    reply_interval_ms: int = Field(default=350, ge=0, le=5000)
+    quote_reply: bool = False
+    at_sender: bool = False
+    wake_word: str = Field(default="", max_length=80)
+    wake_only_mode: Literal["prompt", "raw", "fixed", "ignore"] = "prompt"
+    wake_only_prompt: str = Field(default="（用户只叫了你的名字，没有说具体内容，请简短自然地回应。）", min_length=1, max_length=2000)
+    wake_only_replies: list[str] = Field(default_factory=list, max_length=50)
+
+    @field_validator("wake_only_replies")
+    @classmethod
+    def _clean_wake_only_replies(cls, value: list[str]) -> list[str]:
+        """去掉空行和首尾空白，只保留实际可发送的固定回复。"""
+        return [item.strip() for item in value if item and item.strip()][:50]
+
+
 class AppConfig(BaseModel):
     """完整配置树。"""
 
@@ -179,6 +210,7 @@ class AppConfig(BaseModel):
     storage: StorageConfig = Field(default_factory=StorageConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
+    chat: ChatConfig = Field(default_factory=ChatConfig)
 
 
 # --------------------------------------------------------------------------- #
@@ -306,14 +338,17 @@ def resolve_path(root: Path, value: str) -> Path:
     return candidate if candidate.is_absolute() else (root / candidate)
 
 
-def mask_secrets(config: AppConfig) -> dict[str, Any]:
+def mask_secrets(config: AppConfig | dict[str, Any]) -> dict[str, Any]:
     """导出配置用于 API 展示，隐藏密钥。"""
-    data = config.model_dump()
-    data["llm"]["api_key"] = _mask(config.llm.api_key)
-    for provider in data["llm"].get("providers", {}).values():
+    data = config.model_dump() if isinstance(config, AppConfig) else copy.deepcopy(config)
+    llm = data.get("llm", {})
+    if "api_key" in llm:
+        llm["api_key"] = _mask(llm["api_key"])
+    for provider in llm.get("providers", {}).values():
         provider["api_key"] = _mask(provider.get("api_key", ""))
-    data["admin"]["token"] = _mask(config.admin.token)
-    data["server"]["access_token"] = _mask(config.server.access_token)
+    for section, key in (("admin", "token"), ("server", "access_token")):
+        if key in data.get(section, {}):
+            data[section][key] = _mask(data[section][key])
     return data
 
 

@@ -27,7 +27,7 @@ def test_health_and_auth(tmp_path: Path) -> None:
         assert status.status_code == 200
         data = status.json()
         names = {item["name"] for item in data["plugins"]}
-        assert {"ping", "echo", "help", "llm_chat"} <= names
+        assert names == {"basic", "agent"}
         assert data["storage"]["schema_version"] >= 1
         assert data["ws_path"] == "/onebot/v11/ws"
 
@@ -41,64 +41,28 @@ def test_token_via_query_param(tmp_path: Path) -> None:
 def test_plugin_toggle_and_reload(tmp_path: Path) -> None:
     bot = build_bot(tmp_path, builtin=True)
     with TestClient(create_app(bot)) as client:
-        detail = client.get("/api/plugins/ping", headers=AUTH)
+        detail = client.get("/api/plugins/basic", headers=AUTH)
         assert detail.status_code == 200
         assert detail.json()["enabled"] is True
 
-        toggled = client.post("/api/plugins/ping/enabled", headers=AUTH, json={"enabled": False})
+        toggled = client.post("/api/plugins/basic/enabled", headers=AUTH, json={"enabled": False})
         assert toggled.status_code == 200
-        assert client.get("/api/plugins/ping", headers=AUTH).json()["enabled"] is False
+        assert client.get("/api/plugins/basic", headers=AUTH).json()["enabled"] is False
 
-        reloaded = client.post("/api/plugins/reload", headers=AUTH, json={"name": "ping"})
+        reloaded = client.post("/api/plugins/reload", headers=AUTH, json={"name": "basic"})
         assert reloaded.status_code == 200
-        assert reloaded.json()["reloaded"] == "ping"
+        assert reloaded.json()["reloaded"] == "basic"
 
         missing = client.post("/api/plugins/nope/reload", headers=AUTH)
         assert missing.status_code == 404
 
 
-def test_plugin_settings_endpoints(tmp_path: Path) -> None:
+def test_removed_builtin_plugin_settings_return_404(tmp_path: Path) -> None:
     bot = build_bot(tmp_path, builtin=True)
     with TestClient(create_app(bot)) as client:
-        detail = client.get("/api/plugins/group_guard/settings", headers=AUTH)
-        assert detail.status_code == 200
-        keys = {item["key"] for item in detail.json()["schema"]}
-        assert {"welcome_enabled", "badwords", "spam_limit"} <= keys
-
-        patched = client.patch(
-            "/api/plugins/group_guard/settings",
-            headers=AUTH,
-            json={"values": {"welcome_enabled": False, "badwords": ["广告"], "spam_limit": 9}},
-        )
-        assert patched.status_code == 200
-        assert patched.json()["values"]["welcome_enabled"] is False
-        assert patched.json()["values"]["badwords"] == ["广告"]
-
-        override = client.patch(
-            "/api/plugins/group_guard/settings",
-            headers=AUTH,
-            json={"group_id": 20002, "values": {"welcome_template": "本群专属欢迎"}},
-        )
-        assert override.status_code == 200
-        grouped = client.get("/api/plugins/group_guard/settings?group_id=20002", headers=AUTH).json()
-        assert grouped["values"]["welcome_template"] == "本群专属欢迎"
-
-        global_values = client.get("/api/plugins/group_guard/settings", headers=AUTH).json()
-        assert global_values["values"]["welcome_template"] != "本群专属欢迎"
-
-        assert (
-            client.patch(
-                "/api/plugins/group_guard/settings", headers=AUTH, json={"values": {"spam_limit": 999}}
-            ).status_code
-            == 400
-        )
-        assert (
-            client.patch(
-                "/api/plugins/group_guard/settings", headers=AUTH, json={"values": {"nope": 1}}
-            ).status_code
-            == 400
-        )
-        assert client.get("/api/plugins/nope/settings", headers=AUTH).status_code == 404
+        for name in ("llm_chat", "request_notify", "group_guard", "reminder", "admin"):
+            assert client.get(f"/api/plugins/{name}", headers=AUTH).status_code == 404
+            assert client.get(f"/api/plugins/{name}/settings", headers=AUTH).status_code == 404
 
 
 def test_config_patch(tmp_path: Path) -> None:
@@ -169,15 +133,15 @@ def test_builtin_plugin_readme(tmp_path: Path) -> None:
     bot = build_bot(tmp_path, builtin=True)
     with TestClient(create_app(bot)) as client:
         plugins = {item["name"]: item for item in client.get("/api/plugins", headers=AUTH).json()}
-        assert plugins["ping"]["has_readme"] is True
+        assert plugins["basic"]["has_readme"] is True
 
-        response = client.get("/api/plugins/ping/readme", headers=AUTH)
+        response = client.get("/api/plugins/basic/readme", headers=AUTH)
         assert response.status_code == 200
         body = response.json()
         assert body["format"] == "markdown"
-        assert body["content"].startswith("# ping")
+        assert body["content"].startswith("# basic")
 
-        assert client.get("/api/plugins/ping/readme").status_code == 401
+        assert client.get("/api/plugins/basic/readme").status_code == 401
         assert client.get("/api/plugins/no-such-plugin/readme", headers=AUTH).status_code == 404
 
 

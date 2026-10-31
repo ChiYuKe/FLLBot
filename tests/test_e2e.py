@@ -43,6 +43,13 @@ def _text_of(payload: dict) -> str:
     )
 
 
+async def identify_bot(ws) -> None:
+    payload = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
+    assert payload["action"] == "get_login_info"
+    await ws.send(json.dumps({"status": "ok", "retcode": 0, "echo": payload["echo"],
+                              "data": {"user_id": 10001, "nickname": "木鱼"}}))
+
+
 async def test_full_message_roundtrip(tmp_path: Path) -> None:
     bot = build_bot(tmp_path, builtin=True)
     app = create_app(bot)
@@ -51,6 +58,7 @@ async def test_full_message_roundtrip(tmp_path: Path) -> None:
 
     try:
         async with websockets.connect(url) as ws:
+            await identify_bot(ws)
             await ws.send(json.dumps(lifecycle()))
 
             await ws.send(json.dumps(group_message("/ping")))
@@ -58,6 +66,7 @@ async def test_full_message_roundtrip(tmp_path: Path) -> None:
             assert payload["action"] == "send_group_msg"
             assert payload["params"]["group_id"] == 20002
             assert "pong" in _text_of(payload)
+            assert bot.bots.nickname(10001) == "木鱼"
             await ws.send(json.dumps({"status": "ok", "retcode": 0, "data": {"message_id": 1}, "echo": payload["echo"]}))
 
             await ws.send(json.dumps(group_message("/help", message_id=2)))
@@ -99,6 +108,7 @@ async def test_accepts_arbitrary_path(tmp_path: Path) -> None:
 
     try:
         async with websockets.connect(url) as ws:
+            await identify_bot(ws)
             await ws.send(json.dumps(group_message("/echo 复读测试", message_id=3)))
             payload = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
             assert payload["action"] == "send_group_msg"

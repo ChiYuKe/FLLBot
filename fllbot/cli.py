@@ -14,6 +14,7 @@ from . import __version__
 from .app import FLLBot, create_app
 from .config import ConfigStore, load_config_dict, mask_secrets, resolve_path
 from .logging_setup import configure_logging
+from .plugin.scaffold import check_package, create_package
 
 _MINIMAL_CONFIG = """# FLLBot 配置（由 fllbot init 生成）
 [server]
@@ -44,18 +45,6 @@ base_url = "https://api.deepseek.com"
 api_key = ""
 model = "deepseek-chat"
 """
-
-_EXAMPLE_PLUGIN = '''"""示例插件：改动保存后会自动热重载。"""
-
-from fllbot.plugin import Context, Plugin
-
-plugin = Plugin(name="hello", version="0.1.0", description="示例插件：/hello 打个招呼")
-
-
-@plugin.on_command("hello", aliases=("你好",))
-async def hello(ctx: Context) -> None:
-    await ctx.reply(f"你好，{ctx.nickname}！我是 FLLBot。", quote=True)
-'''
 
 
 def _configure_stdio() -> None:
@@ -88,6 +77,24 @@ def build_parser() -> argparse.ArgumentParser:
     check = sub.add_parser("check", help="校验配置并打印摘要")
     check.add_argument("--config", default="config.toml")
     check.add_argument("--root", default=".")
+
+    plugin = sub.add_parser("plugin", help="新建、校验和列出独立插件包")
+    actions = plugin.add_subparsers(dest="plugin_action", required=True)
+    new = actions.add_parser("new", help="生成带包头、文档、配置与处理器的插件包")
+    new.add_argument("name")
+    new.add_argument("--template", choices=("command", "tool"), default="command")
+    new.add_argument("--description", default="请填写插件用途")
+    new.add_argument("--author", default="")
+    for action in (
+        new,
+        actions.add_parser("check", help="离线校验包结构和 Python 语法"),
+        actions.add_parser("list", help="离线列出插件包头与路径"),
+    ):
+        action.add_argument("--root", default=".")
+        action.add_argument("--directory", default="plugins", help="相对于 root 的插件根目录")
+        if action is not new:
+            action.add_argument("--name", default=None, help="只检查指定包")
+            action.add_argument("--builtin", action="store_true", help="同时检查内置插件包")
     return parser
 
 
@@ -102,6 +109,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_init(args)
     if command == "check":
         return cmd_check(args)
+    if command == "plugin":
+        return cmd_plugin(args)
     parser.print_help()
     return 1
 
@@ -181,17 +190,15 @@ def cmd_init(args: argparse.Namespace) -> int:
         config_path.write_text(content, encoding="utf-8")
         print(f"已写入配置：{config_path}")
 
-    plugin_path = root / "plugins" / "hello.py"
-    if not plugin_path.exists():
-        plugin_path.write_text(_EXAMPLE_PLUGIN, encoding="utf-8")
+    plugin_path = root / "plugins" / "hello"
+    if not plugin_path.exists() and not (root / "plugins" / "hello.py").exists():
+        create_package(root / "plugins", "hello", description="示例插件：/hello 打个招呼")
         print(f"已写入示例插件：{plugin_path}")
 
     env_path = root / ".env.example"
     if not env_path.exists():
         env_path.write_text(
-            "# 复制为 .env 后填写；也可用系统环境变量\n"
-            "FLLBOT_LLM__API_KEY=\n"
-            "FLLBOT_SERVER__PORT=6701\n",
+            "# 复制为 .env 后填写；也可用系统环境变量\nFLLBOT_LLM__API_KEY=\nFLLBOT_SERVER__PORT=6701\n",
             encoding="utf-8",
         )
         print(f"已写入环境变量示例：{env_path}")
@@ -241,7 +248,9 @@ def cmd_check(args: argparse.Namespace) -> int:
             "api_key": "已配置" if config.llm.api_key else "缺失",
             "trigger": config.llm.trigger,
         },
-        "admin_token": "已配置" if (config.admin.token or resolve_path(root, config.admin.token_file).is_file()) else "首次启动时生成",
+        "admin_token": "已配置"
+        if (config.admin.token or resolve_path(root, config.admin.token_file).is_file())
+        else "首次启动时生成",
     }
     print(json.dumps(summary, ensure_ascii=False, indent=2))
 
@@ -263,6 +272,57 @@ def cmd_check(args: argparse.Namespace) -> int:
     print("\n生效配置（密钥已隐藏）：")
     print(json.dumps(mask_secrets(config), ensure_ascii=False, indent=2))
     return 0
+
+
+def cmd_plugin(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    directory = resolve_path(root, args.directory)
+    try:
+        if args.plugin_action == "new":
+            print(
+                create_package(
+                    directory, args.name, description=args.description, author=args.author, template=args.template
+                )
+            )
+            return 0
+        from .plugin.manifest import validate_name
+
+        if args.name:
+            validate_name(args.name)
+        roots = [directory]
+        if args.builtin:
+            roots.append(Path(__file__).parent / "builtin_plugins")
+        failed = False
+        for base in roots:
+            if not base.is_dir():
+                print(f"ERROR  插件目录不存在：{base}", file=sys.stderr)
+                failed = True
+                continue
+            candidates = (
+                [base / args.name]
+                if args.name
+                else [
+                    path
+                    for path in sorted(base.iterdir())
+                    if not path.name.startswith(("_", ".")) and (path.is_dir() or path.suffix == ".py")
+                ]
+            )
+            for package in candidates:
+                try:
+                    if package.is_file():
+                        raise ValueError("旧单文件插件：请迁移为独立目录包")
+                    manifest = check_package(package)
+                    if args.plugin_action == "list":
+                        print(f"{manifest.name}\t{manifest.version}\t{manifest.category}\t{package}")
+                    else:
+                        print(f"OK  {manifest.name}: {package}")
+                except (ValueError, OSError, SyntaxError) as error:
+                    failed = True
+                    print(f"ERROR  {package}: {error}", file=sys.stderr)
+        return int(failed)
+    except (ValueError, OSError, SyntaxError) as error:
+        print(f"插件操作失败：{error}", file=sys.stderr)
+        return 1
 
 
 def _find_example() -> Path | None:

@@ -13,8 +13,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from .. import __version__
-from ..llm.client import LLMError
+from ..llm.client import DEFAULT_CONTEXT_WINDOW, LLMError
 from ..logging_setup import get_ring
+from ..policy import tool_index
 from .auth import build_admin_dependency
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -54,8 +55,15 @@ class ActionRequest(BaseModel):
     self_id: int | None = None
 
 
+class ModelDiscoveryRequest(BaseModel):
+    base_url: str | None = None
+    api_key: str | None = None
+    provider: str | None = None
+
+
 def create_api_router(bot: FLLBot) -> APIRouter:
     router = APIRouter(prefix="/api")
+    tool_grant_lock = asyncio.Lock()
     protected = APIRouter(dependencies=[Depends(build_admin_dependency(bot))])
 
     # -- 基础 ------------------------------------------------------------- #
@@ -85,6 +93,59 @@ def create_api_router(bot: FLLBot) -> APIRouter:
     @protected.get("/plugins", summary="插件列表")
     async def list_plugins() -> list[dict[str, Any]]:
         return bot.plugin_summaries()
+
+    @protected.get("/tools", summary="工具目录")
+    async def list_tools() -> dict[str, Any]:
+        agent = bot.plugins.get("agent")
+        default_tools = {
+            str(item) for item in ((agent.settings.get("allowed_tools") if agent else None) or [])
+        }
+        group_counts: dict[str, int] = {}
+        for state in bot.permissions.list_groups():
+            policy = (state.get("config") or {}).get("policy")
+            names = policy.get("allowed_tools") if isinstance(policy, dict) else None
+            for name in names or []:
+                group_counts[str(name)] = group_counts.get(str(name), 0) + 1
+        items: list[dict[str, Any]] = []
+        for name, info in sorted(tool_index(bot).items()):
+            entry = bot.plugins.entry_for(info["plugin"])
+            plugin = bot.plugins.get(info["plugin"])
+            items.append({
+                **info,
+                "plugin_version": plugin.version if plugin else "",
+                "plugin_builtin": bool(entry.builtin) if entry else False,
+                "plugin_enabled": bot.permissions.plugin_enabled(info["plugin"], None),
+                "globally_allowed": name in default_tools,
+                "group_count": group_counts.get(name, 0),
+            })
+        tool_plugins = {info["plugin"] for info in tool_index(bot).values()}
+        return {
+            "items": items,
+            "providers": [
+                item
+                for item in bot.plugin_summaries()
+                if item["name"] in tool_plugins
+            ],
+            "tool_count": len(items),
+            "plugin_count": len({item["plugin"] for item in items}),
+            "globally_allowed_count": sum(1 for item in items if item["globally_allowed"]),
+        }
+
+    @protected.patch("/tools/{tool_id}/enabled", summary="按具体工具设置默认授权")
+    async def toggle_tool(tool_id: str, payload: GroupToggle) -> dict[str, Any]:
+        if tool_id not in tool_index(bot):
+            raise HTTPException(404, "工具不存在或尚未加载")
+        agent = bot.plugins.get("agent")
+        if agent is None:
+            raise HTTPException(409, "Agent 尚未加载")
+        async with tool_grant_lock:
+            allowed = list(dict.fromkeys(agent.settings.get("allowed_tools") or []))
+            if payload.enabled and tool_id not in allowed:
+                allowed.append(tool_id)
+            elif not payload.enabled:
+                allowed = [name for name in allowed if name != tool_id]
+            await agent.settings.set("allowed_tools", allowed)
+        return {"ok": True, "tool_id": tool_id, "enabled": payload.enabled, "allowed_tools": allowed}
 
     @protected.get("/plugins/{name}", summary="单个插件详情")
     async def plugin_detail(name: str) -> dict[str, Any]:
@@ -143,6 +204,7 @@ def create_api_router(bot: FLLBot) -> APIRouter:
             "group_id": group_id,
             "schema": plugin.settings.schema(),
             "values": plugin.settings.values_for_api(group_id),
+            "group_policy": bot.permissions.group_config(group_id).get("policy") if name == "agent" and group_id else None,
         }
 
     @protected.patch("/plugins/{name}/settings", summary="修改插件配置")
@@ -173,6 +235,62 @@ def create_api_router(bot: FLLBot) -> APIRouter:
     async def list_groups() -> list[dict[str, Any]]:
         return bot.permissions.list_groups()
 
+    @protected.get("/groups/discover", summary="自动获取已加入的群，合并多账号与已保存群")
+    async def discover_groups() -> dict[str, Any]:
+        connections = [connection for connection in bot.manager.list() if connection.online]
+        groups: dict[int, dict[str, Any]] = {}
+        permission = bot.config.permission
+        saved_ids = set(permission.allow_groups) | set(permission.deny_groups)
+        saved_ids.update(item["group_id"] for item in bot.permissions.list_groups())
+        for group_id in saved_ids:
+            groups[group_id] = {
+                "group_id": group_id, "group_name": "", "member_count": None,
+                "self_ids": [], "live": False,
+            }
+
+        async def fetch(connection: Any) -> Any:
+            try:
+                data = await asyncio.wait_for(connection.call("get_group_list"), timeout=8)
+                return (connection.self_id, data if isinstance(data, list) else None)
+            except Exception:  # one unavailable account must not hide other accounts' groups
+                return (connection.self_id, None)
+
+        results = await asyncio.gather(*(fetch(connection) for connection in connections))
+        failed = 0
+        for self_id, rows in results:
+            if rows is None:
+                failed += 1
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    group_id = int(row.get("group_id") or 0)
+                except (TypeError, ValueError):
+                    continue
+                if group_id <= 0:
+                    continue
+                group = groups.setdefault(group_id, {
+                    "group_id": group_id, "group_name": "", "member_count": None,
+                    "self_ids": [], "live": True,
+                })
+                group["live"] = True
+                group["group_name"] = str(row.get("group_name") or group["group_name"])
+                count = row.get("member_count")
+                if isinstance(count, int) and not isinstance(count, bool) and count >= 0:
+                    group["member_count"] = count
+                if self_id and self_id not in group["self_ids"]:
+                    group["self_ids"].append(self_id)
+        for group in groups.values():
+            group["enabled"] = bot.permissions.group_enabled(group["group_id"])
+            group["denied"] = group["group_id"] in permission.deny_groups
+        return {
+            "groups": sorted(groups.values(), key=lambda item: (not item["live"], item["group_name"], item["group_id"])),
+            "allow_groups": permission.allow_groups, "deny_groups": permission.deny_groups,
+            "online_accounts": len(connections), "failed_accounts": failed,
+            "group_access": permission.group_access,
+        }
+
     @protected.post("/groups/{group_id}/enabled", summary="开关某个群")
     async def toggle_group(group_id: int, payload: GroupToggle) -> dict[str, Any]:
         await bot.permissions.set_group_enabled(group_id, payload.enabled)
@@ -194,7 +312,7 @@ def create_api_router(bot: FLLBot) -> APIRouter:
     async def get_config() -> dict[str, Any]:
         return {
             "config": bot.safe_config(),
-            "overrides": bot.config_store.overrides,
+            "overrides": _masked(bot.config_store.overrides),
         }
 
     @protected.patch("/config", summary="运行时更新配置")
@@ -229,14 +347,42 @@ def create_api_router(bot: FLLBot) -> APIRouter:
     # -- 人格与 LLM ------------------------------------------------------- #
     @protected.get("/personas", summary="可用人格")
     async def personas() -> list[dict[str, Any]]:
-        return [persona.summary() for persona in bot.personas.list()]
+        return [
+            {**persona.summary(), "editable": bot.personas.is_editable(persona.name)}
+            for persona in bot.personas.list()
+        ]
 
     @protected.get("/personas/{name}", summary="人格详情")
     async def persona_detail(name: str) -> dict[str, Any]:
         persona = bot.personas.find(name)
         if persona is None:
             raise HTTPException(404, f"人格不存在: {name}")
-        return {**persona.summary(), "content": persona.content}
+        return {**persona.summary(), "content": persona.content, "editable": bot.personas.is_editable(name)}
+
+    @protected.put("/personas/{name}", summary="创建或更新自定义人格")
+    async def save_persona(name: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+        try:
+            persona = bot.personas.save(
+                name,
+                str(payload.get("title", "")),
+                str(payload.get("description", "")),
+                str(payload.get("content", "")),
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {**persona.summary(), "content": persona.content, "editable": True}
+
+    @protected.delete("/personas/{name}", summary="删除自定义人格")
+    async def delete_persona(name: str) -> dict[str, Any]:
+        if bot.config.llm.persona == name:
+            raise HTTPException(409, "当前默认人格不能删除，请先切换默认人格")
+        try:
+            bot.personas.delete(name)
+        except KeyError as exc:
+            raise HTTPException(404, f"人格不存在: {name}") from exc
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        return {"ok": True, "personas": bot.personas.names()}
 
     @protected.post("/personas/reload", summary="重新扫描人格目录")
     async def reload_personas() -> dict[str, Any]:
@@ -290,6 +436,16 @@ def create_api_router(bot: FLLBot) -> APIRouter:
         except LLMError as exc:
             raise HTTPException(502, str(exc)) from exc
 
+    @protected.post("/llm/models/discover", summary="用当前或未保存的凭据获取模型及上下文窗口")
+    async def discover_models(payload: ModelDiscoveryRequest) -> dict[str, Any]:
+        try:
+            models = await bot.chat.client.model_catalog(
+                provider=payload.provider, base_url=payload.base_url, api_key=payload.api_key,
+            )
+        except LLMError as exc:
+            raise HTTPException(502, str(exc)) from exc
+        return {"models": models, "fallback_context_window": DEFAULT_CONTEXT_WINDOW}
+
     @protected.get("/llm/usage", summary="模型用量统计")
     async def llm_usage(range: str = "today") -> dict[str, Any]:
         from datetime import datetime
@@ -313,7 +469,20 @@ def create_api_router(bot: FLLBot) -> APIRouter:
         limit: int = Query(default=50, ge=1, le=500),
     ) -> dict[str, Any]:
         rows = await bot.storage.recent_chat(scene, scene_id, limit=limit)
-        return {"scene": scene, "scene_id": scene_id, "messages": [{"role": r, "content": c} for r, c in rows]}
+        return {
+            "scene": scene,
+            "scene_id": scene_id,
+            "messages": [
+                {
+                    "role": row.role,
+                    "content": row.content,
+                    "user_id": row.user_id,
+                    "nickname": row.nickname,
+                    "sender_role": row.sender_role,
+                }
+                for row in rows
+            ],
+        }
 
     @protected.delete("/chat/{scene}/{scene_id}", summary="清空会话历史")
     async def clear_chat(scene: str, scene_id: int) -> dict[str, Any]:

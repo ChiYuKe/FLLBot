@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FLLBot 控制台</title>
+<script>
+  (function () {
+    var theme = new URLSearchParams(location.search).get('theme');
+    if (theme === 'light' || theme === 'dark') document.documentElement.dataset.theme = theme;
+  })();
+</script>
+<style>__STYLES__</style>
+</head>
+<body data-view="overview">
+<aside class="sidebar" aria-label="主导航">
+  <div class="brand"><span class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M5 3v4a3 3 0 0 0 6 0V3M8 10v4a3 3 0 0 0 6 0V9a3 3 0 0 1 6 0v12M3 3h4m2 0h4"/></svg></span><div><strong>FLLBot</strong><small>机器人控制台</small></div></div>
+  <div class="nav-label">工作空间</div>
+  <nav>
+    <button type="button" class="nav-item active" data-view="overview" title="概览" aria-label="概览"><i data-icon="grid"></i><span>概览</span></button>
+    <button type="button" class="nav-item" data-view="bots" title="Agent" aria-label="Agent"><i data-icon="spark"></i><span>Agent</span></button>
+    <button type="button" class="nav-item" data-view="groups" data-section="config" title="配置" aria-label="配置"><i data-icon="settings"></i><span>配置</span></button>
+  </nav>
+  <div class="nav-label">资源</div>
+  <nav>
+    <button type="button" class="nav-item" data-view="models" data-section="models" title="模型服务" aria-label="模型服务"><i data-icon="plug"></i><span>模型服务</span></button>
+    <button type="button" class="nav-item" data-view="personas" title="人格库" aria-label="人格库"><i data-icon="spark"></i><span>人格库</span></button>
+    <button type="button" class="nav-item" data-view="plugins" title="插件" aria-label="插件"><i data-icon="puzzle"></i><span>插件</span></button>
+    <button type="button" class="nav-item" data-view="tools" title="Agent 工具" aria-label="Agent 工具"><i data-icon="tool"></i><span>Agent 工具</span></button>
+  </nav>
+  <div class="nav-label">运行</div>
+  <nav>
+    <button type="button" class="nav-item" data-view="logs" data-section="data" title="数据与日志" aria-label="数据与日志"><i data-icon="terminal"></i><span>数据与日志</span></button>
+  </nav>
+  <div class="sidebar-bottom"><button type="button" class="nav-item sidebar-settings" data-view="system" title="系统设置" aria-label="系统设置"><i data-icon="settings"></i><span>系统设置</span></button><div class="topbar-right"><span class="status-pill" id="status" role="status"><i></i><span>等待连接</span></span><button class="btn icon-btn" id="refresh" type="button" aria-label="刷新数据" title="刷新数据"><i data-icon="refresh"></i></button></div><div class="sidebar-footer"><span>FLLBot v__VERSION__</span><button type="button" id="theme-toggle" class="btn icon-btn" aria-label="切换明暗主题" title="切换明暗主题"><i data-icon="sun"></i></button></div></div>
+</aside>
+<div class="workspace">
+
+<main id="dashboard">
+  <div class="page-heading"><div><div class="eyebrow">FLLBOT WORKSPACE</div><h1 id="page-title">运行概览</h1><p id="page-description">从连接到回复，在这里管理你的机器人。</p></div><div class="sync" id="last-sync">每 5 秒自动同步</div></div>
+  <nav id="section-tabs" class="section-tabs" role="tablist" aria-label="页面栏目" hidden></nav>
+  <div class="banner" id="banner" role="alert"></div>
+
+
+  <section data-page="overview" class="stats overview-only" id="cards" aria-label="运行统计"><div class="empty">正在获取运行状态…</div></section>
+<section data-page="overview" class="card"><div class="card-head"><div><h2>消息趋势</h2><p>最近 14 天收到的消息</p></div><span class="trend-legend"><i class="trend-dot"></i>收到消息</span></div><div class="trend-body"><div id="overview-trend" class="trend-plot" role="img" aria-label="最近十四天消息趋势"></div><div class="trend-summary" id="overview-trend-summary"><h3>消息统计</h3><p class="settings-note">正在读取…</p></div></div></section>
+  <div data-page="overview" class="overview-grid overview-only">
+    <section class="card"><div class="card-head"><div><h2>账号连接</h2><p>NapCat · OneBot 11</p></div><span class="count" id="connection-count">—</span></div><div id="connections"><div class="empty">等待连接信息</div></div></section>
+    <section class="card"><div class="card-head"><div><h2>AI 服务</h2><p>语言模型与消息处理</p></div><span class="tag" id="llm-badge">—</span></div><dl class="detail-list" id="ai-details"></dl></section>
+  </div>
+<section data-page="overview" class="card"><div class="card-head"><div><h2>就绪检查</h2><p>机器人不回复时，从这里查起</p></div><button class="btn" data-go="system" type="button">连接与设置</button></div><div id="setup-checklist" class="checklist"><div class="empty">正在检查…</div></div></section>
+  <section data-page="bots" hidden class="card">
+    <div class="card-head"><div><h2>聊天设置</h2><p>消息输入、唤醒与回复输出，保存后立即生效。</p></div><button id="chat-reload" type="button" class="btn">重新读取</button></div>
+    <form id="chat-form"><div class="readme-body chat-settings-grid">
+    <section class="chat-settings-group"><h3>发送给模型</h3><p class="settings-note">信息开关同时作用于当前消息和历史消息。</p><div class="chat-info-flags">
+      <div class="setting-field"><label>附带信息</label><div class="chat-metadata-flags">
+        <label><input id="chat-send_nickname" type="checkbox"> 用户昵称</label>
+        <label><input id="chat-send_user_id" type="checkbox"> QQ 号</label>
+        <label><input id="chat-send_role" type="checkbox"> 群内身份</label>
+        <label><input id="chat-send_time" type="checkbox"> 消息时间</label>
+      </div><small>昵称优先使用群名片；时间开关同时控制人格中的日期、时间变量。</small></div>
+      <div class="setting-field is-check"><input id="chat-allow_images" type="checkbox"><label for="chat-allow_images">允许发送图片给模型</label><small>当前消息最多 4 张，需模型支持识图；关闭时仅发送图片占位文字。</small></div>
+      <div class="setting-field is-check"><input id="chat-read_forward" type="checkbox"><label for="chat-read_forward">读取合并转发内容</label><small>开启后展开聊天记录随消息发送，最多约 4000 字、2 层嵌套；读取失败时只保留占位文字。</small></div>
+    </div></section>
+    <section class="chat-settings-group"><h3>回复输出</h3><div class="chat-field-grid">
+      <div class="setting-field chat-span"><label for="chat-reply-mode">发送方式</label><select id="chat-reply-mode"><option value="auto">自动 · 长回复转聊天记录</option><option value="forward">始终使用聊天记录</option><option value="split">普通消息 · 自动分段</option></select><small>支持群聊与私聊；聊天记录发送失败时自动改为分段消息。</small></div>
+      <div class="setting-field" id="chat-threshold-field"><label for="chat-forward-threshold">转聊天记录阈值（字）</label><input id="chat-forward-threshold" type="number" min="200" max="20000" step="100"></div>
+      <div class="setting-field"><label for="chat-reply-chunk-size">每段长度（字）</label><input id="chat-reply-chunk-size" type="number" min="0" max="5000" placeholder="0：沿用模型设置"><small>0 沿用模型设置。</small></div>
+      <div class="setting-field"><label for="chat-reply-interval-ms">分段间隔（毫秒）</label><input id="chat-reply-interval-ms" type="number" min="0" max="5000" step="50"></div>
+      <div class="setting-field chat-output-flags"><label><input id="chat-quote_reply" type="checkbox"> 引用原消息</label><label><input id="chat-at_sender" type="checkbox"> @ 发送者</label><small>仅普通消息首段生效，避免连续提醒。</small></div>
+    </div></section>
+    <section class="chat-settings-group chat-span"><h3>唤醒处理</h3><div class="chat-field-grid">
+      <div class="setting-field"><label for="chat-wake-word">统一唤醒词</label><input id="chat-wake-word" type="text" maxlength="80" placeholder="例如 bot"><small>适用于使用“唤醒词”回复方式的群；留空沿用现有账号的唤醒词或昵称。</small></div>
+      <div class="setting-field"><label for="chat-wake-only-mode">只发唤醒词时</label><select id="chat-wake-only-mode"><option value="prompt">发送自定义提示给模型</option><option value="raw">把用户原话发送给模型</option><option value="fixed">发送固定文本（不调用模型）</option><option value="ignore">不调用模型、不回复</option></select></div>
+      <div class="setting-field chat-span" id="chat-prompt-field"><label for="chat-wake-only-prompt">仅唤醒时的提示</label><textarea id="chat-wake-only-prompt" rows="2" maxlength="2000" placeholder="例如：用户只叫了你的名字，请简短回应并询问需要什么帮助。"></textarea><small>替换本次唤醒消息的正文，历史保留原话。</small></div>
+      <div class="setting-field chat-span" id="chat-fixed-field" hidden><label for="chat-wake-only-replies">固定回复（每行一条）</label><textarea id="chat-wake-only-replies" rows="3" maxlength="20000" placeholder="例如：&#10;我在～&#10;怎么啦？&#10;叫我干嘛"></textarea><small>随机发送其中一条，不请求模型；空行会自动忽略。</small></div>
+      <details class="chat-span chat-preview-details"><summary>查看发送示例</summary><pre id="chat-wake-preview" class="chat-message-preview"></pre><small class="settings-note">使用示例信息展示单条用户消息，不会实际调用模型。</small></details>
+    </div></section>
+      <div class="settings-footer chat-span"><span id="chat-note" class="settings-note" role="status"></span><button id="chat-save" class="btn primary" type="submit" disabled>保存聊天设置</button></div>
+    </div></form>
+  </section>
+  <section data-page="plugins" hidden class="card" id="plugins-card">
+    <div class="card-head"><div><h2>插件管理</h2><p>管理已安装插件、配置和使用说明</p></div><div class="toolbar"><span class="count" id="plugin-summary"></span><button class="btn" id="plugins-reload" type="button">重新扫描插件</button></div></div>
+    <div class="plugin-toolbar"><label class="search"><i data-icon="search"></i><input id="plugin-search" type="search" placeholder="搜索插件名称或描述" aria-label="搜索插件"></label><div class="filters" aria-label="插件状态筛选"><button class="filter active" type="button" data-filter="all" aria-pressed="true">全部</button><button class="filter" type="button" data-filter="enabled" aria-pressed="false">已启用</button><button class="filter" type="button" data-filter="disabled" aria-pressed="false">已停用</button></div></div>
+    <div class="list" id="plugins"><div class="empty">正在获取插件…</div></div>
+  </section>
+  <section data-page="plugins" hidden><div class="card" id="plugin-failures" hidden><div class="card-head"><div><h2>加载失败的插件</h2><p>修正下方错误后，点击“重新扫描插件”</p></div></div><div id="plugin-failure-list" class="readme-body"></div></div></section>
+  <section data-page="tools" hidden class="card" id="tools-card">
+    <div class="card-head"><div><h2>Agent 工具权限</h2><p>控制 Agent 可以调用哪些插件能力；插件启用和后端配置请到「插件管理」中设置。单群授权可覆盖默认选择。</p></div><div class="toolbar"><span class="count" id="tool-summary"></span><button class="btn" id="tools-refresh" type="button">刷新</button></div></div>
+    <div class="plugin-toolbar"><label class="search"><i data-icon="search"></i><input id="tool-search" type="search" placeholder="搜索工具名称或说明" aria-label="搜索工具"></label></div>
+    <div class="list" id="tools-list"><div class="empty">正在获取工具…</div></div>
+  </section>
+  <section data-page="logs" hidden class="card" id="logs-card">
+    <div class="card-head"><div><h2>运行日志</h2><p id="log-summary">最近 60 条 · 自动更新</p></div><button class="btn" id="logs-pause" type="button" aria-pressed="false">暂停更新</button></div>
+    <div class="log-tools"><select id="log-level" aria-label="日志级别"><option value="all">全部级别</option><option value="INFO">INFO</option><option value="WARNING">WARNING</option><option value="ERROR">ERROR</option><option value="DEBUG">DEBUG</option></select><label class="search"><i data-icon="search"></i><input id="log-search" type="search" placeholder="搜索日志内容" aria-label="搜索日志"></label></div>
+    <div id="logs" role="region" aria-label="运行日志"><div class="empty">正在获取日志…</div></div>
+  </section>
+    <section class="card" id="agent-model-panel" data-page="models" hidden>
+      <div class="card-head"><div><h2>模型接入</h2><p>配置智能体使用的 OpenAI 兼容模型服务</p></div><span class="tag off" id="agent-status">未配置</span></div>
+      <div class="readme-body">
+        <div class="settings-error" id="agent-model-error" role="status">正在读取模型配置…</div>
+        <form id="agent-model-form" class="settings-form">
+          <div class="setting-field is-check"><input id="agent-llm-enabled" type="checkbox"><label for="agent-llm-enabled">启用模型服务</label></div>
+          <div class="setting-field"><label for="agent-base-url">服务地址</label><input id="agent-base-url" type="url" placeholder="https://api.example.com/v1"><small>需要支持 OpenAI Chat Completions 和 tools / tool_calls。若配置了多模型 providers/routes，具体路由设置优先。</small></div>
+          <div class="setting-field"><label for="agent-api-key">API Key</label><input id="agent-api-key" type="password" autocomplete="new-password" placeholder="留空保持当前密钥"><small id="agent-api-key-state"></small></div>
+          <div class="setting-field"><label for="agent-model">可用模型</label><div class="model-picker">
+            <select id="agent-model" hidden disabled aria-hidden="true" tabindex="-1"><option value="">填写服务地址与密钥后自动获取</option></select>
+            <button class="btn" id="agent-models-refresh" type="button">刷新模型</button><button class="btn" id="model-manual-toggle" type="button">手动填写</button></div><small id="agent-models-note" role="status">从当前服务自动获取可用模型。</small></div>
+          <div class="setting-field" id="model-manual-field" hidden><label for="model-manual">模型名称</label><input id="model-manual" type="text" placeholder="填写服务商提供的完整模型名称"><small>服务不提供模型列表时可手动填写，保存后测试连接。</small></div>
+<details class="advanced"><summary>高级参数 <small>回复长度、随机性、上下文与额外指令</small></summary><div class="form-grid">          <div class="setting-field"><label for="agent-max-tokens">回复长度上限（Token）</label><input id="agent-max-tokens" type="number" min="1" max="32768" step="1"></div>
+          <div class="setting-field"><label for="agent-temperature">回答随机性</label><input id="agent-temperature" type="number" min="0" max="2" step="0.1"></div>
+          <div class="setting-field"><label for="agent-context-window">上下文长度（Token）</label><input id="agent-context-window" type="number" min="1" max="10000000" step="1"><small id="agent-context-info" role="status">默认跟随所选模型；可手动修改。</small></div>
+          <div class="setting-field"><label for="agent-system-extra">额外系统指令</label><textarea id="agent-system-extra" placeholder="可补充智能体的语气、规则或业务背景"></textarea></div>
+</div></details>          <div class="settings-footer"><span id="model-save-note" class="settings-note"></span><button class="btn" id="model-test" type="button">测试已保存的连接</button><button class="btn" id="agent-model-reload" type="button">重新读取</button><button class="btn primary" id="agent-model-save" type="button">保存模型设置</button></div>
+        </form>
+      </div>
+    </section>
+
+    <section class="card" id="agent-tools-panel" data-page="agent" hidden>
+      <div class="card-head"><div><h2>默认回复行为</h2><p>设置未单独定制的群所使用的回复方式和 Agent 工具权限</p></div></div>
+      <div class="readme-body">
+        <details class="advanced legacy-group-settings"><summary>旧版群覆盖配置</summary>        <div class="settings-scope"><label for="agent-settings-group">配置范围</label><select id="agent-settings-group"><option value="">全局默认配置</option></select><small class="settings-note">自动获取已加入的群；展开后可按群名、群号搜索。</small></div>
+</details>
+        <p class="settings-note" id="agent-settings-note">群聊响应默认关闭。开启后，该群普通消息会发送到配置的模型服务。</p>
+        <form id="agent-settings-form" class="settings-form"></form>
+        <div class="settings-error" id="agent-settings-error" role="alert"></div>
+        <div class="settings-footer"><button class="btn" id="agent-settings-reload" type="button">重新读取</button><button class="btn primary" id="agent-settings-save" type="button">保存设置</button></div>
+      </div>
+    </section>
+
+
+
+<section data-page="personas" hidden class="card" id="persona-page"><div class="card-head"><div><h2>人格库</h2><p>选择回答风格，或创建属于你的助手</p></div><button class="btn primary" id="persona-default-save" type="button">设为默认人格</button></div><div class="readme-body">          <div class="setting-field"><label for="agent-persona">默认人格</label><select id="agent-persona"></select><small>选择机器人默认使用的人格；点击“设为默认人格”后生效。群聊也可单独覆盖。</small></div>
+<p class="settings-note" id="persona-default-note" role="status"></p>          <div class="persona-editor">
+            <div class="persona-editor-head"><strong>人格库</strong><button class="btn" id="agent-persona-new" type="button">新建人格</button></div>
+            <div class="setting-field"><label for="agent-persona-name">人格标识</label><input id="agent-persona-name" type="text" maxlength="64" placeholder="例如：friendly"><small>仅用英文字母、数字、下划线和连字符。内置人格不能覆盖，修改标识可另存为自定义人格。</small></div>
+            <div class="setting-field"><label for="agent-persona-title">显示名称</label><input id="agent-persona-title" type="text" maxlength="100" placeholder="例如：友善助手"></div>
+            <div class="setting-field"><label for="agent-persona-description">简介</label><input id="agent-persona-description" type="text" maxlength="300" placeholder="简单说明这个人格的风格"></div>
+            <div class="setting-field"><label for="agent-persona-content">人格提示词</label><textarea id="agent-persona-content" maxlength="50000" rows="8" placeholder="描述机器人的身份、语气、规则和回答风格。可使用 {bot_name}、{user_name} 等变量。"></textarea></div>
+            <div class="persona-editor-actions"><span id="agent-persona-error" role="status"></span><button class="btn" id="agent-persona-delete" type="button" disabled>删除人格</button><button class="btn primary" id="agent-persona-save" type="button">保存人格</button></div>
+          </div>
+</div></section>
+<section data-page="models" hidden class="card"><div class="card-head"><div><h2>当前模型路由</h2><p>查看实际生效的模型服务；对话测试可指定服务</p></div></div><div id="provider-list" class="readme-body"></div></section>
+<section data-page="playground" hidden class="card"><div class="card-head"><div><h2>对话测试</h2><p>使用已保存的配置测试模型与人格；测试内容不会发送到 QQ，也不会写入真实群会话</p></div><button class="btn" id="test-clear" type="button">清空测试</button></div><div class="readme-body"><div class="form-grid"><div class="setting-field"><label for="test-provider">模型服务</label><select id="test-provider"><option value="">默认路由</option></select></div><div class="setting-field"><label for="test-persona">人格</label><select id="test-persona"><option value="">默认人格</option></select></div></div><div id="test-messages" class="conversation" aria-live="polite"><div class="empty">输入一条消息，看看机器人会怎样回答。</div></div><form id="test-form" class="composer"><label class="sr-only" for="test-message">测试消息</label><textarea id="test-message" rows="3" maxlength="12000" required placeholder="例如：介绍一下你能帮我做什么。Ctrl + Enter 发送"></textarea><div class="settings-footer"><span id="test-note" class="settings-note" role="status">单次对话 · 不执行插件工具 · 会产生模型用量</span><button class="btn primary" id="test-send" type="submit">发送测试 ↗</button></div></form></div></section>
+<section data-page="history" hidden class="split-layout"><div class="card"><div class="card-head"><div><h2>会话列表</h2><p>已保存的模型对话</p></div><button class="btn" id="history-refresh" type="button">刷新</button></div><div class="readme-body"><label class="search"><i data-icon="search"></i><input id="history-search" type="search" placeholder="搜索群号 / QQ 号" aria-label="搜索会话"></label></div><div id="history-rooms" class="room-list"></div></div><div class="card"><div class="card-head"><div><h2 id="history-title">选择一个会话</h2><p>最近 100 条记录</p></div><button class="btn danger" id="history-delete" type="button" disabled>清空此会话</button></div><div id="history-messages" class="conversation"><div class="empty">在左侧选择群聊或私聊，查看上下文。</div></div><p id="history-note" class="settings-note readme-body" role="status"></p></div></section>
+<section data-page="usage" hidden><div class="section-toolbar"><p class="settings-note">模型请求、Token 和消息统计</p><select id="usage-range" aria-label="统计时间范围"><option value="today">今天</option><option value="7d">最近 7 天</option><option value="30d">最近 30 天</option><option value="all">全部时间</option></select><button class="btn" id="usage-refresh" type="button">刷新统计</button></div><div class="stats" id="usage-cards"></div><div class="overview-grid"><section class="card"><div class="card-head"><div><h2>消息趋势</h2><p>最近 7 天收到的消息，按服务器日期统计</p></div></div><div id="message-chart" class="bar-chart"></div></section><section class="card"><div class="card-head"><div><h2>模型用量明细</h2><p>按模型汇总请求与 Token</p></div></div><div id="usage-models" class="readme-body"></div></section></div><p class="settings-note" id="usage-note" role="status"></p></section>
+<section data-page="groups" hidden class="card group-table-card">
+  <div class="card-head"><div><h2>单群配置</h2><p>未新增配置的群使用默认行为；修改后自动保存。</p></div><div class="toolbar group-table-head-actions"><span id="group-table-notice" class="settings-note" role="status"></span><button class="btn" id="groups-refresh" type="button">刷新群列表</button><button class="btn primary" id="group-rule-add" type="button">新增配置</button></div></div>
+  <div class="group-table-toolbar"><label class="search"><i data-icon="search"></i><input id="group-table-search" type="search" placeholder="搜索群名或群号" aria-label="搜索配置群聊"></label><label class="group-default-access-label" for="group-default-access">默认访问</label><select id="group-default-access" aria-label="默认访问"><option value="all">所有群可用</option><option value="listed">仅允许准入的群</option></select><span id="group-table-count" class="settings-note"></span></div>
+  <div id="group-rule-create" class="group-rule-create" hidden><label for="group-rule-target">选择群聊</label><select id="group-rule-target"><option value="">请选择群聊</option></select><button type="button" class="btn primary" id="group-rule-confirm" disabled>添加</button><button type="button" class="btn" id="group-rule-cancel">取消</button></div>
+  <div class="group-table-scroll"><table class="group-config-table"><caption class="visually-hidden">群聊配置，修改控件后自动保存</caption><thead id="group-table-head"><tr><th scope="col"><label class="group-select-heading"><input id="group-table-select-visible" type="checkbox" aria-label="选择当前显示的配置">群聊</label></th><th scope="col">启用</th><th scope="col">访问</th><th scope="col">回复方式</th><th scope="col">模型</th><th scope="col">人格</th><th scope="col">操作</th></tr></thead><tbody id="group-table-body"><tr><td colspan="7">正在获取群列表…</td></tr></tbody></table></div>
+  <div class="group-table-footer"><span id="group-batch-hint" class="settings-note">勾选群聊后，可在此批量设置访问权限。</span><div id="group-table-batch" class="group-table-batch" hidden><span id="group-batch-count"></span><button class="btn" type="button" data-batch-access="allow">允许访问</button><button class="btn" type="button" data-batch-access="deny">禁止访问</button><button class="btn" type="button" data-batch-access="inherit">跟随默认</button><button class="btn" type="button" id="group-batch-clear">取消选择</button></div></div>
+</section>
+<section data-page="system" hidden><section class="card"><div class="card-head"><div><h2>账号连接</h2><p>在 NapCat 中新增反向 WebSocket，使用下面的连接地址</p></div></div><div class="readme-body"><div class="copy-line"><code id="connection-url">正在读取…</code><button class="btn" id="copy-connection" type="button">复制地址</button></div><p class="settings-note" id="connection-note"></p></div></section><section class="card"><div class="card-head"><div><h2>机器人与权限</h2><p>保存后立即生效，重启仍保留</p></div><span class="tag">全局设置</span></div><div class="readme-body"><form id="system-form" class="settings-form"><div id="system-fields" class="form-grid"></div><div class="settings-footer"><span id="system-note" class="settings-note" role="status">正在读取…</span><button class="btn" id="system-reload" type="button">重新读取</button><button class="btn primary" id="system-save" type="submit" disabled>保存系统设置</button></div></form></div></section></section>
+<div id="toast" role="status" hidden></div>
+  <footer class="page-footer"><span id="footer-sync">每 5 秒自动同步</span><span>OneBot 11 / v__VERSION__</span></footer>
+</main>
+
+<div class="modal-backdrop" id="group-editor-modal">
+  <section class="readme-modal compact-group-form" role="dialog" aria-modal="true" aria-labelledby="group-editor-title" tabindex="-1">
+    <div class="readme-head"><div><h2 id="group-editor-title">群聊详细设置</h2><p>工具、回复间隔和补充要求</p></div><button class="btn" type="button" id="group-editor-close">关闭</button></div>
+  <div class="readme-body">
+    <div hidden class="group-detail-basic"><div class="form-row group-select-row"><label for="managed-group">群聊</label><div class="form-control"><select id="managed-group"><option value="">请选择要设置的群</option></select></div></div>
+    </div><div id="group-editor-empty" class="group-editor-empty">先选择一个群，再填写下面的设置。</div>
+    <form id="group-detail-form" class="settings-form" hidden>
+      <div id="policy-editor">
+        <div hidden class="group-detail-basic">
+        <div class="form-row"><label for="managed-enabled">启用机器人</label><div class="form-control"><label class="inline-check"><input id="managed-enabled" type="checkbox" disabled><span>在本群启用</span></label></div></div>
+        <div class="form-row"><label for="group-reply-mode">回复方式</label><div class="form-control"><select id="group-reply-mode"><option value="inherit">跟随 Bot 默认设置</option><option value="at">有人 @ 时回复</option><option value="prefix">听到唤醒词时回复</option><option value="all">自动参与群聊</option><option value="off">关闭 AI 回复，保留插件指令</option></select><small id="group-prefix-row" hidden>使用这个 Bot 在“机器人”页面设置的唤醒词。</small><input id="policy-prefix" type="hidden"></div></div>
+        <div class="form-row"><label for="policy-provider">模型</label><div class="form-control"><select id="policy-provider"><option value="">跟随 Bot 默认模型</option></select></div></div>
+        <div class="form-row"><label for="managed-persona">人格</label><div class="form-control"><select id="managed-persona" disabled><option value="">跟随 Bot 默认人格</option></select></div></div>
+        </div>
+        <div class="form-row notes-row"><label for="policy-extra">补充要求 <small>选填</small></label><div class="form-control"><textarea id="policy-extra" rows="2" maxlength="4000" placeholder="例如：回答简短一些，优先讨论编程。"></textarea></div></div>
+        <h3 class="form-section-label">Agent 工具与限制</h3>
+        <div class="form-row"><span id="group-tools-label" class="form-label">可用 Agent 工具</span><div class="form-control tools-controls" role="group" aria-labelledby="group-tools-label"><label class="inline-check"><input id="policy-tools-inherit" type="checkbox" checked><span>跟随默认 Agent 工具权限</span></label><div id="policy-tools" class="tool-choices"></div></div></div>
+        <div class="form-row"><label for="policy-cooldown">回复间隔</label><div class="form-control inline-value"><input id="policy-cooldown" type="number" min="0" max="120" step="1" placeholder="默认"><span>秒 / 同一用户</span></div></div>
+        <div class="form-row"><label for="policy-rounds">工具调用轮数</label><div class="form-control inline-value"><input id="policy-rounds" type="number" min="1" max="5" step="1" placeholder="默认"><span>轮 / 每次回复</span></div></div>
+        <details class="effective-details form-diagnostics"><summary>生效详情</summary><p class="settings-note" id="group-bot-context"></p><div id="policy-effective" class="policy-effective"></div></details>
+      </div>
+      <div hidden aria-hidden="true">
+        <label for="managed-llm">原有 AI 开关</label><select id="managed-llm" disabled><option value="inherit">跟随默认</option><option value="on">启用</option><option value="off">关闭</option></select>
+        <label for="policy-mode">策略来源</label><select id="policy-mode" disabled><option value="inherit">继承</option><option value="custom">独立设置</option></select>
+        <label for="policy-name">策略名称</label><input id="policy-name" maxlength="80">
+        <label for="policy-response">群聊响应</label><select id="policy-response"><option value="inherit">继承</option><option value="on">启用</option><option value="off">关闭</option></select>
+        <label for="policy-trigger">触发方式</label><select id="policy-trigger"><option value="">继承</option><option value="at">at</option><option value="prefix">prefix</option><option value="all">all</option></select>
+      </div>
+      <div class="settings-footer"><span id="managed-note" class="settings-note" role="status">选择群聊后编辑。</span><button class="btn" type="button" id="group-editor-cancel">取消</button><button class="btn primary" id="managed-save" type="submit" disabled>保存设置</button></div>
+    </form>
+  </div>
+  </section>
+</div>
+<div class="modal-backdrop" id="readme">
+  <div class="readme-modal" role="dialog" aria-modal="true" aria-labelledby="readme-title">
+    <div class="readme-head">
+      <div>
+        <span class="eyebrow">插件说明</span>
+        <h2 id="readme-title">README</h2>
+        <p id="readme-sub"></p>
+      </div>
+      <button class="btn" id="readme-close" type="button">关闭</button>
+    </div>
+    <div class="readme-body" id="readme-body"></div>
+  </div>
+</div>
+
+<div class="modal-backdrop" id="plugin-settings">
+  <div class="readme-modal" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <div class="readme-head">
+      <div><span class="eyebrow">插件配置</span><h2 id="settings-title">设置</h2><p id="settings-sub"></p></div>
+      <button class="btn" id="settings-close" type="button">关闭</button>
+    </div>
+    <div class="readme-body">
+      <div class="settings-scope"><label for="settings-group">配置范围</label><input id="settings-group" type="text" inputmode="numeric" placeholder="留空使用全局配置；填写群号设置该群覆盖"></div>
+      <p class="settings-note" id="settings-note">群级配置只会覆盖标记为可按群设置的字段。</p>
+      <form id="settings-form" class="settings-form"></form>
+      <div class="settings-error" id="settings-error" role="alert"></div>
+      <div class="settings-footer"><button class="btn" id="settings-cancel" type="button">取消</button><button class="btn primary" id="settings-save" type="button">保存配置</button></div>
+    </div>
+  </div>
+</div>
+
+<div id="auth">
+  <div class="brand"><span class="logo">F</span></div><div class="eyebrow">WELCOME TO FLLBOT</div><h2>连接你的工作空间</h2>
+  <p>令牌见 FLLBot 的 <code>data/admin_token.txt</code>，或首次启动日志。它只保存在本机浏览器存储里。</p>
+  <label for="auth-token">管理令牌</label><input id="auth-token" type="password" placeholder="输入管理令牌" autocomplete="off" spellcheck="false">
+  <div id="auth-error" role="alert"></div><button class="btn primary block" id="auth-submit" type="button">连接 FLLBot →</button>
+</div>
+</div>
+
+<script>__SCRIPT__</script>
+</body>
+</html>

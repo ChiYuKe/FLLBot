@@ -1,0 +1,28 @@
+/* Same scrollbar contract as the desktop shell, including embedded WebViews. */
+:root {
+  --scrollbar-width:10px;
+  --scrollbar-thumb:#3f4550;
+  --scrollbar-thumb-hover:#4c535f;
+  --scrollbar-track:transparent;
+  background:var(--bg);
+}
+:root[data-theme="light"] {
+  --scrollbar-thumb:#c3c9d2;
+  --scrollbar-thumb-hover:#aab2bf;
+}
+:root, :root * {
+  scrollbar-width:thin;
+  scrollbar-color:var(--scrollbar-thumb) var(--scrollbar-track);
+}
+/* Chromium's standard scrollbar properties override its pseudo-element skin.
+ * Use one explicit skin there; Firefox keeps the standard rules above. */
+@supports selector(::-webkit-scrollbar) {
+  :root, :root * { scrollbar-width:auto; scrollbar-color:auto; }
+}
+*::-webkit-scrollbar { width:var(--scrollbar-width); height:var(--scrollbar-width); }
+*::-webkit-scrollbar-track { background:var(--scrollbar-track); }
+html::-webkit-scrollbar-track, body::-webkit-scrollbar-track { background:var(--bg); }
+*::-webkit-scrollbar-thumb { background:var(--scrollbar-thumb); border:2px solid transparent; background-clip:padding-box; border-radius:999px; }
+*::-webkit-scrollbar-thumb:hover { background-color:var(--scrollbar-thumb-hover); background-clip:padding-box; }
+*::-webkit-scrollbar-corner { background:var(--scrollbar-track); }
+*::-webkit-scrollbar-button { display:none; width:0; height:0; }

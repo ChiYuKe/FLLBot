@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 from . import __version__
+from .bots import BotProfiles
 from .config import AppConfig, ConfigStore, mask_secrets, resolve_path
 from .dispatcher import Dispatcher
 from .events import DedupCache, EventHub
@@ -28,6 +29,7 @@ from .onebot.models import MessageEvent, MetaEvent, NoticeEvent, parse_event
 from .onebot.server import ConnectionManager, create_ws_router
 from .permission import PermissionManager
 from .plugin.loader import PluginLoader
+from .policy import migrate_tool_permissions
 from .storage import Storage
 from .webui import render_index
 
@@ -43,6 +45,7 @@ class FLLBot:
         config = config_store.current
         self.storage = Storage(resolve_path(self.root, config.storage.path))
         self.hub = EventHub()
+        self.bots = BotProfiles(self)
         self._dedupe = DedupCache(size=1024, ttl=180.0)
         self.permissions = PermissionManager(self)
         self.dispatcher = Dispatcher(self)
@@ -112,7 +115,9 @@ class FLLBot:
             self._ensure_admin_token()
             self.personas.load()
             await self.permissions.load()
+            await self.bots.load()
             await self.plugins.load_all()
+            await migrate_tool_permissions(self)
             self.manager.heartbeat_timeout = float(self.config.server.heartbeat_timeout or 0)
             await self.dispatcher.startup()
             self.plugins.start_watcher()
@@ -222,6 +227,9 @@ class FLLBot:
                     "global_state": self.permissions.plugin_state(plugin.name, None),
                     "builtin": bool(entry.builtin) if entry else False,
                     "module": entry.module_name if entry else "",
+                    "package": bool(entry and entry.source.is_dir()),
+                    "manifest": bool(entry and entry.source.is_dir() and (entry.source / "plugin.toml").is_file()),
+                    "folder": entry.source.name if entry and entry.source.is_dir() else "",
                 }
             )
             result.append(metadata)
@@ -254,6 +262,7 @@ class FLLBot:
 
 def create_app(bot: FLLBot) -> FastAPI:
     """构造 FastAPI 应用（WebSocket + 管理 API）。"""
+    from .api.console import create_console_router
     from .api.routes import create_api_router
 
     @asynccontextmanager
@@ -285,6 +294,7 @@ def create_app(bot: FLLBot) -> FastAPI:
         allow_headers=["*"],
     )
     app.include_router(create_api_router(bot))
+    app.include_router(create_console_router(bot))
     app.include_router(create_ws_router(bot))
 
     @app.get("/ui", include_in_schema=False)
