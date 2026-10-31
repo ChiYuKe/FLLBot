@@ -1,0 +1,7 @@
+schema_version = 1
+api_version = 1
+name = "web"
+version = "0.1.0"
+description = "联网插件：提供搜索、网页读取、天气和时间命令及 Agent 工具"
+author = ""
+category = "plugin"
