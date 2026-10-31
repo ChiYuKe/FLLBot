@@ -32,7 +32,8 @@ from pydantic import BaseModel, Field
 from qwen_tts import Qwen3TTSModel
 
 BASE = Path(__file__).resolve().parent
-MODEL_DIR = BASE / "models" / "VoiceDesign"
+MODEL_DIR = BASE / "models" / "Base"
+VOICE_DIR = BASE / "voices"
 CACHE_DIR = BASE / "cache"
 IDLE_MARK = "模型已空闲卸载，调用时自动加载"
 log = logging.getLogger("qwen-tts-server")
@@ -151,26 +152,33 @@ class Engine:
         except Exception:  # noqa: BLE001
             log.debug("清理显存缓存失败", exc_info=True)
 
-    def instruct_for(self, req: TTSRequest) -> str:
-        base = PRESETS.get(req.voice, req.voice)
-        if not base.strip():
-            base = PRESETS["01-软糯"]
-        if req.emotion_text:
-            return f"{base}。语气：{req.emotion_text}"
-        if req.emotion and req.emotion != "natural":
-            cn = EMOTION_CN.get(req.emotion)
-            if cn:
-                level = "非常" if req.emo_alpha >= 0.85 else ("比较" if req.emo_alpha >= 0.6 else "稍微")
-                return f"{base}。语气：{level}{cn}"
-        return base
+    def voice_ref(self, voice: str) -> tuple[Path, str | None]:
+        """返回音色对应的固定参考音频；没有参考就报错，避免悄悄换人。"""
+        path = (VOICE_DIR / f"{voice}.wav").resolve()
+        if not path.is_relative_to(VOICE_DIR.resolve()) or not path.exists():
+            names = "、".join(item["name"] for item in self.list_voices())
+            raise HTTPException(400, f"音色没有参考音频：{voice}。可用：{names or '无'}")
+        text_path = path.with_suffix(".txt")
+        ref_text = text_path.read_text(encoding="utf-8").strip() if text_path.exists() else None
+        return path, ref_text
 
-    def cache_path(self, req: TTSRequest, instruct: str) -> Path:
+    def list_voices(self) -> list[dict]:
+        items = []
+        for name in PRESETS:
+            path = VOICE_DIR / f"{name}.wav"
+            if path.exists():
+                items.append({"name": name, "file": str(path), "description": PRESETS[name]})
+        return items
+
+    def cache_path(self, req: TTSRequest, ref: Path) -> Path:
+        stat = ref.stat()
         src = json.dumps(
             {
                 "text": req.text,
-                "instruct": instruct,
+                "voice": req.voice,
+                "ref": [str(ref), stat.st_size, int(stat.st_mtime)],
                 "duration_factor": req.duration_factor,
-                "model": "Qwen3-TTS-VoiceDesign",
+                "model": "Qwen3-TTS-Base-clone",
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -182,8 +190,8 @@ class Engine:
         text = normalize_text(req.text)
         if not text:
             raise HTTPException(400, "文本为空")
-        instruct = self.instruct_for(req)
-        out = self.cache_path(req, instruct)
+        ref, ref_text = self.voice_ref(req.voice)
+        out = self.cache_path(req, ref)
         # 命中缓存时不需要模型，空闲卸载后依然可以出音频。
         if out.exists() and out.stat().st_size > 1024:
             return out.read_bytes(), True
@@ -194,10 +202,12 @@ class Engine:
                 raise HTTPException(503, self.error or "模型加载失败")
             self.last_used = time.time()
             self.calls += 1
-            wavs, sr = self.model.generate_voice_design(
+            wavs, sr = self.model.generate_voice_clone(
                 text=text,
                 language="Chinese",
-                instruct=instruct,
+                ref_audio=str(ref),
+                ref_text=ref_text,
+                x_vector_only_mode=ref_text is None,
             )
         sf.write(out, wavs[0], sr)
 
@@ -208,17 +218,17 @@ class Engine:
 
     def synthesize_batch(self, reqs: list[TTSRequest]) -> list[tuple[bytes, bool]]:
         """一次批量合成多段，摊薄每步的解码开销。"""
-        prepared: list[tuple[TTSRequest, str, str, Path]] = []
+        prepared: list[tuple[TTSRequest, str, Path, str | None, Path]] = []
         for req in reqs:
             text = normalize_text(req.text)
             if not text:
                 raise HTTPException(400, "文本为空")
-            instruct = self.instruct_for(req)
-            prepared.append((req, text, instruct, self.cache_path(req, instruct)))
+            ref, ref_text = self.voice_ref(req.voice)
+            prepared.append((req, text, ref, ref_text, self.cache_path(req, ref)))
 
         results: list[tuple[bytes, bool] | None] = [None] * len(prepared)
         pending: list[int] = []
-        for index, (_, _, _, path) in enumerate(prepared):
+        for index, (_, _, _, _, path) in enumerate(prepared):
             if path.exists() and path.stat().st_size > 1024:
                 results[index] = (path.read_bytes(), True)
             else:
@@ -233,26 +243,33 @@ class Engine:
             self.last_used = time.time()
             self.calls += len(pending)
             texts = [prepared[i][1] for i in pending]
-            instructs = [prepared[i][2] for i in pending]
+            refs = [str(prepared[i][2]) for i in pending]
+            ref_texts = [prepared[i][3] for i in pending]
             try:
-                wavs, sr = self.model.generate_voice_design(
+                wavs, sr = self.model.generate_voice_clone(
                     text=texts,
                     language=["Chinese"] * len(texts),
-                    instruct=instructs,
+                    ref_audio=refs,
+                    ref_text=ref_texts,
+                    x_vector_only_mode=[item is None for item in ref_texts],
                 )
             except (torch.cuda.OutOfMemoryError, RuntimeError) as exc:
                 if "out of memory" not in str(exc).lower():
                     raise
                 log.warning("批量显存不足，退回逐条合成：%s", exc)
                 wavs, sr = [], 0
-                for text, instruct in zip(texts, instructs, strict=False):
-                    single, sr = self.model.generate_voice_design(
-                        text=text, language="Chinese", instruct=instruct
+                for text, ref, ref_text in zip(texts, refs, ref_texts, strict=False):
+                    single, sr = self.model.generate_voice_clone(
+                        text=text,
+                        language="Chinese",
+                        ref_audio=ref,
+                        ref_text=ref_text,
+                        x_vector_only_mode=ref_text is None,
                     )
                     wavs.extend(single)
 
         for index, wav in zip(pending, wavs, strict=False):
-            req, _, _, path = prepared[index]
+            req, _, _, _, path = prepared[index]
             sf.write(path, wav, sr)
             tempo = 1.0 / max(0.5, min(2.0, req.duration_factor))
             if abs(tempo - 1.0) > 0.01:
@@ -292,7 +309,7 @@ engine = Engine()
 
 
 def create_app() -> FastAPI:
-    app = FastAPI(title="Qwen3-TTS VoiceDesign local server", version="1.0")
+    app = FastAPI(title="Qwen3-TTS Base clone local server", version="1.0")
 
     @app.get("/health")
     async def health() -> dict:
@@ -301,18 +318,23 @@ def create_app() -> FastAPI:
             "state": engine.state,
             "error": engine.error,
             "device": "cuda:0" if engine.ready else None,
-            "model": "Qwen3-TTS-1.7B-VoiceDesign",
+            "model": "Qwen3-TTS-1.7B-Base (clone)",
             "load_seconds": engine.load_seconds,
             "calls": engine.calls,
             "idle_seconds": round(time.time() - engine.last_used, 1) if engine.ready else None,
             "idle_timeout": engine.idle_timeout,
             "uptime": round(time.time() - engine.started_at, 1),
-            "voices": len(PRESETS),
+            "voices": len(engine.list_voices()),
         }
 
     @app.get("/voices")
     async def voices() -> dict:
-        return {"voices": [{"name": name, "description": desc} for name, desc in PRESETS.items()]}
+        return {
+            "voices": [
+                {"name": item["name"], "description": item["description"]}
+                for item in engine.list_voices()
+            ]
+        }
 
     @app.post("/tts")
     async def tts(req: TTSRequest) -> Response:
@@ -366,8 +388,13 @@ def main() -> None:
         if engine.ready and not args.no_warmup:
             try:
                 with engine.lock:
-                    engine.model.generate_voice_design(
-                        text="你好。", language="Chinese", instruct=PRESETS["01-软糯"]
+                    ref, ref_text = engine.voice_ref("01-软糯")
+                    engine.model.generate_voice_clone(
+                        text="你好。",
+                        language="Chinese",
+                        ref_audio=str(ref),
+                        ref_text=ref_text,
+                        x_vector_only_mode=ref_text is None,
                     )
                 log.info("预热完成")
             except Exception:  # noqa: BLE001
