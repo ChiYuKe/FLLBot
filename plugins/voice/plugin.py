@@ -123,8 +123,27 @@ def _parse_emotion(text: str) -> tuple[str | None, str]:
     return None, text
 
 
+_SOFT_BREAK = "，、；：,;:"
+
+
+def _split_long_sentence(sentence: str, limit: int, hard_max: int) -> list[str]:
+    """超长句优先在标点处切；实在没有标点才硬切，尽量不切碎短语。"""
+    parts: list[str] = []
+    while len(sentence) > hard_max:
+        window = sentence[:hard_max]
+        cut = max(window.rfind(p) for p in _SOFT_BREAK)
+        if cut <= 0:
+            cut = hard_max
+        parts.append(sentence[:cut].strip())
+        sentence = sentence[cut:].lstrip(_SOFT_BREAK + " ")
+    if sentence.strip():
+        parts.append(sentence.strip())
+    return parts
+
+
 def _split_text(text: str, limit: int) -> list[str]:
-    """按句切分，尽量每段不超过 limit 字；最多 MAX_CHUNKS 段。"""
+    """按句切分；一句话不超过 hard_max 就整句保留，避免从词中间断开。"""
+    hard_max = max(limit, 180)
     sentences = [s for s in re.split(r"(?<=[。！？!?…；;\n])", text) if s.strip()]
     chunks: list[str] = []
     current = ""
@@ -134,13 +153,13 @@ def _split_text(text: str, limit: int) -> list[str]:
             continue
         if current:
             chunks.append(current.strip())
-        while len(sentence) > limit:
-            cut = max(sentence.rfind(p, 0, limit) for p in "，、,")
-            if cut <= 0:
-                cut = limit
-            chunks.append(sentence[:cut].strip())
-            sentence = sentence[cut:]
-        current = sentence
+            current = ""
+        if len(sentence) <= hard_max:
+            current = sentence
+            continue
+        parts = _split_long_sentence(sentence, limit, hard_max)
+        chunks.extend(parts[:-1])
+        current = parts[-1]
     if current.strip():
         chunks.append(current.strip())
     return [c for c in chunks if c][:MAX_CHUNKS]
