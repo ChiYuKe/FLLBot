@@ -31,6 +31,9 @@ plugin = Plugin.from_manifest(__file__)
 LANG = "zh"
 MAX_CHARS = 80
 MAX_CHUNKS = 8
+TARGET_SECONDS = 9.0      # 每段语音的目标时长，越短首条越快、条数越多
+BATCH_SIZE = 4            # 一次批量合成几段
+CHARS_PER_SECOND = 4.0    # 中文语速经验值，用于预估时长
 PAUSE_MS = 200
 TIMEOUT = 180.0
 DEFAULT_ALPHA = 0.9
@@ -241,7 +244,8 @@ async def _request_tts(
 
 
 _SETTING_KEYS = ("enabled", "backend", "qwen_voice", "tts_voice", "with_text", "use_emotion")
-_BACKGROUND: set[asyncio.Task] = set()
+# 语音任务串行队列：全局 FIFO，保证不同请求之间也不会交错、乱序
+_QUEUE: asyncio.Queue | None = None
 
 
 def _snapshot(ctx: Context) -> dict:
@@ -249,11 +253,33 @@ def _snapshot(ctx: Context) -> dict:
     return {key: ctx.settings.get(key) for key in _SETTING_KEYS}
 
 
-def _launch(coro) -> None:
-    """语音发送放后台跑，避免长文本把 agent 处理器拖到超时。"""
-    task = asyncio.create_task(coro)
-    _BACKGROUND.add(task)
-    task.add_done_callback(_BACKGROUND.discard)
+async def _worker() -> None:
+    assert _QUEUE is not None
+    while True:
+        ctx, text, emotion, emotion_text, emo_alpha, speed, settings = await _QUEUE.get()
+        try:
+            await _send(ctx, text, emotion, emotion_text, emo_alpha, speed, settings)
+        except Exception:  # noqa: BLE001
+            log.exception("语音任务执行失败")
+        finally:
+            _QUEUE.task_done()
+
+
+def _enqueue(
+    ctx: Context,
+    text: str,
+    emotion: str | None,
+    emotion_text: str | None = None,
+    emo_alpha: float | None = None,
+    speed: float | None = None,
+    settings: dict | None = None,
+) -> None:
+    """把语音任务排进单消费者队列，按提交顺序逐条发送。"""
+    global _QUEUE
+    if _QUEUE is None:
+        _QUEUE = asyncio.Queue()
+        asyncio.create_task(_worker())
+    _QUEUE.put_nowait((ctx, text, emotion, emotion_text, emo_alpha, speed, settings or _snapshot(ctx)))
 
 
 def _payload_common(settings: dict, emotion: str | None, emotion_text: str | None,
@@ -303,6 +329,23 @@ def _save_audio(ctx: Context, audio: bytes, text: str, settings: dict) -> Path:
     return path
 
 
+def estimate_seconds(text: str, speed: float | None = None) -> float:
+    """粗估这段文本念出来多少秒，用于决定怎么切、分几批。"""
+    chars = len(re.sub(r"\s", "", text))
+    pauses = len(re.findall(r"[，。！？；：、,.!?;:]", text))
+    seconds = chars / CHARS_PER_SECOND + pauses * 0.18
+    return seconds / max(0.5, float(speed or 1.0))
+
+
+def _plan_batches(chunks: list[str], speed: float | None) -> list[list[int]]:
+    """把分段按批分组：短文本一批发完，长文本分批以便边生成边发。"""
+    if len(chunks) <= 1:
+        return [[0]]
+    if len(chunks) <= BATCH_SIZE:
+        return [list(range(len(chunks)))]
+    return [list(range(i, min(i + BATCH_SIZE, len(chunks)))) for i in range(0, len(chunks), BATCH_SIZE)]
+
+
 async def _send(
     ctx: Context,
     text: str,
@@ -322,37 +365,66 @@ async def _send(
         await ctx.reply("要念什么？用法：/say 想说的话（可加 [开心] 前缀）")
         return
 
-    chunks = _split_text(clean, MAX_CHARS)
-    if len(chunks) > 1:
-        log.info("文本 %s 字，拆成 %s 段语音", len(clean), len(chunks))
-    if len(clean) > MAX_CHARS * MAX_CHUNKS:
-        log.warning("文本超过上限（%s 字），只发送前 %s 段", MAX_CHARS * MAX_CHUNKS, MAX_CHUNKS)
+    speed_value = float(speed or 1.0)
+    estimated = estimate_seconds(clean, speed_value)
+    # 按目标时长反推每段的字数：想让首条更快，就把段切小
+    limit = max(30, min(MAX_CHARS, round(CHARS_PER_SECOND * TARGET_SECONDS * speed_value)))
+    chunks = _split_text(clean, limit)
+    plan = _plan_batches(chunks, speed_value)
+    log.info(
+        "文本 %s 字，预估 %.1fs，拆成 %s 段、%s 批，每段目标 %.0fs",
+        len(clean), estimated, len(chunks), len(plan), TARGET_SECONDS,
+    )
+    if len(clean) > limit * MAX_CHUNKS:
+        log.warning("文本超过上限（%s 字），只发送前 %s 段", limit * MAX_CHUNKS, MAX_CHUNKS)
 
-    # Qwen 后端支持批量解码：多段一次请求，比逐条快 2–3 倍
-    if str(settings.get("backend") or "qwen") == "qwen" and len(chunks) > 1:
-        try:
-            audios = await _request_tts_batch(
-                ctx, chunks, emotion, emotion_text, emo_alpha, speed, settings
-            )
-        except Exception:  # noqa: BLE001
-            log.exception("批量合成失败，退回逐条合成")
-            audios = None
-        if audios:
-            log.info("批量合成 %s 段完成", len(audios))
-            for index, (chunk, audio) in enumerate(zip(chunks, audios, strict=False)):
-                path = _save_audio(ctx, audio, chunk, settings)
-                segments = []
-                if settings.get("with_text") and index == 0:
-                    segments.append(MessageSegment.text(chunk))
-                segments.append(MessageSegment.record(path.as_uri()))
-                await ctx.reply(segments)
-                if index + 1 < len(chunks):
-                    await asyncio.sleep(0.4)
-            return
+    backend = str(settings.get("backend") or "qwen")
+    first_sent = False
 
-    for index, chunk in enumerate(chunks):
+    async def deliver(index: int, audio: bytes) -> None:
+        nonlocal first_sent
+        chunk = chunks[index]
+        path = _save_audio(ctx, audio, chunk, settings)
+        segments = []
+        if settings.get("with_text") and not first_sent:
+            segments.append(MessageSegment.text(chunk))
+        segments.append(MessageSegment.record(path.as_uri()))
+        log.info("发送第 %s/%s 段（%s 字）", index + 1, len(chunks), len(chunk))
+        await ctx.reply(segments)
+        first_sent = True
+        await asyncio.sleep(0.4)
+
+    # Qwen 支持批量：按批合成，每批完成立即发，首条不用等全文
+    if backend == "qwen" and len(chunks) > 1:
+        for group in plan:
+            texts = [chunks[i] for i in group]
+            audios: list[bytes] | None = None
+            if len(texts) > 1:
+                try:
+                    audios = await _request_tts_batch(
+                        ctx, texts, emotion, emotion_text, emo_alpha, speed, settings
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception("批量合成失败，退回逐条")
+            if audios:
+                log.info("第 %s 批 %s 段完成", plan.index(group) + 1, len(audios))
+                for index, audio in zip(group, audios, strict=False):
+                    await deliver(index, audio)
+                continue
+            for index in group:
+                try:
+                    path = await _request_tts(
+                        ctx, chunks[index], emotion, emotion_text, emo_alpha, speed, settings
+                    )
+                except Exception:  # noqa: BLE001
+                    log.exception("语音生成失败")
+                    return
+                await deliver(index, path.read_bytes())
+        return
+
+    for index in range(len(chunks)):
         try:
-            path = await _request_tts(ctx, chunk, emotion, emotion_text, emo_alpha, speed, settings)
+            path = await _request_tts(ctx, chunks[index], emotion, emotion_text, emo_alpha, speed, settings)
         except httpx.HTTPStatusError as exc:
             detail = exc.response.text[:200]
             log.warning("TTS 服务返回错误：%s %s", exc.response.status_code, detail)
@@ -364,14 +436,7 @@ async def _send(
             if index == 0:
                 await ctx.reply(f"语音生成失败：{type(exc).__name__} {exc}")
             return
-
-        segments = []
-        if settings.get("with_text") and index == 0:
-            segments.append(MessageSegment.text(chunk))
-        segments.append(MessageSegment.record(path.as_uri()))
-        await ctx.reply(segments)
-        if index + 1 < len(chunks):
-            await asyncio.sleep(0.4)
+        await deliver(index, path.read_bytes())
 
 
 @plugin.on_command("say", aliases=("说", "tts", "念"), cooldown=8.0)
@@ -384,7 +449,7 @@ async def say(ctx: Context) -> None:
     emotion, body = _parse_emotion(text)
     settings = _snapshot(ctx)
     log.info("收到 /say，转入后台生成：%s", (body or text)[:40])
-    _launch(_send(ctx, body or text, emotion, settings=settings))
+    _enqueue(ctx, body or text, emotion, settings=settings)
 
 
 def _backend(ctx: Context) -> tuple[str, str]:
@@ -486,7 +551,7 @@ async def speak(
 ) -> dict:
     settings = _snapshot(ctx)
     log.info("工具调用 voice__speak，转入后台生成：%s", text[:40])
-    _launch(_send(ctx, text, emotion, emotion_text, emo_alpha, speed, settings=settings))
+    _enqueue(ctx, text, emotion, emotion_text, emo_alpha, speed, settings=settings)
     return {"ok": True, "silent": True, "queued": True, "spoken": text, "emotion": emotion_text or emotion}
 
 
