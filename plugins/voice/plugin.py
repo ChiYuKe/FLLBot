@@ -163,8 +163,9 @@ async def _request_tts(
     emotion_text: str | None = None,
     emo_alpha: float | None = None,
     speed: float | None = None,
+    settings: dict | None = None,
 ) -> Path:
-    settings = ctx.settings
+    settings = settings or _snapshot(ctx)
     if not settings.get("use_emotion", True):
         emotion = None
         emotion_text = None
@@ -213,6 +214,22 @@ async def _request_tts(
     return path
 
 
+_SETTING_KEYS = ("enabled", "backend", "qwen_voice", "tts_voice", "with_text", "use_emotion")
+_BACKGROUND: set[asyncio.Task] = set()
+
+
+def _snapshot(ctx: Context) -> dict:
+    """在处理器返回前把配置固化下来，后台任务不再依赖 ctx.plugin。"""
+    return {key: ctx.settings.get(key) for key in _SETTING_KEYS}
+
+
+def _launch(coro) -> None:
+    """语音发送放后台跑，避免长文本把 agent 处理器拖到超时。"""
+    task = asyncio.create_task(coro)
+    _BACKGROUND.add(task)
+    task.add_done_callback(_BACKGROUND.discard)
+
+
 async def _send(
     ctx: Context,
     text: str,
@@ -220,8 +237,9 @@ async def _send(
     emotion_text: str | None = None,
     emo_alpha: float | None = None,
     speed: float | None = None,
+    settings: dict | None = None,
 ) -> None:
-    settings = ctx.settings
+    settings = settings or _snapshot(ctx)
     if not settings.get("enabled"):
         await ctx.reply("语音功能未启用")
         return
@@ -239,7 +257,7 @@ async def _send(
 
     for index, chunk in enumerate(chunks):
         try:
-            path = await _request_tts(ctx, chunk, emotion, emotion_text, emo_alpha, speed)
+            path = await _request_tts(ctx, chunk, emotion, emotion_text, emo_alpha, speed, settings)
         except httpx.HTTPStatusError as exc:
             detail = exc.response.text[:200]
             log.warning("TTS 服务返回错误：%s %s", exc.response.status_code, detail)
@@ -269,7 +287,9 @@ async def say(ctx: Context) -> None:
         await ctx.reply("用法：/say [情绪] 想说的话\n情绪可选：开心、生气、难过、害怕、厌恶、低落、惊讶、平静")
         return
     emotion, body = _parse_emotion(text)
-    await _send(ctx, body or text, emotion)
+    settings = _snapshot(ctx)
+    log.info("收到 /say，转入后台生成：%s", (body or text)[:40])
+    _launch(_send(ctx, body or text, emotion, settings=settings))
 
 
 def _backend(ctx: Context) -> tuple[str, str]:
@@ -369,5 +389,7 @@ async def speak(
     emo_alpha: float | None = None,
     speed: float | None = None,
 ) -> dict:
-    await _send(ctx, text, emotion, emotion_text, emo_alpha, speed)
-    return {"ok": True, "silent": True, "spoken": text, "emotion": emotion_text or emotion}
+    settings = _snapshot(ctx)
+    log.info("工具调用 voice__speak，转入后台生成：%s", text[:40])
+    _launch(_send(ctx, text, emotion, emotion_text, emo_alpha, speed, settings=settings))
+    return {"ok": True, "silent": True, "queued": True, "spoken": text, "emotion": emotion_text or emotion}
