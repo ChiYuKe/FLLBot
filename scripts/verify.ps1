@@ -12,8 +12,14 @@ if (-not (Test-Path $python)) {
 
 Push-Location $root
 try {
+    Write-Host "==> architecture and plugin packages" -ForegroundColor Cyan
+    & $python scripts/check_architecture.py
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & $python -m fllbot plugin check --root $root --builtin
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
     Write-Host "==> ruff check" -ForegroundColor Cyan
-    & $python -m ruff check .
+    & $python -m ruff check fllbot plugins tests scripts
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
     Write-Host "==> pytest" -ForegroundColor Cyan
