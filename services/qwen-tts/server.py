@@ -15,6 +15,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import threading
@@ -34,6 +35,15 @@ MODEL_DIR = BASE / "models" / "VoiceDesign"
 CACHE_DIR = BASE / "cache"
 IDLE_MARK = "模型已空闲卸载，调用时自动加载"
 log = logging.getLogger("qwen-tts-server")
+
+# 高频开场白：启动后在后台预生成，之后直接命中缓存
+PREWARM_PHRASES = ("我在。", "怎么啦？", "好呀。", "晚安。", "早上好。")
+_WS = re.compile(r"[\s\u3000\u200b-\u200d\ufeff]+")
+
+
+def normalize_text(text: str) -> str:
+    """只做不会改变断句的规范化，保证缓存键稳定。"""
+    return _WS.sub(" ", text).strip()
 
 PRESETS: dict[str, str] = {
     "01-软糯": "软糯甜美的少女音，音调偏高，语速偏慢，句尾轻轻上扬，像在撒娇",
@@ -164,7 +174,7 @@ class Engine:
         return CACHE_DIR / f"{digest}.wav"
 
     def synthesize(self, req: TTSRequest) -> tuple[bytes, bool]:
-        text = " ".join(req.text.split())
+        text = normalize_text(req.text)
         if not text:
             raise HTTPException(400, "文本为空")
         instruct = self.instruct_for(req)
@@ -190,6 +200,16 @@ class Engine:
         if abs(tempo - 1.0) > 0.01:
             self.apply_tempo(out, tempo)
         return out.read_bytes(), False
+
+    def prewarm(self, voices: list[str]) -> None:
+        """把高频开场白预先合成到缓存，消息进来时直接命中。"""
+        for voice in voices:
+            for phrase in PREWARM_PHRASES:
+                try:
+                    _, cached = self.synthesize(TTSRequest(text=phrase, voice=voice))
+                    log.info("预热 %s / %s：%s", voice, phrase, "已有缓存" if cached else "已生成")
+                except Exception:  # noqa: BLE001
+                    log.exception("预热失败：%s / %s", voice, phrase)
 
     def apply_tempo(self, path: Path, tempo: float) -> None:
         ffmpeg = shutil.which("ffmpeg")
@@ -256,8 +276,13 @@ def main() -> None:
     parser.add_argument(
         "--idle-timeout",
         type=float,
-        default=float(os.environ.get("QWEN_TTS_IDLE_TIMEOUT", "900")),
-        help="空闲多少秒后卸载模型释放显存；0 表示常驻（默认 900）",
+        default=float(os.environ.get("QWEN_TTS_IDLE_TIMEOUT", "0")),
+        help="空闲多少秒后卸载模型释放显存；0 表示常驻（默认 0）",
+    )
+    parser.add_argument(
+        "--prewarm-voices",
+        default=os.environ.get("QWEN_TTS_PREWARM_VOICES", "07-温柔"),
+        help="启动后预热哪些音色的高频开场白，逗号分隔；留空则不预热",
     )
     parser.add_argument("--no-warmup", action="store_true")
     args = parser.parse_args()
@@ -276,6 +301,9 @@ def main() -> None:
                 log.info("预热完成")
             except Exception:  # noqa: BLE001
                 log.exception("预热失败（不影响使用）")
+        if engine.ready:
+            voices = [v.strip() for v in str(args.prewarm_voices).split(",") if v.strip()]
+            engine.prewarm(voices)
 
     def idle_watch(interval: float = 15.0) -> None:
         while True:

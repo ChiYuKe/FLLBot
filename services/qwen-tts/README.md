@@ -28,7 +28,9 @@ services\qwen-tts\stop.ps1         # 停止（默认端口 7862）
 
 `/health` 里 `ok=true` 即可用；加载约 4 秒。
 
-默认空闲 15 分钟后卸载模型释放显存，下次请求自动重载；`--idle-timeout 0` 可保持常驻，`--idle-timeout 120` 可改阈值。`/health` 的 `state` 会显示 `ready` / `loading` / `idle`，`idle_seconds` 和 `idle_timeout` 便于排查。命中的缓存请求不需要模型，空闲时也能直接返回。
+**默认常驻**（`--idle-timeout 0`）：模型一直留在显存里，避免每条消息都付 5 秒加载成本。需要让出显卡时再传 `--idle-timeout 900` 之类的阈值，`/health` 的 `state` 会显示 `ready` / `loading` / `idle`。命中的缓存请求不需要模型，空闲时也能直接返回。
+
+**开场白预热**：启动后会在后台预生成 `我在。` `怎么啦？` `好呀。` `晚安。` `早上好。`，消息进来直接命中缓存。默认预热 `07-温柔`，可用 `--prewarm-voices "07-温柔,04-奶音"` 指定多个音色，留空则关闭。
 
 ## 预设音色
 
