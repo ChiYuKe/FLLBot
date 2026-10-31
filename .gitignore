@@ -38,6 +38,7 @@ services/qwen-tts/cache/
 
 # 生成的音频样音
 services/qwen-tts/samples/*.wav
+services/qwen-tts/samples/**/*.wav
 
 # 本地服务日志
 services/**/*.log

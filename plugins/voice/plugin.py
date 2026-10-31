@@ -68,6 +68,14 @@ plugin.setting(
     group_scoped=True,
 )
 plugin.setting("with_text", type="bool", label="同时发送文字", default=True, group_scoped=True)
+plugin.setting(
+    "use_emotion",
+    type="bool",
+    label="允许情绪控制",
+    default=True,
+    group_scoped=True,
+    description="关闭后固定按音色描述生成，忽略智能体和 /say 传入的语气，音色最稳定",
+)
 
 # 情绪前缀： [生气] xxx / （开心）xxx / 开心: xxx
 _BRACKET_EMOTION = re.compile(r"^\s*[\[\(【（]\s*([^\]\)】）]{1,8}?)\s*[\]\)】）]\s*")
@@ -156,6 +164,10 @@ async def _request_tts(
     speed: float | None = None,
 ) -> Path:
     settings = ctx.settings
+    if not settings.get("use_emotion", True):
+        emotion = None
+        emotion_text = None
+        emo_alpha = None
     backend = str(settings.get("backend") or "qwen")
     if backend == "indextts":
         url = INDEXTTS_SERVER + "/tts"
@@ -184,6 +196,10 @@ async def _request_tts(
         }
 
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        log.info(
+            "TTS 请求：backend=%s voice=%s emotion=%s emotion_text=%s speed=%s text=%r",
+            backend, voice, payload.get("emotion"), emotion_text, speed, text[:40],
+        )
         response = await client.post(url, json=payload)
         response.raise_for_status()
         audio = response.content
