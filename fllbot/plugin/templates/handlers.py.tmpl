@@ -1,0 +1,10 @@
+"""Plugin: __NAME__ | Role: commands and optional AI tools."""
+
+from fllbot.plugin import Context, Plugin
+
+
+def register_handlers(plugin: Plugin) -> None:
+    @plugin.on_command("__NAME__")
+    async def greet(ctx: Context) -> None:
+        await ctx.reply(f"{ctx.settings.get('greeting')}，{ctx.nickname}！", quote=True)
+__TOOL_HANDLER__

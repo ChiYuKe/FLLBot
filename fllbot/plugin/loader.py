@@ -5,23 +5,18 @@ from __future__ import annotations
 import asyncio
 import importlib
 import logging
-import re
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
 from .base import LoopSpec, Plugin
+from .imports import BUILTIN_PACKAGE, import_plugin, module_name_for, purge_modules
+from .manifest import PluginManifest
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..app import FLLBot
-
-USER_PACKAGE = "fllbot_user_plugins"
-BUILTIN_PACKAGE = "fllbot.builtin_plugins"
-
-_SAFE_NAME = re.compile(r"[^0-9A-Za-z_]")
 
 
 @dataclass
@@ -61,7 +56,7 @@ class PluginLoader:
         self._loaded: dict[str, LoadedPlugin] = {}
         self._lock = asyncio.Lock()
         self._watch_task: asyncio.Task[None] | None = None
-        self._known_mtimes: dict[Path, float] = {}
+        self._known_fingerprints: dict[Path, tuple[Any, ...]] = {}
         self.failed: dict[str, str] = {}
 
     # -- 查询 ------------------------------------------------------------- #
@@ -106,49 +101,94 @@ class PluginLoader:
                 continue
             try:
                 await self.load_path(path, builtin=True)
-            except Exception:
+            except Exception as exc:
+                self.failed[str(path.resolve())] = str(exc)
                 self.logger.exception("内置插件加载失败：%s", path.name)
 
     async def load_path(self, path: Path, *, builtin: bool = False) -> Plugin | None:
         async with self._lock:
-            return await self._load_locked(Path(path), builtin=builtin)
+            path = Path(path).resolve()
+            try:
+                return await self._load_locked(path, builtin=builtin)
+            except Exception as exc:
+                self.failed[str(path)] = str(exc)
+                raise
 
-    async def _load_locked(self, path: Path, *, builtin: bool) -> Plugin | None:
-        module_name = self._module_name(path, builtin)
-        module = self._import(path, module_name, builtin=builtin)
-        plugin = getattr(module, "plugin", None)
-        if not isinstance(plugin, Plugin):
-            raise TypeError(f"{path} 没有导出 plugin = Plugin(...) 实例")
+    async def _load_locked(self, path: Path, *, builtin: bool, replace: str | None = None) -> Plugin | None:
+        manifest = PluginManifest.read(path) if path.is_dir() and (path / "plugin.toml").exists() else None
+        module_name = module_name_for(path, builtin)
+        backup = {
+            key: value
+            for key, value in list(sys.modules.items())
+            if key == module_name or key.startswith(module_name + ".")
+        }
+        plugin = None
+        initializing = False
+        try:
+            module = import_plugin(path, module_name, builtin=builtin)
+            plugin = getattr(module, "plugin", None)
+            if not isinstance(plugin, Plugin):
+                raise TypeError(f"{path} 没有导出 plugin = Plugin(...) 实例")
+            if not plugin.name:
+                plugin.name = path.stem if path.is_file() else path.name
+                plugin.logger = logging.getLogger(f"fllbot.plugin.{plugin.name}")
+                for spec in plugin.handlers:
+                    spec.plugin_name = plugin.name
+            if manifest:
+                for key in ("name", "version", "description", "author", "category"):
+                    if getattr(plugin, key) != getattr(manifest, key):
+                        raise ValueError(f"插件 {key} 与 plugin.toml 不一致，请使用 Plugin.from_manifest(__file__)")
+            existing = self._loaded.get(plugin.name)
+            if existing is not None and existing.source != path:
+                raise ValueError(f"插件名重复：{plugin.name} 已由 {existing.source} 提供")
+            plugin.bot, plugin.module, plugin.path = self.bot, module, path
+            if not plugin.readme:
+                plugin.readme = self._read_readme(path)
+            await plugin.settings.load(self.bot.storage)
+            # Stage initialization before replacing the working version or exposing handlers.
+            initializing = True
+            await plugin.on_load(self.bot)
+        except BaseException:
+            if isinstance(plugin, Plugin):
+                if initializing:
+                    try:
+                        await plugin.on_unload(self.bot)
+                    except Exception:
+                        self.logger.exception("失败插件的卸载回调异常：%s", path)
+                await plugin.cleanup()
+            purge_modules(module_name)
+            sys.modules.update(backup)
+            raise
 
-        if not plugin.name:
-            plugin.name = path.stem if path.is_file() else path.name
-            plugin.logger = logging.getLogger(f"fllbot.plugin.{plugin.name}")
-            for spec in plugin.handlers:
-                spec.plugin_name = plugin.name
-
-        existing = self._loaded.get(plugin.name)
-        if existing is not None:
-            self.logger.info("插件 %s 已存在，先卸载旧版本", plugin.name)
-            await self._unload_locked(plugin.name)
-
-        plugin.bot = self.bot
-        plugin.module = module
-        plugin.path = path
-        if not plugin.readme:
-            plugin.readme = self._read_readme(path)
+        # 新源码已经导入并校验成功，这时才卸载旧版本：
+        # 新版本有语法/导入错误时，正在运行的旧插件不受影响。
+        staged_modules = {
+            key: value
+            for key, value in list(sys.modules.items())
+            if key == module_name or key.startswith(module_name + ".")
+        }
+        for stale_name in dict.fromkeys((plugin.name, replace)):
+            if stale_name is None:
+                continue
+            existing = self._loaded.get(stale_name)
+            if existing is None:
+                continue
+            self.logger.info("插件 %s 已存在，先卸载旧版本", stale_name)
+            # 新版本已经占用了同一个模块名，此时清模块会把刚导入的新模块也删掉。
+            if existing.module_name == module_name:
+                # Old cleanup hooks must see their own package during lazy relative imports.
+                purge_modules(module_name)
+                sys.modules.update(backup)
+                try:
+                    await self._unload_locked(stale_name, purge=False)
+                finally:
+                    purge_modules(module_name)
+                    sys.modules.update(staged_modules)
+            else:
+                await self._unload_locked(stale_name)
 
         for spec in plugin.handlers:
             self.bot.dispatcher.register(spec)
-
-        try:
-            await plugin.settings.load(self.bot.storage)
-        except Exception:
-            self.logger.exception("插件 %s 的配置加载失败", plugin.name)
-
-        try:
-            await plugin.on_load(self.bot)
-        except Exception:
-            self.logger.exception("插件 %s 的 on_load 失败", plugin.name)
 
         entry = LoadedPlugin(
             plugin=plugin,
@@ -159,6 +199,7 @@ class PluginLoader:
         )
         entry.loops = self._start_loops(plugin)
         self._loaded[plugin.name] = entry
+        self._known_fingerprints[path] = self._fingerprint(path)
         self.failed.pop(str(path), None)
         self.logger.info(
             "已加载插件 %s v%s（%d 个处理器，来源 %s）",
@@ -198,7 +239,7 @@ class PluginLoader:
         async with self._lock:
             return await self._unload_locked(name)
 
-    async def _unload_locked(self, name: str) -> bool:
+    async def _unload_locked(self, name: str, *, purge: bool = True) -> bool:
         entry = self._loaded.pop(name, None)
         if entry is None:
             return False
@@ -211,7 +252,9 @@ class PluginLoader:
             await entry.plugin.on_unload(self.bot)
         except Exception:
             self.logger.exception("插件 %s 的 on_unload 失败", name)
-        self._purge_modules(entry.module_name)
+        await entry.plugin.cleanup()
+        if purge:
+            purge_modules(entry.module_name)
         self.logger.info("已卸载插件 %s", name)
         return True
 
@@ -221,8 +264,13 @@ class PluginLoader:
             if entry is None:
                 raise KeyError(f"插件未加载: {name}")
             source, builtin = entry.source, entry.builtin
-            await self._unload_locked(name)
-            return await self._load_locked(source, builtin=builtin)
+            # 先导入新版本，成功后再由 _load_locked 卸载旧版本；
+            # 新版本有语法/导入错误时抛出异常，旧插件继续服务。
+            try:
+                return await self._load_locked(source, builtin=builtin, replace=name)
+            except Exception as exc:
+                self.failed[str(source)] = str(exc)
+                raise
 
     async def reload_all(self) -> None:
         for name in list(self._loaded):
@@ -265,45 +313,52 @@ class PluginLoader:
     async def scan_once(self) -> list[str]:
         """扫描一次文件变化，返回发生变化的插件名。"""
         changed: list[str] = []
-        current: dict[Path, float] = {}
+        current: dict[Path, tuple[Any, ...]] = {}
         for directory in self.dirs:
             if not directory.is_dir():
                 continue
             for path in self._iter_candidates(directory):
-                current[path] = self._mtime(path)
+                path = path.resolve()
+                current[path] = self._fingerprint(path)
 
         known_sources = {entry.source: entry for entry in self._loaded.values() if not entry.builtin}
 
-        for path, mtime in current.items():
-            previous = self._known_mtimes.get(path)
+        for path, fingerprint in current.items():
+            previous = self._known_fingerprints.get(path)
             entry = known_sources.get(path)
-            if previous is None and entry is None:
-                if await self._try_load(path):
-                    changed.append(path.stem)
-            elif entry is not None and previous is not None and mtime > previous:
-                try:
-                    plugin = await self.reload(entry.plugin.name)
-                    if plugin:
-                        changed.append(plugin.name)
-                except Exception:
-                    self.logger.exception("热重载失败：%s", path)
+            if entry is not None:
+                if previous is not None and fingerprint != previous:
+                    try:
+                        plugin = await self.reload(entry.plugin.name)
+                        if plugin:
+                            changed.append(plugin.name)
+                    except Exception:
+                        self.logger.exception("热重载失败：%s", path)
+            elif previous is None or fingerprint != previous:
+                # 新插件，或此前加载/重载失败（源码有错）而现在源码又被改动的插件：
+                # 重新尝试加载，避免一次坏保存让插件在进程内永久消失。
+                plugin = await self._try_load(path)
+                if plugin is not None:
+                    changed.append(plugin.name)
 
         for path, entry in known_sources.items():
             if path not in current:
                 await self.unload(entry.plugin.name)
                 changed.append(entry.plugin.name)
 
-        self._known_mtimes = current
+        for failed_path in list(self.failed):
+            if not Path(failed_path).exists():
+                self.failed.pop(failed_path, None)
+        self._known_fingerprints = current
         return changed
 
-    async def _try_load(self, path: Path) -> bool:
+    async def _try_load(self, path: Path) -> Plugin | None:
         try:
-            plugin = await self.load_path(path)
-            return plugin is not None
+            return await self.load_path(path)
         except Exception as exc:
-            self.logger.error("新插件加载失败 %s: %s", path, exc)
+            self.logger.error("插件加载失败 %s: %s", path, exc)
             self.failed[str(path)] = str(exc)
-            return False
+            return None
 
     # -- 工具 ------------------------------------------------------------- #
     @staticmethod
@@ -338,7 +393,7 @@ class PluginLoader:
                 continue
             if item.is_file() and item.suffix == ".py":
                 candidates.append(item)
-            elif item.is_dir() and (item / "__init__.py").is_file():
+            elif item.is_dir() and ((item / "__init__.py").is_file() or (item / "plugin.toml").is_file()):
                 candidates.append(item)
         return candidates
 
@@ -355,50 +410,22 @@ class PluginLoader:
             return 0.0
 
     @staticmethod
-    def _module_name(path: Path, builtin: bool) -> str:
-        stem = path.name if path.is_dir() else path.stem
-        safe = _SAFE_NAME.sub("_", stem)
-        return f"{BUILTIN_PACKAGE}.{safe}" if builtin else f"{USER_PACKAGE}.{safe}"
-
-    def _import(self, path: Path, module_name: str, *, builtin: bool) -> ModuleType:
-        if builtin:
-            sys.modules.pop(module_name, None)
-            importlib.invalidate_caches()
-            return importlib.import_module(module_name)
-
-        # 直接编译源码执行：避免 __pycache__ 里同秒内写入的旧字节码被复用。
-        self._purge_modules(module_name)
-        self._ensure_parent_package()
-        is_package = path.is_dir()
-        location = (path / "__init__.py") if is_package else path
-        source = location.read_text(encoding="utf-8")
-
-        module = ModuleType(module_name)
-        module.__file__ = str(location)
-        module.__package__ = module_name if is_package else module_name.rpartition(".")[0]
-        if is_package:
-            module.__path__ = [str(path)]  # type: ignore[attr-defined]
-        sys.modules[module_name] = module
-        try:
-            code = compile(source, str(location), "exec")
-            exec(code, module.__dict__)  # noqa: S102 - 插件源码来自本地可信目录
-        except Exception:
-            sys.modules.pop(module_name, None)
-            raise
-        return module
-
-    @staticmethod
-    def _purge_modules(module_name: str) -> None:
-        for key in [key for key in sys.modules if key == module_name or key.startswith(module_name + ".")]:
-            sys.modules.pop(key, None)
-
-    @staticmethod
-    def _ensure_parent_package() -> None:
-        if USER_PACKAGE in sys.modules:
-            return
-        package = ModuleType(USER_PACKAGE)
-        package.__path__ = []  # type: ignore[attr-defined]
-        sys.modules[USER_PACKAGE] = package
+    def _fingerprint(path: Path) -> tuple[Any, ...]:
+        """Track additions, removals and changes across the package, not only max mtime."""
+        candidates = path.rglob("*") if path.is_dir() else [path, path.with_suffix(".md")]
+        result = []
+        for child in candidates:
+            if child.suffix.lower() not in {".py", ".md", ".toml", ".json", ".yaml", ".yml"}:
+                continue
+            if any(part.startswith(".") or part == "__pycache__" for part in child.relative_to(path.parent).parts):
+                continue
+            try:
+                if child.is_file():
+                    stat = child.stat()
+                    result.append((str(child.relative_to(path.parent)), stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                continue
+        return tuple(sorted(result))
 
 
 __all__ = ["LoadedPlugin", "PluginLoader"]

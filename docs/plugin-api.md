@@ -1,9 +1,24 @@
 # 插件开发
 
-插件是放在 `plugins/` 目录下的 Python 文件（`xxx.py`）或包（`xxx/__init__.py`），
-模块级必须导出 `plugin = Plugin(...)`。文件改动保存后自动热重载（`plugin.hot_reload = true`）。
+新插件统一使用 **一个文件夹一个插件包**，`plugin.toml` 是唯一包头，`__init__.py` 导出 `plugin`，
+实现放在 `plugin.py`、`handlers.py`、`settings.py` 等包内模块。包规范、文档与文件头约定见
+[插件包开发规范](plugin-packages.md)，宿主职责与依赖方向见 [项目架构](architecture.md)。
 
-## 最小示例
+```powershell
+.venv/Scripts/python.exe -m fllbot plugin new hello --description "打招呼插件" --author "你的名字"
+.venv/Scripts/python.exe -m fllbot plugin new helper --template tool --description "示例 AI 工具"
+.venv/Scripts/python.exe -m fllbot plugin check --builtin
+.venv/Scripts/python.exe -m fllbot plugin list
+```
+
+包内使用 `plugin = Plugin.from_manifest(__file__)` 读取元信息，文件变动自动热重载（`plugin.hot_reload = true`）。
+旧单文件插件与无清单的目录插件仍能运行，用于平稳迁移；新建模板和内置插件均采用标准包。
+
+生命周期资源使用 `plugin.on_cleanup(callback)`，支持同步或异步回调，卸载、重载及初始化失败时逆序清理。
+文件数据使用 `ctx.data_dir` / `plugin.data_dir`，对应宿主 `data/plugins/<name>/`；配置仍由 `plugin.setting()`
+声明并保存到宿主数据库，群覆盖与密钥掩码规则保持不变。
+
+## 装饰器最小示例（旧声明写法仍兼容）
 
 ```python
 from fllbot.plugin import Context, Plugin
@@ -111,6 +126,30 @@ async def cleanup(bot) -> None:
 ```
 
 卸载插件时会自动取消任务。
+
+### on_ai_tool
+
+智能体只会看到群策略「允许调用的工具」名单中的工具。插件是安装和配置的单位，工具是插件显式开放给模型的能力；未登记的处理器、OneBot API 和其他插件能力不会暴露给模型。工具执行时会再次检查插件开关和权限；工具回调也应校验自己的业务权限与数据范围。
+
+```python
+@plugin.on_ai_tool(
+    "lookup_order",
+    title="订单查询",
+    description="按订单号查询当前用户的订单状态",
+    parameters={
+        "type": "object",
+        "properties": {"order_id": {"type": "string", "description": "订单编号"}},
+        "required": ["order_id"],
+        "additionalProperties": False,
+    },
+    permission="group",
+)
+async def lookup_order(ctx: Context, order_id: str) -> dict[str, str]:
+    # 在这里执行插件自己的权限和数据范围检查。
+    return {"order_id": order_id, "status": "处理中"}
+```
+
+`title` 是管理端展示用的名称（例如「联网搜索」），省略时回退到工具名。回调签名为 `async def callback(ctx, **arguments)`，工具 ID 会以 `插件名__工具名` 的形式交给模型，也是单群策略 `allowed_tools` 里保存的值。模型服务需兼容 OpenAI Chat Completions 的 `tools` / `tool_calls` 格式。
 
 ## 声明式配置
 
@@ -256,8 +295,11 @@ await ctx.db.kv_set("demo", "obj", {"a": 1})     # 自动 JSON 序列化
 await ctx.db.kv_delete("demo", "count")
 items = await ctx.db.kv_all("demo")
 
-await ctx.db.add_chat_message("group", 123, "user", "hi")
+await ctx.db.add_chat_message(
+    "group", 123, "user", "hi", user_id=456, nickname="小明", sender_role="member",
+)
 rows = await ctx.db.recent_chat("group", 123, limit=20)
+# rows 为 ChatRecord：.role / .content / .user_id / .nickname / .sender_role
 await ctx.db.clear_chat("group", 123)
 
 await ctx.db.upsert_group(123, enabled=True, config={"llm": {"persona": "concise"}})
@@ -265,7 +307,7 @@ groups = await ctx.db.list_group_states()
 
 await ctx.db.daily_message_counts(days=7)
 
-# 定时提醒（reminder 插件用的就是这套）
+# 定时提醒数据存储接口
 await ctx.db.add_reminder(scene="group", scene_id=123, creator=456, content="喝水", due_at=ts)
 await ctx.db.due_reminders()
 await ctx.db.mark_reminder_fired(1)
@@ -345,5 +387,52 @@ await ctx.connection.call("get_status")        # 任意接口
 
 - 插件模块在进程内执行，等同于本地代码权限，只加载可信来源
 - 热重载会重新执行源码，模块级全局变量会被重置；持久状态请放 SQLite
+- 热重载只监听 `plugins/` 目录（含包内 `*.py`）；`fllbot/builtin_plugins/` 的改动需要重启进程
+- 重载会先导入新源码、成功后替换旧版本：新版本有语法/导入错误时重载失败，旧插件继续运行；
+  修好源码再保存，下一次扫描会自动重载成功
 - 卸载时务必在 `on_unload` / `on_shutdown` 里取消自己创建的任务与连接
 - 群聊默认受群开关控制；被停用的群里不会触发任何处理器
+
+
+## QQ 交互能力补充
+
+新增接口对照 [NapCat 官方 API](https://napneko.github.io/onebot/api)。所有方法均为异步，
+返回 NapCat 的 `data`；失败抛 `ActionError`，不会自动重试写操作。实际权限和支持情况由 NapCat/QQ 决定。
+这些接口供插件使用，不会自动注册聊天命令或向智能体开放工具。
+
+| 类别 | `ctx.connection` 方法 |
+| --- | --- |
+| 用户与成员 | `get_group_member_list(group_id, no_cache=False)`、`get_stranger_info(user_id, no_cache=False)` |
+| 戳一戳与点赞 | `group_poke(group_id, user_id)`、`friend_poke(user_id)`、`send_poke(user_id, group_id=None)`、`send_like(user_id, times=1)` |
+| 群管理 | `set_group_admin`、`set_group_name`、`set_group_leave`、`set_group_special_title`、`set_group_portrait` |
+| 公告 | `send_group_notice(group_id, content, image=None)`、`get_group_notice(group_id)`、`delete_group_notice(group_id, notice_id)` |
+| 精华与荣誉 | `get_essence_msg_list`、`set_essence_msg`、`delete_essence_msg`、`get_group_honor_info`、`get_group_at_all_remain` |
+| 文件上传 | `upload_group_file(group_id, file, name, folder=None)`、`upload_private_file(user_id, file, name)` |
+| 群文件浏览 | `get_group_file_system_info`、`get_group_root_files`、`get_group_files_by_folder(group_id, folder_id)`、`get_group_file_url(group_id, file_id, busid)` |
+| 群文件管理 | `delete_group_file`、`create_group_file_folder`、`delete_group_folder`、`move_group_file`、`trans_group_file`、`rename_group_file` |
+| 媒体与转发 | `get_image(file)`、`get_record(file, out_format="mp3")`、`can_send_image()`、`can_send_record()`、`get_forward_msg(message_id)` |
+| 好友备注 | `set_friend_remark(user_id, remark)` |
+
+表中的可选参数如 `no_cache`、`group_id`、`image`、`folder` 使用关键字传递。
+公告方法自动映射 NapCat 的 `_send_group_notice` / `_get_group_notice` / `_del_group_notice`。
+主动戳人推荐使用 `ctx.poke()` 或专用接口，而非旧的 `MessageSegment.poke()` 消息段。
+
+```python
+members = await ctx.get_members(no_cache=True)  # 当前群完整成员列表；私聊调用会报错
+await ctx.poke()                               # 戳当前用户，自动选择群/好友接口
+await ctx.poke(123456)                         # 戳指定用户
+await ctx.connection.send_group_notice(ctx.group_id, "群公告")
+await ctx.reply([MessageSegment.record("file:///C:/media/voice.mp3")])
+await ctx.reply([MessageSegment.video("https://example.com/video.mp4")])
+await ctx.connection.upload_group_file(ctx.group_id, "C:/files/report.pdf", "报告.pdf")
+node = MessageSegment.node(ctx.user_id, ctx.nickname, "转发内容")
+await ctx.connection.send_group_forward_msg(ctx.group_id, [node.to_dict()])
+```
+
+新增消息段构造：`record(file)`、`video(file)`、`file(file, name=None)`、`forward(message_id)`、
+`node(user_id, nickname, content)`、`xml_card(payload)`、`dice()`、`rps()`。
+本地文件路径指向 **NapCat 所在机器**；语音格式转换和不同消息段的发送能力取决于 NapCat。
+发送正式群文件推荐 `upload_group_file`，私聊文件推荐 `upload_private_file`。
+
+
+插件是启停和配置的完整功能包；Agent 工具是插件通过 `on_ai_tool(...)` 暴露的单个可调用动作。同一个插件可以同时包含命令、配置和多个 Agent 工具，例如语音插件提供 Qwen / IndexTTS 后端配置及 `voice__speak`。`category` 字段保留用于兼容和描述，不决定插件是否出现在插件管理页；工具目录按具体 `on_ai_tool` 注册项展示，并标出来源插件。

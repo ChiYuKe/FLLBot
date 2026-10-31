@@ -1,0 +1,14 @@
+"""Plugin: __NAME__ | Role: declaration and composition. Metadata: plugin.toml.
+
+No network requests or background tasks at import time.
+Register external resources with plugin.on_cleanup() during on_load().
+"""
+
+from fllbot.plugin import Plugin
+
+from .handlers import register_handlers
+from .settings import register_settings
+
+plugin = Plugin.from_manifest(__file__)
+register_settings(plugin)
+register_handlers(plugin)

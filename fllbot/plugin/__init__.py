@@ -16,12 +16,13 @@ from ..rules import (
     startswith,
     to_me,
 )
-from .base import HandlerKind, HandlerSpec, LoopSpec, Plugin
+from .base import AIToolSpec, HandlerKind, HandlerSpec, LoopSpec, Plugin
 from .context import Context
 from .settings import MASK, PluginSettings, SettingField, SettingsView
 
 __all__ = [
     "MASK",
+    "AIToolSpec",
     "Context",
     "HandlerKind",
     "HandlerSpec",

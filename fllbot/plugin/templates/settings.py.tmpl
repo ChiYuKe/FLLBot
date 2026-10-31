@@ -1,0 +1,7 @@
+"""Plugin: __NAME__ | Role: declarative settings; persisted by the host."""
+
+from fllbot.plugin import Plugin
+
+
+def register_settings(plugin: Plugin) -> None:
+    plugin.setting("greeting", type="string", label="欢迎语", default="你好", group_scoped=True)

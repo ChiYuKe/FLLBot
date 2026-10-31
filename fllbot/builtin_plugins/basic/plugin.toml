@@ -1,0 +1,7 @@
+schema_version = 1
+api_version = 1
+name = "basic"
+version = "0.2.0"
+description = "基础命令：ping、echo、help 与插件列表"
+author = ""
+category = "plugin"

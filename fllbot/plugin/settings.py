@@ -208,6 +208,14 @@ class PluginSettings:
                     result[key] = value
         return result
 
+    def group_overrides(self, group_id: int) -> dict[str, Any]:
+        return {key: value for key, value in self._values.get(int(group_id), {}).items()
+                if key in self._fields and self._fields[key].group_scoped}
+
+    def forget_group(self, group_id: int) -> None:
+        """Drop the cached override after storage has reset it."""
+        self._values.pop(int(group_id), None)
+
     def values_for_api(self, group_id: int | None = None) -> dict[str, Any]:
         """给管理端用的配置值，隐藏标记为 secret 的字段。"""
         values = self.values(group_id)

@@ -7,6 +7,7 @@ import logging
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..onebot.models import Event, MessageEvent, Sender
@@ -122,6 +123,13 @@ class Context:
         return self.bot.storage
 
     @property
+    def data_dir(self) -> Path:
+        """当前插件的文件数据目录；源码目录不用于保存运行数据。"""
+        if self.plugin is None:
+            raise RuntimeError("当前上下文没有关联插件")
+        return self.plugin.data_dir
+
+    @property
     def llm(self) -> Any:
         return self.bot.chat
 
@@ -213,6 +221,19 @@ class Context:
             raise ValueError("只有群消息才能获取群成员信息")
         target = user_id or self.user_id
         return await self.connection.get_group_member_info(int(self.group_id), int(target))
+
+    async def get_members(self, *, no_cache: bool = False) -> Any:
+        """获取当前群的完整成员列表。"""
+        if not self.is_group or self.group_id is None:
+            raise ValueError("只有群会话才能获取群成员列表")
+        return await self.connection.get_group_member_list(self.group_id, no_cache=no_cache)
+
+    async def poke(self, user_id: int | None = None) -> Any:
+        """戳指定用户；默认戳当前事件发送者，自动选择群聊或私聊。"""
+        target = self.user_id if user_id is None else user_id
+        if not target:
+            raise ValueError("戳一戳需要目标用户 ID")
+        return await self.connection.send_poke(target, group_id=self.group_id if self.is_group else None)
 
     async def sleep(self, seconds: float) -> None:
         await asyncio.sleep(seconds)

@@ -1,0 +1,34 @@
+# __NAME__ 开发说明
+
+## 文件职责
+
+- `plugin.toml`：包头唯一来源，维护名称、版本、作者、描述和分类。
+- `__init__.py`：只导出 plugin，不放业务实现。
+- `plugin.py`：声明 Plugin，连接配置和处理器，管理生命周期。
+- `settings.py`：配置字段声明，数据库和群覆盖由宿主管理。
+- `handlers.py`：命令、事件与 AI 工具；复杂逻辑放到包内 `service.py` 等按职责命名的模块。
+- `README.md`：用户说明、命令、权限、配置与依赖。
+- `CHANGELOG.md`：记录版本和兼容性变化。
+- `assets/`、`tests/`：按需添加静态资源、离线测试，测试不作为运行入口加载。
+
+## 文件头与导入
+
+Python 模块顶部写 `Plugin: __NAME__ | Role: 职责`，元信息统一引用 plugin.toml。
+包内使用相对导入，不修改 sys.path，不通过复制文件共享宿主代码，也不导入其他用户插件。
+
+## 生命周期
+
+导入阶段只声明配置、处理器和工具。通过 `on_load(bot)` 创建资源，立即调用 `plugin.on_cleanup(callback)` 登记清理；支持同步或异步回调，卸载、重载或初始化失败时逆序执行。
+`on_load` 失败会保留工作中的旧插件；初始化不要修改其他插件的状态。数据库表结构不在插件导入时变更。
+周期任务使用 `@plugin.on_loop(seconds=...)`，宿主负责取消与回收。
+命令、配置和 AI 工具的稳定名称会关联已有权限和数据，不要随意改名。
+
+## 开发检查
+
+```powershell
+.venv/Scripts/python.exe -m fllbot plugin check --root . --name __NAME__
+.venv/Scripts/python.exe -m ruff check plugins/__NAME__
+```
+
+验证命令与工具、配置保存和群覆盖、开关与权限、重载失败回滚、资源清理。新增外部依赖时在 README 声明版本和安装方法；宿主不会自动执行安装命令。
+开发文档必须随接口修改更新，发布时同步更新 plugin.toml 与 CHANGELOG。

@@ -1,0 +1,30 @@
+# __NAME__
+
+> 插件包：`__NAME__` · 包头以 [plugin.toml](plugin.toml) 为准。
+
+__DESCRIPTION__
+
+## 安装与使用
+
+将整个 `__NAME__/` 放进配置的插件目录，启动或等待热重载。发送 `/__NAME__` 验证。
+命令前缀以宿主配置为准。配置、开关、群覆盖和重载使用 FLLBot 管理界面或 `/api/plugins`。
+
+## 配置
+
+| 配置项 | 默认值 | 支持群覆盖 | 说明 |
+| --- | --- | --- | --- |
+| `greeting` | 你好 | 是 | 回复的欢迎语 |
+
+## 命令与 AI 工具
+
+- 命令：`/__NAME__`。
+__TOOL_DOC__
+
+## 依赖与数据
+
+无额外依赖。配置交给宿主持久化；文件数据写入 `ctx.data_dir` / `plugin.data_dir`。
+不要在插件目录保存日志、缓存、令牌或数据库，也不要在源码中导入其他用户插件。
+
+## 开发与维护
+
+维护规范见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)，版本变更见 [CHANGELOG.md](CHANGELOG.md)。

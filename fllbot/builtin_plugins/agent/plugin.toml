@@ -1,0 +1,7 @@
+schema_version = 1
+api_version = 1
+name = "agent"
+version = "0.1.0"
+description = "自然语言智能体：理解群聊并调用插件开放的工具"
+author = ""
+category = "plugin"
