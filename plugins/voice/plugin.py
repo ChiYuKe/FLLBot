@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import logging
 import re
@@ -28,7 +29,7 @@ plugin = Plugin.from_manifest(__file__)
 
 # 不给用户看的默认值；表达能力交给智能体在每次调用时决定
 LANG = "zh"
-MAX_CHARS = 120
+MAX_CHARS = 80
 MAX_CHUNKS = 8
 PAUSE_MS = 200
 TIMEOUT = 180.0
@@ -144,27 +145,31 @@ def _split_long_sentence(sentence: str, limit: int, hard_max: int) -> list[str]:
 
 
 def _split_text(text: str, limit: int) -> list[str]:
-    """按句切分；一句话不超过 hard_max 就整句保留，避免从词中间断开。"""
+    """按句切分，并把各段长度尽量摊匀，批量合成时不会被最长那段拖住。"""
     hard_max = max(limit, 220)
     sentences = [s for s in re.split(r"(?<=[。！？!?…；;\n])", text) if s.strip()]
-    chunks: list[str] = []
-    current = ""
+    units: list[str] = []
     for sentence in sentences:
-        if len(current) + len(sentence) <= limit:
-            current += sentence
-            continue
-        if current:
-            chunks.append(current.strip())
-            current = ""
         if len(sentence) <= hard_max:
-            current = sentence
-            continue
-        parts = _split_long_sentence(sentence, limit, hard_max)
-        chunks.extend(parts[:-1])
-        current = parts[-1]
-    if current.strip():
-        chunks.append(current.strip())
-    return [c for c in chunks if c][:MAX_CHUNKS]
+            units.append(sentence)
+        else:
+            units.extend(_split_long_sentence(sentence, limit, hard_max))
+    if not units:
+        return []
+
+    total = sum(len(unit) for unit in units)
+    count = max(1, min(MAX_CHUNKS, -(-total // limit)))
+    if count == 1:
+        return ["".join(units).strip()]
+
+    target = total / count
+    buckets = [""] * count
+    cursor = 0
+    for unit in units:
+        index = min(count - 1, int((cursor + len(unit) / 2) / target))
+        buckets[index] += unit
+        cursor += len(unit)
+    return [bucket.strip() for bucket in buckets if bucket.strip()][:MAX_CHUNKS]
 
 
 def _data_dir(ctx: Context) -> Path:
@@ -251,6 +256,53 @@ def _launch(coro) -> None:
     task.add_done_callback(_BACKGROUND.discard)
 
 
+def _payload_common(settings: dict, emotion: str | None, emotion_text: str | None,
+                    emo_alpha: float | None, speed: float | None) -> dict:
+    if not settings.get("use_emotion", True):
+        emotion = None
+        emotion_text = None
+        emo_alpha = None
+    return {
+        "emotion": emotion or "natural",
+        "emotion_text": emotion_text,
+        "emo_alpha": float(emo_alpha if emo_alpha is not None else DEFAULT_ALPHA),
+        "duration_factor": 1.0 / max(0.5, float(speed if speed is not None else 1.0)),
+    }
+
+
+async def _request_tts_batch(
+    ctx: Context,
+    texts: list[str],
+    emotion: str | None,
+    emotion_text: str | None,
+    emo_alpha: float | None,
+    speed: float | None,
+    settings: dict,
+) -> list[bytes] | None:
+    """一次请求合成多段，服务端批量解码；不支持时返回 None 走逐条。"""
+    common = _payload_common(settings, emotion, emotion_text, emo_alpha, speed)
+    voice = settings.get("qwen_voice")
+    items = [{"text": text, "voice": voice, **common} for text in texts]
+    async with httpx.AsyncClient(timeout=TIMEOUT) as client:
+        response = await client.post(QWEN_SERVER + "/tts/batch", json={"items": items})
+        if response.status_code in (404, 405):
+            return None
+        response.raise_for_status()
+        data = response.json().get("items") or []
+    if len(data) != len(texts):
+        return None
+    return [base64.b64decode(item["audio_b64"]) for item in data]
+
+
+def _save_audio(ctx: Context, audio: bytes, text: str, settings: dict) -> Path:
+    digest = hashlib.sha256(
+        (text + str(settings.get("qwen_voice")) + str(settings.get("backend"))).encode("utf-8")
+    ).hexdigest()[:24]
+    path = _data_dir(ctx) / f"{digest}.wav"
+    path.write_bytes(audio)
+    return path
+
+
 async def _send(
     ctx: Context,
     text: str,
@@ -275,6 +327,28 @@ async def _send(
         log.info("文本 %s 字，拆成 %s 段语音", len(clean), len(chunks))
     if len(clean) > MAX_CHARS * MAX_CHUNKS:
         log.warning("文本超过上限（%s 字），只发送前 %s 段", MAX_CHARS * MAX_CHUNKS, MAX_CHUNKS)
+
+    # Qwen 后端支持批量解码：多段一次请求，比逐条快 2–3 倍
+    if str(settings.get("backend") or "qwen") == "qwen" and len(chunks) > 1:
+        try:
+            audios = await _request_tts_batch(
+                ctx, chunks, emotion, emotion_text, emo_alpha, speed, settings
+            )
+        except Exception:  # noqa: BLE001
+            log.exception("批量合成失败，退回逐条合成")
+            audios = None
+        if audios:
+            log.info("批量合成 %s 段完成", len(audios))
+            for index, (chunk, audio) in enumerate(zip(chunks, audios, strict=False)):
+                path = _save_audio(ctx, audio, chunk, settings)
+                segments = []
+                if settings.get("with_text") and index == 0:
+                    segments.append(MessageSegment.text(chunk))
+                segments.append(MessageSegment.record(path.as_uri()))
+                await ctx.reply(segments)
+                if index + 1 < len(chunks):
+                    await asyncio.sleep(0.4)
+            return
 
     for index, chunk in enumerate(chunks):
         try:
@@ -414,3 +488,5 @@ async def speak(
     log.info("工具调用 voice__speak，转入后台生成：%s", text[:40])
     _launch(_send(ctx, text, emotion, emotion_text, emo_alpha, speed, settings=settings))
     return {"ok": True, "silent": True, "queued": True, "spoken": text, "emotion": emotion_text or emotion}
+
+

@@ -10,6 +10,7 @@ voice 可以是内置预设名（01-软糯 … 10-微沙），也可以直接写
 from __future__ import annotations
 
 import argparse
+import base64
 import gc
 import hashlib
 import json
@@ -81,6 +82,10 @@ class TTSRequest(BaseModel):
     fx: str | None = None  # 兼容旧客户端，Qwen 后端不使用
     interval_silence: int | None = None
     speed: float | None = None
+
+
+class BatchRequest(BaseModel):
+    items: list[TTSRequest] = Field(..., min_length=1, max_length=8)
 
 
 class Engine:
@@ -201,6 +206,60 @@ class Engine:
             self.apply_tempo(out, tempo)
         return out.read_bytes(), False
 
+    def synthesize_batch(self, reqs: list[TTSRequest]) -> list[tuple[bytes, bool]]:
+        """一次批量合成多段，摊薄每步的解码开销。"""
+        prepared: list[tuple[TTSRequest, str, str, Path]] = []
+        for req in reqs:
+            text = normalize_text(req.text)
+            if not text:
+                raise HTTPException(400, "文本为空")
+            instruct = self.instruct_for(req)
+            prepared.append((req, text, instruct, self.cache_path(req, instruct)))
+
+        results: list[tuple[bytes, bool] | None] = [None] * len(prepared)
+        pending: list[int] = []
+        for index, (_, _, _, path) in enumerate(prepared):
+            if path.exists() and path.stat().st_size > 1024:
+                results[index] = (path.read_bytes(), True)
+            else:
+                pending.append(index)
+        if not pending:
+            return results  # type: ignore[return-value]
+
+        with self.lock:
+            self.ensure_loaded()
+            if not self.ready:
+                raise HTTPException(503, self.error or "模型加载失败")
+            self.last_used = time.time()
+            self.calls += len(pending)
+            texts = [prepared[i][1] for i in pending]
+            instructs = [prepared[i][2] for i in pending]
+            try:
+                wavs, sr = self.model.generate_voice_design(
+                    text=texts,
+                    language=["Chinese"] * len(texts),
+                    instruct=instructs,
+                )
+            except (torch.cuda.OutOfMemoryError, RuntimeError) as exc:
+                if "out of memory" not in str(exc).lower():
+                    raise
+                log.warning("批量显存不足，退回逐条合成：%s", exc)
+                wavs, sr = [], 0
+                for text, instruct in zip(texts, instructs, strict=False):
+                    single, sr = self.model.generate_voice_design(
+                        text=text, language="Chinese", instruct=instruct
+                    )
+                    wavs.extend(single)
+
+        for index, wav in zip(pending, wavs, strict=False):
+            req, _, _, path = prepared[index]
+            sf.write(path, wav, sr)
+            tempo = 1.0 / max(0.5, min(2.0, req.duration_factor))
+            if abs(tempo - 1.0) > 0.01:
+                self.apply_tempo(path, tempo)
+            results[index] = (path.read_bytes(), False)
+        return results  # type: ignore[return-value]
+
     def prewarm(self, voices: list[str]) -> None:
         """把高频开场白预先合成到缓存，消息进来时直接命中。"""
         for voice in voices:
@@ -265,6 +324,18 @@ def create_app() -> FastAPI:
             media_type="audio/wav",
             headers={"X-Cache": "hit" if cached else "miss"},
         )
+
+    @app.post("/tts/batch")
+    async def tts_batch(req: BatchRequest) -> dict:
+        import anyio
+
+        results = await anyio.to_thread.run_sync(lambda: engine.synthesize_batch(req.items))
+        return {
+            "items": [
+                {"audio_b64": base64.b64encode(audio).decode("ascii"), "cached": cached}
+                for audio, cached in results
+            ]
+        }
 
     return app
 

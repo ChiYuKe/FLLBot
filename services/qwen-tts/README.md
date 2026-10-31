@@ -58,6 +58,14 @@ POST /tts
 - `duration_factor` 通过 ffmpeg `atempo` 实现（0.8–1.25 倍速内）
 - 相同参数命中缓存，响应头 `X-Cache: hit`
 
+`POST /tts/batch` 一次合成多段（最多 8 段），返回 base64 音频数组，适合长文本分段并行：
+
+```json
+{"items": [{"text": "第一段", "voice": "04-奶音"}, {"text": "第二段", "voice": "04-奶音"}]}
+```
+
+响应：`{"items": [{"audio_b64": "...", "cached": false}, ...]}`。批量会把多条序列放进同一次解码，摊薄每步开销；显存不足时自动退回逐条。
+
 ## 试听页
 
 `services/qwen-tts/samples/index.html`，十种预设各一句，浏览器直接打开。
