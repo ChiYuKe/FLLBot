@@ -1,7 +1,8 @@
 schema_version = 1
 api_version = 1
 name = "voice"
-version = "0.3.0"
+version = "0.5.0"
 description = "语音合成插件：支持 Qwen3-TTS / IndexTTS，并提供 /say 命令和 Agent 朗读工具"
 author = ""
 category = "plugin"
+

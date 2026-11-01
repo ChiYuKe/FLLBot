@@ -24,9 +24,10 @@
 | `qwen_voice` | `04-奶音` | 试听页里选中的编号（01–10） |
 | `tts_voice` | `dongxuelian-soft` | 仅 indextts 后端使用 |
 | `with_text` | 开 | 是否同时发文字 |
-| `use_emotion` | 开 | 允许智能体 / `/say` 控制语气；关闭后固定按音色描述生成，音色最稳 |
+| `use_emotion` | 开 | 允许智能体 / `/say` 控制语气；关闭后固定使用默认情绪，音色最稳 |
+| `emotion` | `natural` | 默认情绪：`natural` / `happy` / `sad` / `angry` / `calm`。智能体没指定时使用；关闭情绪控制后固定用这一档 |
 
-情绪、强度、语速等表达参数由智能体在每次调用 `voice__speak` 时决定；如果希望音色始终一致，把 `use_emotion` 关掉即可，这些参数会被忽略。
+情绪、强度、语速等表达参数由智能体在每次调用 `voice__speak` 时决定；如果希望音色始终一致，把 `use_emotion` 关掉并选好默认情绪即可。Qwen 克隆后端目前只支持 `natural` / `happy` / `sad` / `angry` / `calm` 五档，`emotion_text` 与 `emo_alpha` 不生效。
 
 ## 智能体
 

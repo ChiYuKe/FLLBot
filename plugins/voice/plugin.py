@@ -79,7 +79,16 @@ plugin.setting(
     label="允许情绪控制",
     default=True,
     group_scoped=True,
-    description="关闭后固定按音色描述生成，忽略智能体和 /say 传入的语气，音色最稳定",
+    description="关闭后忽略智能体和 /say 传入的语气，固定使用下面的默认情绪，音色最稳定",
+)
+plugin.setting(
+    "emotion",
+    type="select",
+    label="默认情绪",
+    default="natural",
+    options=("natural", "happy", "sad", "angry", "calm"),
+    description="智能体没指定语气时使用；关闭「允许情绪控制」后固定用这一档",
+    group_scoped=True,
 )
 
 # 情绪前缀： [生气] xxx / （开心）xxx / 开心: xxx
@@ -196,9 +205,11 @@ async def _request_tts(
 ) -> Path:
     settings = settings or _snapshot(ctx)
     if not settings.get("use_emotion", True):
-        emotion = None
+        emotion = str(settings.get("emotion") or "natural")
         emotion_text = None
         emo_alpha = None
+    elif emotion is None:
+        emotion = str(settings.get("emotion") or "natural")
     backend = str(settings.get("backend") or "qwen")
     if backend == "indextts":
         url = INDEXTTS_SERVER + "/tts"
@@ -243,7 +254,7 @@ async def _request_tts(
     return path
 
 
-_SETTING_KEYS = ("enabled", "backend", "qwen_voice", "tts_voice", "with_text", "use_emotion")
+_SETTING_KEYS = ("enabled", "backend", "qwen_voice", "tts_voice", "with_text", "use_emotion", "emotion")
 # 语音任务串行队列：全局 FIFO，保证不同请求之间也不会交错、乱序
 _QUEUE: asyncio.Queue | None = None
 
@@ -288,9 +299,11 @@ def _enqueue(
 def _payload_common(settings: dict, emotion: str | None, emotion_text: str | None,
                     emo_alpha: float | None, speed: float | None) -> dict:
     if not settings.get("use_emotion", True):
-        emotion = None
+        emotion = str(settings.get("emotion") or "natural")
         emotion_text = None
         emo_alpha = None
+    elif emotion is None:
+        emotion = str(settings.get("emotion") or "natural")
     return {
         "emotion": emotion or "natural",
         "emotion_text": emotion_text,
@@ -550,7 +563,7 @@ async def health(ctx: Context) -> None:
             "emotion": {
                 "type": "string",
                 "enum": ["natural", "happy", "angry", "sad", "afraid", "melancholic", "surprised", "calm"],
-                "description": "预设语气，默认 natural；有 emotion_text 时以 emotion_text 为准",
+                "description": "预设语气；不传则用插件配置里的默认情绪",
             },
             "emotion_text": {
                 "type": "string",
@@ -572,13 +585,14 @@ async def health(ctx: Context) -> None:
 async def speak(
     ctx: Context,
     text: str,
-    emotion: str = "natural",
+    emotion: str | None = None,
     emotion_text: str | None = None,
     emo_alpha: float | None = None,
     speed: float | None = None,
     segments: list[str] | None = None,
 ) -> dict:
     settings = _snapshot(ctx)
+    resolved = emotion or str(settings.get("emotion") or "natural")
     log.info(
         "工具调用 voice__speak，转入后台生成：%s%s",
         text[:40],
@@ -591,7 +605,7 @@ async def speak(
         "queued": True,
         "spoken": text,
         "segments": len(segments or []),
-        "emotion": emotion_text or emotion,
+        "emotion": emotion_text or resolved,
     }
 
 
