@@ -152,9 +152,14 @@ class Engine:
         except Exception:  # noqa: BLE001
             log.debug("清理显存缓存失败", exc_info=True)
 
-    def voice_ref(self, voice: str) -> tuple[Path, str | None]:
-        """返回音色对应的固定参考音频；没有参考就报错，避免悄悄换人。"""
-        path = (VOICE_DIR / f"{voice}.wav").resolve()
+    def voice_ref(self, voice: str, emotion: str | None = None) -> tuple[Path, str | None]:
+        """返回音色对应的固定参考音频；有情绪参考时优先用情绪版本。"""
+        base = (VOICE_DIR / f"{voice}.wav").resolve()
+        path = base
+        if emotion and emotion != "natural":
+            candidate = (VOICE_DIR / "emotions" / voice / f"{emotion}.wav").resolve()
+            if candidate.exists() and candidate.is_relative_to(VOICE_DIR.resolve()):
+                path = candidate
         if not path.is_relative_to(VOICE_DIR.resolve()) or not path.exists():
             names = "、".join(item["name"] for item in self.list_voices())
             raise HTTPException(400, f"音色没有参考音频：{voice}。可用：{names or '无'}")
@@ -190,7 +195,7 @@ class Engine:
         text = normalize_text(req.text)
         if not text:
             raise HTTPException(400, "文本为空")
-        ref, ref_text = self.voice_ref(req.voice)
+        ref, ref_text = self.voice_ref(req.voice, req.emotion)
         out = self.cache_path(req, ref)
         # 命中缓存时不需要模型，空闲卸载后依然可以出音频。
         if out.exists() and out.stat().st_size > 1024:
@@ -223,7 +228,7 @@ class Engine:
             text = normalize_text(req.text)
             if not text:
                 raise HTTPException(400, "文本为空")
-            ref, ref_text = self.voice_ref(req.voice)
+            ref, ref_text = self.voice_ref(req.voice, req.emotion)
             prepared.append((req, text, ref, ref_text, self.cache_path(req, ref)))
 
         results: list[tuple[bytes, bool] | None] = [None] * len(prepared)

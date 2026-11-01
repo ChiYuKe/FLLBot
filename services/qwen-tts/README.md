@@ -60,7 +60,9 @@ POST /tts
 ```
 
 - 音色只由 `voice` 决定，克隆同一条参考，因此跨句子、跨段落音色一致
-- `emotion` / `emotion_text` / `emo_alpha` 仍然接受但**当前不生效**（Base 克隆没有 instruct 通道）；语速 `duration_factor` 仍然可用
+- 情绪通过**多套参考音频**实现：`voices/emotions/<音色>/<happy|sad|angry|calm>.wav`。请求带 `emotion` 时优先用情绪参考，没有则回退基础参考；`emotion_text` 仍然不生效
+- 生成情绪参考：`make_emotion_refs.py`，每种情绪生成 3 个候选，用说话人嵌入挑最接近基础音色的一条（相似度多数在 0.88–0.95）
+- 语速 `duration_factor` 仍然可用
 - 相同参数命中缓存，响应头 `X-Cache: hit`
 
 `POST /tts/batch` 一次合成多段（最多 8 段），返回 base64 音频数组：
