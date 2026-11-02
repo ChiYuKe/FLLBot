@@ -303,7 +303,7 @@ async def test_transient_network_errors_are_retried(monkeypatch: pytest.MonkeyPa
             "usage": {"prompt_tokens": 3, "completion_tokens": 2},
         })
 
-    config = LLMConfig(api_key="k", base_url="http://mock.local", model="m")
+    config = LLMConfig(api_key="k", base_url="http://mock.local", model="m", context_window=8192)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         client = LLMClient(lambda: config, http_client=http)
         result = await client.chat_result([{"role": "user", "content": "hi"}])
@@ -320,7 +320,7 @@ async def test_network_error_still_fails_after_retries(monkeypatch: pytest.Monke
         calls += 1
         raise httpx.ConnectError("down", request=request)
 
-    config = LLMConfig(api_key="k", base_url="http://mock.local", model="m")
+    config = LLMConfig(api_key="k", base_url="http://mock.local", model="m", context_window=8192)
     async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
         client = LLMClient(lambda: config, http_client=http)
         with pytest.raises(LLMError, match="网络请求失败"):

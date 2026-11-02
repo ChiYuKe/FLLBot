@@ -36,9 +36,14 @@ def test_token_via_query_param(tmp_path: Path) -> None:
     bot = build_bot(tmp_path, builtin=False)
     with TestClient(create_app(bot)) as client:
         assert client.get("/api/status?token=admin-token").status_code == 200
+        ui = client.get('/ui?token=admin-token')
+        assert ui.status_code == 200
+        assert ui.headers['cache-control'] == 'no-store'
+        assert ui.headers['pragma'] == 'no-cache'
+        assert ui.headers['referrer-policy'] == 'no-referrer'
 
 
-def test_plugin_toggle_and_reload(tmp_path: Path) -> None:
+def test_plugin_toggle_and_reload(tmp_path: Path, monkeypatch) -> None:
     bot = build_bot(tmp_path, builtin=True)
     with TestClient(create_app(bot)) as client:
         detail = client.get("/api/plugins/basic", headers=AUTH)
@@ -52,6 +57,27 @@ def test_plugin_toggle_and_reload(tmp_path: Path) -> None:
         reloaded = client.post("/api/plugins/reload", headers=AUTH, json={"name": "basic"})
         assert reloaded.status_code == 200
         assert reloaded.json()["reloaded"] == "basic"
+
+        recorded = client.get('/api/console/groups/20001/changes', headers=AUTH)
+        assert recorded.status_code == 200
+        assert any(item['action'] == 'plugin_reloaded' for item in recorded.json()['items'])
+
+        original_reload = bot.plugins.reload
+
+        async def fail_basic(name):
+            if name == 'basic':
+                raise RuntimeError('synthetic failure')
+            return await original_reload(name)
+
+        monkeypatch.setattr(bot.plugins, 'reload', fail_basic)
+        bulk = client.post('/api/plugins/reload', headers=AUTH)
+        assert bulk.status_code == 200
+        assert bulk.json()['ok'] is False
+        assert 'basic' in bulk.json()['failed']
+        assert 'agent' in bulk.json()['reloaded']
+        recorded = client.get('/api/console/groups/20001/changes', headers=AUTH)
+        actions = [item['action'] for item in recorded.json()['items']]
+        assert 'plugin_reload_failed' in actions
 
         missing = client.post("/api/plugins/nope/reload", headers=AUTH)
         assert missing.status_code == 404
@@ -96,13 +122,40 @@ def test_groups_and_kv(tmp_path: Path) -> None:
 
         assert client.put("/api/kv/demo/key", headers=AUTH, json={"value": 123}).status_code == 200
         assert client.get("/api/kv/demo", headers=AUTH).json() == {"key": 123}
+        changes = client.get('/api/console/groups/20002/changes', headers=AUTH).json()['items']
+        kv_change = next(item for item in changes if item['action'] == 'kv_updated')
+        assert kv_change['fields'] == ['scope:demo']
+        assert client.delete('/api/kv/demo/key', headers=AUTH).json()['deleted'] is True
+        assert client.delete('/api/kv/demo/key', headers=AUTH).json()['deleted'] is False
+
+        cleared = client.delete('/api/chat/private/456789', headers=AUTH)
+        assert cleared.status_code == 200
+        chat_change = client.get('/api/console/groups/20002/changes', headers=AUTH).json()['items']
+        assert any(item['action'] == 'chat_history_cleared' and item['fields'][0] == 'scene:private'
+                   for item in chat_change)
 
 
-def test_personas_and_stats(tmp_path: Path) -> None:
+def test_personas_are_user_defined(tmp_path: Path) -> None:
     bot = build_bot(tmp_path, builtin=True)
     with TestClient(create_app(bot)) as client:
-        personas = client.get("/api/personas", headers=AUTH).json()
-        assert any(item["name"] == "fllbot" for item in personas)
+        assert client.get("/api/personas", headers=AUTH).json() == []
+
+        variables = client.get("/api/personas/variables", headers=AUTH).json()
+        assert any(item["name"] == "bot_name" for item in variables)
+
+        created = client.put("/api/personas/demo", headers=AUTH, json={
+            "title": "示例", "description": "测试人格", "content": "你叫 {bot_name}。",
+        })
+        assert created.status_code == 200
+        assert created.json()["editable"] is True
+        assert [item["name"] for item in client.get("/api/personas", headers=AUTH).json()] == ["demo"]
+        assert client.get("/api/personas/missing", headers=AUTH).status_code == 404
+
+        client.patch("/api/config", headers=AUTH, json={"llm": {"persona": "demo"}})
+        removed = client.delete("/api/personas/demo", headers=AUTH)
+        assert removed.status_code == 200
+        assert removed.json()["default"] == ""
+        assert client.get("/api/config", headers=AUTH).json()["config"]["llm"]["persona"] == ""
 
         stats = client.get("/api/stats", headers=AUTH).json()
         assert "daily" in stats and "dispatcher" in stats

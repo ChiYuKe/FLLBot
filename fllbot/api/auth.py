@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import hmac
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException, Request
@@ -16,6 +16,8 @@ def build_admin_dependency(bot: FLLBot) -> Callable[[Request], Awaitable[None]]:
     """令牌校验依赖：支持 ``Authorization: Bearer``、``X-Admin-Token`` 与 ``?token=``。"""
 
     async def dependency(request: Request) -> None:
+        if not bot.config.admin.enabled:
+            raise HTTPException(404, '管理入口已关闭')
         expected = bot.admin_token
         if not expected:
             return
@@ -38,4 +40,11 @@ def build_admin_dependency(bot: FLLBot) -> Callable[[Request], Awaitable[None]]:
     return dependency
 
 
-__all__ = ["build_admin_dependency"]
+__all__ = ["build_admin_dependency", "build_settings_dependency"]
+
+
+def build_settings_dependency(bot: FLLBot) -> Callable[[], AsyncIterator[None]]:
+    async def dependency() -> AsyncIterator[None]:
+        async with bot.storage.settings_lock:
+            yield
+    return dependency

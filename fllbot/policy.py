@@ -22,6 +22,7 @@ class GroupPolicy(BaseModel):
     trigger_modes: list[Literal["at", "prefix", "all"]] | None = Field(default=None, min_length=1, max_length=3)
     trigger_prefix: str | None = Field(default=None, max_length=80)
     cooldown_seconds: int | None = Field(default=None, ge=0, le=120)
+    auto_reply_probability: int | None = Field(default=None, ge=0, le=100)
     max_tool_rounds: int | None = Field(default=None, ge=1, le=5)
     allowed_tools: list[str] | None = Field(default=None, max_length=256)
     provider: str = Field(default="", max_length=80)
@@ -120,7 +121,7 @@ def agent_settings(bot: FLLBot, group_id: int, self_id: int | None = None) -> di
     plugin = bot.plugins.get("agent")
     values = plugin.settings.values() if plugin else {
         "auto_group": False, "trigger_mode": "all", "trigger_prefix": "ai",
-        "cooldown_seconds": 5, "max_tool_rounds": 3, "allowed_tools": [],
+        "cooldown_seconds": 5, "auto_reply_probability": 100, "max_tool_rounds": 3, "allowed_tools": [],
     }
     defaults = bot.bots.defaults(self_id)
     if defaults.reply_mode != "inherit":
@@ -152,19 +153,35 @@ def effective_policy(bot: FLLBot, group_id: int, self_id: int | None = None) -> 
         name for name in allowed_tools
         if name in catalog and bot.permissions.plugin_enabled(catalog[name]["plugin"], group_id)
     ]
-    reasons = []
-    if not bot.permissions.group_enabled(group_id):
-        reasons.append("该群总开关或访问范围不允许回复")
-    if not bot.plugins.get("agent") or not bot.permissions.plugin_enabled("agent", group_id):
-        reasons.append("该群的智能体插件未启用")
-    if not bot.chat.scene_enabled("group", group_id):
-        reasons.append("模型总开关、群聊 AI 开关或单群 AI 开关未启用")
-    if not selected or not selected["configured"]:
-        reasons.append("策略选择的模型服务不存在或缺少密钥")
-    if not values["auto_group"]:
-        reasons.append("策略未启用群聊响应")
-    if values["trigger_modes"] == ["prefix"] and not str(values["trigger_prefix"] or "").strip():
-        reasons.append("唤醒词尚未设置，请到 Agent 页面填写")
+    checks = []
+
+    def check(code: str, title: str, passed: bool, message: str, target: str) -> None:
+        checks.append({"code": code, "title": title, "passed": bool(passed), "message": message, "target": target})
+
+    permission = bot.config.permission
+    restricted = permission.group_access == "listed" or permission.group_access == "auto" and bool(permission.allow_groups)
+    check("group_denied", "群访问限制", group_id not in permission.deny_groups, "该群被禁止访问", "groups")
+    check("group_not_allowed", "群准入", not restricted or group_id in permission.allow_groups, "该群尚未加入允许范围", "groups")
+    state = next((item for item in bot.permissions.list_groups() if item["group_id"] == group_id), None)
+    config = bot.permissions.group_config(group_id)
+    enabled = state["enabled"] if state and not config.get("_inherit_enabled") else permission.default_group_enabled
+    check("group_disabled", "群总开关", enabled, "该群总开关已关闭", "groups")
+    agent = bot.plugins.get("agent")
+    check("agent_unavailable", "智能体插件", bool(agent and bot.permissions.plugin_enabled("agent", group_id)), "该群的智能体插件未加载或未启用", "plugins")
+    llm = config.get("llm") or {}
+    check("llm_disabled", "模型总开关", bot.config.llm.enabled, "模型总开关已关闭", "models")
+    check("group_ai_disabled", "全局群聊 AI", bot.config.llm.enable_group, "全局群聊 AI 开关已关闭", "system")
+    check("scene_ai_disabled", "单群 AI", not isinstance(llm, dict) or llm.get("enabled") is not False, "该群 AI 开关已关闭", "groups")
+    check("provider_unconfigured", "模型配置", bool(selected and selected["configured"]), "所选模型服务不存在或配置不完整", "models")
+    check("response_disabled", "群聊响应", values["auto_group"], "当前生效设置未开启群聊响应", "groups")
+    check("wake_word_missing", "唤醒条件", values["trigger_modes"] != ["prefix"] or bool(str(values["trigger_prefix"] or "").strip()), "唤醒词尚未设置，请到配置或机器人页面填写", "bots")
+    reasons = [item["message"] for item in checks if not item["passed"]]
+    connection = bot.manager.by_self_id(self_id) if self_id else bot.manager.primary()
+    connection_check = {
+        "code": "bot_offline", "title": "账号连接", "passed": bool(connection and connection.online),
+        "message": "当前查看的机器人尚未连接 NapCat", "target": "bots",
+    }
+    sources = policy_sources(bot, group_id, self_id)
     return {
         **values, "name": (overrides.get("name") or "未命名策略") if overrides else "跟随原有配置",
         "custom": bool(overrides), "provider": provider, "model": selected["model"] if selected else "不可用",
@@ -173,4 +190,39 @@ def effective_policy(bot: FLLBot, group_id: int, self_id: int | None = None) -> 
         "available_tools": available_tools,
         "tools": [catalog[name] for name in available_tools],
         "unavailable_tools": [name for name in allowed_tools if name not in available_tools],
+        "sources": sources,
+        "blocked_codes": [item["code"] for item in checks if not item["passed"]],
+        "diagnostics": {
+            "ready": not reasons and connection_check["passed"],
+            "checks": [connection_check, *checks],
+            "note": "仅检查连接与配置；未请求模型、执行工具或发送 QQ 消息。触发匹配、冷却、用户权限及实际调用结果需结合运行日志判断。",
+        },
     }
+
+
+def policy_sources(bot: FLLBot, group_id: int, self_id: int | None = None) -> dict[str, str]:
+    """按实际解析顺序标注来源，保留旧版群插件配置的优先级。"""
+    agent = bot.plugins.get("agent")
+    legacy = agent.settings.group_overrides(group_id) if agent else {}
+    overrides = policy_overrides(bot, group_id)
+    defaults = bot.bots.defaults(self_id)
+    sources = dict.fromkeys(
+        ("auto_group", "trigger_mode", "cooldown_seconds", "auto_reply_probability", "max_tool_rounds", "allowed_tools"),
+        "system",
+    )
+    if defaults.reply_mode != "inherit":
+        sources["auto_group"] = "bot"
+        if defaults.reply_mode != "off":
+            sources["trigger_mode"] = "bot"
+    for key in sources:
+        if key in legacy:
+            sources[key] = "legacy_group"
+        if key in overrides:
+            sources[key] = "group"
+    sources["trigger_modes"] = "group" if overrides.get("trigger_modes") else sources["trigger_mode"]
+    sources["provider"] = "group" if overrides.get("provider") else "bot" if defaults.provider else "system"
+    llm = bot.permissions.group_config(group_id).get("llm") or {}
+    sources["persona"] = "group" if isinstance(llm, dict) and llm.get("persona") else "bot" if defaults.persona else "system"
+    sources["trigger_prefix"] = "system" if bot.config.chat.wake_word.strip() else "bot" if defaults.wake_word else "nickname" if self_id else "unresolved"
+    sources["system_extra"] = "group" if overrides.get("system_extra") else "system"
+    return sources

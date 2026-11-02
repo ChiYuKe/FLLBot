@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from fllbot.app import create_app
 from fllbot.llm.client import LLMClient, LLMError
 from fllbot.onebot.models import parse_event
-from helpers import FakeConnection, build_bot, group_message, make_bot
+from helpers import FakeConnection, build_bot, group_message, make_bot, seed_personas
 
 AUTH = {"Authorization": "Bearer admin-token"}
 MODELS = {
@@ -19,6 +19,7 @@ MODELS = {
 
 
 def test_policy_roundtrip_inheritance_validation_and_restart(tmp_path: Path) -> None:
+    seed_personas(tmp_path, "concise")
     bot = build_bot(tmp_path, llm=MODELS)
     with TestClient(create_app(bot)) as client:
         client.patch("/api/plugins/agent/settings", headers=AUTH, json={"values": {"auto_group": True, "trigger_mode": "all"}})
@@ -56,6 +57,8 @@ async def test_group_policy_controls_actual_model_prompt_tools_and_cooldown(tmp_
     captured = []
 
     def respond(request: httpx.Request) -> httpx.Response:
+        if request.method == "GET":
+            return httpx.Response(200, json={"data": []})
         body = json.loads(request.content)
         captured.append(body)
         return httpx.Response(200, json={"choices": [{"message": {"content": "收到"}}]})

@@ -18,6 +18,7 @@ from ..onebot.segments import (
     readable_text,
     strip_leading_at_self,
 )
+from ..tracing import record, span
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..onebot.connection import OneBotConnection
@@ -41,9 +42,18 @@ class Context:
     argv: list[str] = field(default_factory=list)
     # 供插件主动中断后续处理器
     stopped: bool = False
+    memory_message_id: int = 0
+    data_epoch: int = field(default=0, init=False)
     # regex 规则命中的 Match 对象
     regex_match: re.Match[str] | None = None
     _text_cache: str | None = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        self.data_epoch = getattr(getattr(self.bot, 'storage', None), 'conversation_generation', 0)
+
+    @property
+    def data_current(self) -> bool:
+        return self.data_epoch == getattr(getattr(self.bot, 'storage', None), 'conversation_generation', 0)
 
     # -- 基础属性 --------------------------------------------------------- #
     @property
@@ -155,6 +165,13 @@ class Context:
         return self.sender.role in {"owner", "admin"}
 
     # -- 发送 ------------------------------------------------------------- #
+    def trace_event(self, stage: str, code: str, status: str = 'passed', component: str = '') -> None:
+        """Record metadata-only diagnostics; never pass message content or arguments here."""
+        record(stage, code, status, component)
+
+    def trace_span(self, stage: str, component: str = '') -> Any:
+        return span(stage, component)
+
     async def send(
         self,
         message: str | Sequence[MessageSegment] | None,
@@ -163,16 +180,20 @@ class Context:
         user_id: int | None = None,
     ) -> Any:
         """发送消息；不带目标时回到当前会话。"""
-        segments = as_segments(message)
-        if group_id is not None:
-            return await self.connection.send_group_msg(int(group_id), segments)
-        if user_id is not None:
-            return await self.connection.send_private_msg(int(user_id), segments)
-        if self.is_group and self.group_id is not None:
-            return await self.connection.send_group_msg(int(self.group_id), segments)
-        if self.is_private and self.user_id:
-            return await self.connection.send_private_msg(self.user_id, segments)
-        raise ValueError("无法推断发送目标：既不是群聊也不是私聊")
+        if not self.data_current:
+            self.trace_event('trigger', 'context_cleared', 'skipped')
+            return None
+        with span('send'):
+            segments = as_segments(message)
+            if group_id is not None:
+                return await self.connection.send_group_msg(int(group_id), segments)
+            if user_id is not None:
+                return await self.connection.send_private_msg(int(user_id), segments)
+            if self.is_group and self.group_id is not None:
+                return await self.connection.send_group_msg(int(self.group_id), segments)
+            if self.is_private and self.user_id:
+                return await self.connection.send_private_msg(self.user_id, segments)
+            raise ValueError("无法推断发送目标：既不是群聊也不是私聊")
 
     async def reply(
         self,

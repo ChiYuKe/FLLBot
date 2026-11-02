@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import time
+from collections.abc import AsyncIterator
 from typing import TYPE_CHECKING, Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, Header, HTTPException, Query, Response
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .. import __version__
+from ..config import StartupConfigError
 from ..llm.client import DEFAULT_CONTEXT_WINDOW, LLMError
 from ..logging_setup import get_ring
+from ..maintenance import BackupBusyError
 from ..policy import tool_index
-from .auth import build_admin_dependency
+from ..resources import resource_references
+from .auth import build_admin_dependency, build_settings_dependency
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..app import FLLBot
@@ -26,7 +31,7 @@ logger = logging.getLogger("fllbot.api")
 
 class PluginToggle(BaseModel):
     enabled: bool = True
-    group_id: int | None = None
+    group_id: int | None = Field(default=None, gt=0)
 
 
 class GroupToggle(BaseModel):
@@ -61,10 +66,27 @@ class ModelDiscoveryRequest(BaseModel):
     provider: str | None = None
 
 
+class ModelDiagnosticRequest(BaseModel):
+    provider: str | None = None
+
+
 def create_api_router(bot: FLLBot) -> APIRouter:
     router = APIRouter(prefix="/api")
     tool_grant_lock = asyncio.Lock()
     protected = APIRouter(dependencies=[Depends(build_admin_dependency(bot))])
+    settings_write = build_settings_dependency(bot)
+
+    def plugin_settings_revision(plugin, group_id):
+        parts = [plugin.settings.revision(group_id)]
+        if plugin.name == 'agent' and group_id:
+            parts.append(bot.permissions.group_revision(group_id))
+        return hashlib.sha256('|'.join(parts).encode()).hexdigest()
+
+    async def group_write(group_id: int, if_match: str | None = Header(default=None)) -> AsyncIterator[None]:
+        async with bot.storage.settings_lock:
+            if if_match is not None and if_match != bot.permissions.group_revision(group_id):
+                raise HTTPException(409, "群设置已修改，请重新读取后保存。当前修改未提交。")
+            yield
 
     # -- 基础 ------------------------------------------------------------- #
     @router.get("/health", summary="健康检查（无需令牌）")
@@ -84,6 +106,15 @@ def create_api_router(bot: FLLBot) -> APIRouter:
     @protected.get("/status", summary="整体状态")
     async def status() -> dict[str, Any]:
         return await bot.status()
+
+    @protected.post("/storage/backup", summary="创建一致性数据库备份")
+    async def create_storage_backup() -> dict[str, Any]:
+        try:
+            return await bot.backups.create_now()
+        except BackupBusyError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise HTTPException(500, f"数据库备份失败：{exc}") from exc
 
     @protected.get("/connections", summary="NapCat 连接列表")
     async def connections() -> list[dict[str, Any]]:
@@ -131,7 +162,7 @@ def create_api_router(bot: FLLBot) -> APIRouter:
             "globally_allowed_count": sum(1 for item in items if item["globally_allowed"]),
         }
 
-    @protected.patch("/tools/{tool_id}/enabled", summary="按具体工具设置默认授权")
+    @protected.patch("/tools/{tool_id}/enabled", summary="按具体工具设置默认授权", dependencies=[Depends(settings_write)])
     async def toggle_tool(tool_id: str, payload: GroupToggle) -> dict[str, Any]:
         if tool_id not in tool_index(bot):
             raise HTTPException(404, "工具不存在或尚未加载")
@@ -163,71 +194,125 @@ def create_api_router(bot: FLLBot) -> APIRouter:
             raise HTTPException(404, f"插件没有 README: {name}")
         return {"name": name, "format": "markdown", "content": plugin.readme}
 
-    @protected.post("/plugins/reload", summary="重载全部插件或指定插件")
+    @protected.post("/plugins/reload", summary="重载全部插件或指定插件", dependencies=[Depends(settings_write)])
     async def reload_plugins(payload: dict[str, Any] | None = Body(default=None)) -> dict[str, Any]:
         name = (payload or {}).get("name")
         if name:
+            if bot.plugins.get(str(name)) is None:
+                raise HTTPException(404, f"插件不存在: {name}")
+            await bot.storage.record_management_change('plugin_reload_started', [f'plugin:{name}'])
             try:
                 await bot.plugins.reload(str(name))
             except KeyError:
                 raise HTTPException(404, f"插件不存在: {name}") from None
             except Exception as exc:
+                await bot.storage.record_management_change('plugin_reload_failed', [f'plugin:{name}', 'outcome:failed'])
                 raise HTTPException(500, f"重载失败: {exc}") from exc
+            await bot.storage.record_management_change('plugin_reloaded', [f'plugin:{name}', 'outcome:success'])
             return {"ok": True, "reloaded": str(name)}
-        await bot.plugins.reload_all()
-        return {"ok": True, "reloaded": bot.plugins.names()}
+        names = bot.plugins.names()
+        await bot.storage.record_management_change('plugin_reload_started', ['scope:all', f'count:{len(names)}'])
+        try:
+            result = await bot.plugins.reload_all()
+        except Exception as exc:
+            await bot.storage.record_management_change('plugin_reload_failed', ['scope:all', 'outcome:failed'])
+            raise HTTPException(500, "插件批量重载失败；详情见运行日志") from exc
+        for plugin_name in result['reloaded']:
+            await bot.storage.record_management_change('plugin_reloaded', [f'plugin:{plugin_name}', 'outcome:success'])
+        for plugin_name in result['failed']:
+            await bot.storage.record_management_change('plugin_reload_failed', [f'plugin:{plugin_name}', 'outcome:failed'])
+        return {"ok": not result['failed'], "reloaded": result['reloaded'], "failed": result['failed']}
 
-    @protected.post("/plugins/{name}/reload", summary="重载指定插件")
+    @protected.post("/plugins/{name}/reload", summary="重载指定插件", dependencies=[Depends(settings_write)])
     async def reload_plugin(name: str) -> dict[str, Any]:
+        if bot.plugins.get(name) is None:
+            raise HTTPException(404, f"插件不存在: {name}")
+        await bot.storage.record_management_change('plugin_reload_started', [f'plugin:{name}'])
         try:
             await bot.plugins.reload(name)
         except KeyError:
             raise HTTPException(404, f"插件不存在: {name}") from None
         except Exception as exc:
+            await bot.storage.record_management_change('plugin_reload_failed', [f'plugin:{name}', 'outcome:failed'])
             raise HTTPException(500, f"重载失败: {exc}") from exc
+        await bot.storage.record_management_change('plugin_reloaded', [f'plugin:{name}', 'outcome:success'])
         return {"ok": True, "reloaded": name}
 
-    @protected.post("/plugins/{name}/enabled", summary="启用/停用插件（可指定群）")
-    async def toggle_plugin(name: str, payload: PluginToggle) -> dict[str, Any]:
+    @protected.post("/plugins/{name}/enabled", summary="启用/停用插件（可指定群）", dependencies=[Depends(settings_write)])
+    async def toggle_plugin(name: str, payload: PluginToggle, response: Response,
+                            if_match: str | None = Header(default=None)) -> dict[str, Any]:
         if bot.plugins.get(name) is None:
             raise HTTPException(404, f"插件不存在: {name}")
+        if if_match is not None and if_match != bot.permissions.plugin_revision(name, payload.group_id):
+            raise HTTPException(409, '插件开关已变化，请刷新并核对后再操作；本次未提交')
         await bot.permissions.set_plugin_enabled(name, payload.enabled, payload.group_id)
-        return {"ok": True, "name": name, "enabled": payload.enabled, "group_id": payload.group_id}
+        status = bot.permissions.plugin_status(name, payload.group_id)
+        response.headers['ETag'] = status['revision']
+        return {"ok": True, "name": name, "enabled": payload.enabled, "group_id": payload.group_id,
+                'effective': status, 'revision': status['revision']}
+
+    @protected.get('/plugins/{name}/enabled', summary='插件开关来源与最终状态')
+    async def plugin_state(name: str, response: Response, group_id: int | None = Query(default=None, gt=0)):
+        if bot.plugins.get(name) is None:
+            raise HTTPException(404, f'插件不存在: {name}')
+        status = bot.permissions.plugin_status(name, group_id)
+        response.headers['ETag'] = status['revision']
+        return status
 
     @protected.get("/plugins/{name}/settings", summary="插件配置（schema + 当前值）")
-    async def get_plugin_settings(name: str, group_id: int | None = None) -> dict[str, Any]:
+    async def get_plugin_settings(name: str, response: Response, group_id: int | None = Query(default=None, gt=0)) -> dict[str, Any]:
         plugin = bot.plugins.get(name)
         if plugin is None:
             raise HTTPException(404, f"插件不存在: {name}")
+        revision = plugin_settings_revision(plugin, group_id)
+        response.headers['ETag'] = revision
         return {
             "name": name,
+            "revision": revision,
             "group_id": group_id,
             "schema": plugin.settings.schema(),
             "values": plugin.settings.values_for_api(group_id),
             "group_policy": bot.permissions.group_config(group_id).get("policy") if name == "agent" and group_id else None,
         }
 
-    @protected.patch("/plugins/{name}/settings", summary="修改插件配置")
-    async def patch_plugin_settings(name: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    @protected.patch("/plugins/{name}/settings", summary="修改插件配置", dependencies=[Depends(settings_write)])
+    async def patch_plugin_settings(name: str, response: Response, payload: dict[str, Any] = Body(...),
+                                    if_match: str | None = Header(default=None)) -> dict[str, Any]:
         plugin = bot.plugins.get(name)
         if plugin is None:
             raise HTTPException(404, f"插件不存在: {name}")
         group_id = payload.get("group_id")
+        try:
+            if group_id is not None and (isinstance(group_id, bool) or not isinstance(group_id, (str, int)) or not str(group_id).isdigit()):
+                raise ValueError
+            group_id = int(group_id) if group_id is not None else None
+            if group_id is not None and group_id <= 0:
+                raise ValueError
+        except (ValueError, TypeError) as exc:
+            raise HTTPException(400, '群号必须是正整数') from exc
+        if if_match is not None and if_match != plugin_settings_revision(plugin, group_id):
+            raise HTTPException(409, '插件配置已变化，当前草稿已保留；请先复制草稿再重新读取并核对')
         values = payload.get("values")
         if not isinstance(values, dict):
             values = {key: value for key, value in payload.items() if key != "group_id"}
         if not values:
             raise HTTPException(400, "缺少要修改的配置项")
+        fields = plugin.settings.fields
+        values = {key: value for key, value in values.items()
+                  if not (key in fields and fields[key].secret and value == '******')}
         try:
-            effective = await plugin.settings.update(values, int(group_id) if group_id is not None else None)
+            await plugin.settings.update(values, group_id)
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
+        revision = plugin_settings_revision(plugin, group_id)
+        response.headers['ETag'] = revision
         return {
             "ok": True,
+            "revision": revision,
             "name": name,
             "group_id": group_id,
             "values": plugin.settings.values_for_api(int(group_id) if group_id is not None else None),
-            "effective": effective,
+            "effective": plugin.settings.values_for_api(group_id),
         }
 
     # -- 群 --------------------------------------------------------------- #
@@ -291,21 +376,21 @@ def create_api_router(bot: FLLBot) -> APIRouter:
             "group_access": permission.group_access,
         }
 
-    @protected.post("/groups/{group_id}/enabled", summary="开关某个群")
+    @protected.post("/groups/{group_id}/enabled", summary="开关某个群", dependencies=[Depends(group_write)])
     async def toggle_group(group_id: int, payload: GroupToggle) -> dict[str, Any]:
         await bot.permissions.set_group_enabled(group_id, payload.enabled)
-        return {"ok": True, "group_id": group_id, "enabled": payload.enabled}
+        return {"ok": True, "group_id": group_id, "enabled": payload.enabled, "revision": bot.permissions.group_revision(group_id)}
 
     @protected.get("/groups/{group_id}/config", summary="群配置")
     async def group_config(group_id: int) -> dict[str, Any]:
-        return {"group_id": group_id, "config": bot.permissions.group_config(group_id)}
+        return {"group_id": group_id, "config": bot.permissions.group_config(group_id), "revision": bot.permissions.group_revision(group_id)}
 
-    @protected.patch("/groups/{group_id}/config", summary="更新群配置（与现有配置深合并）")
+    @protected.patch("/groups/{group_id}/config", summary="更新群配置（与现有配置深合并）", dependencies=[Depends(group_write)])
     async def update_group_config(group_id: int, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
         current = bot.permissions.group_config(group_id)
         merged = _deep_merge(current, payload)
         await bot.permissions.set_group_config(group_id, merged)
-        return {"ok": True, "group_id": group_id, "config": merged}
+        return {"ok": True, "group_id": group_id, "config": merged, "revision": bot.permissions.group_revision(group_id)}
 
     # -- 配置 ------------------------------------------------------------- #
     @protected.get("/config", summary="当前生效配置（密钥已隐藏）")
@@ -313,15 +398,26 @@ def create_api_router(bot: FLLBot) -> APIRouter:
         return {
             "config": bot.safe_config(),
             "overrides": _masked(bot.config_store.overrides),
+            "revision": bot.config_revision(),
+            'startup': {'active': bot.startup_values, 'inactive_overrides': bot.inactive_startup_overrides,
+                        'note': '启动参数仅从启动配置文件或命令读取，后台不能在线修改。历史覆盖保留备查，不参与生效。'},
         }
 
-    @protected.patch("/config", summary="运行时更新配置")
-    async def patch_config(payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    @protected.patch("/config", summary="运行时更新配置", dependencies=[Depends(settings_write)])
+    async def patch_config(payload: dict[str, Any] = Body(...), if_match: str | None = Header(default=None)) -> dict[str, Any]:
+        if if_match is not None and if_match != bot.config_revision():
+            raise HTTPException(409, "全局配置已被修改，请重新读取后保存。当前修改未提交。")
         try:
             config = await bot.update_config(payload)
+        except StartupConfigError as exc:
+            raise HTTPException(409, {'code': 'startup_config_read_only', 'fields': exc.fields, 'message': str(exc)}) from exc
+        except ValidationError as exc:
+            messages = ['.'.join(map(str, error['loc']))+': '+error['msg'] for error in exc.errors(include_input=False, include_context=False)]
+            raise HTTPException(400, '配置无效：'+'；'.join(messages)) from exc
         except Exception as exc:
-            raise HTTPException(400, f"配置无效: {exc}") from exc
-        return {"ok": True, "config": _masked(config)}
+            logger.exception('配置保存失败')
+            raise HTTPException(500, '配置保存失败，未发布新配置；请检查运行日志') from exc
+        return {"ok": True, "config": _masked(config), "revision": bot.config_revision()}
 
     # -- 日志与统计 ------------------------------------------------------- #
     @protected.get("/logs", summary="最近的日志")
@@ -345,22 +441,48 @@ def create_api_router(bot: FLLBot) -> APIRouter:
         }
 
     # -- 人格与 LLM ------------------------------------------------------- #
-    @protected.get("/personas", summary="可用人格")
+    @protected.get("/personas", summary="可用人格", dependencies=[Depends(settings_write)])
     async def personas() -> list[dict[str, Any]]:
+        bot.personas.reload()
         return [
             {**persona.summary(), "editable": bot.personas.is_editable(persona.name)}
             for persona in bot.personas.list()
         ]
 
-    @protected.get("/personas/{name}", summary="人格详情")
-    async def persona_detail(name: str) -> dict[str, Any]:
+    @protected.get("/personas/variables", summary="人格提示词可用变量")
+    async def persona_variables() -> list[dict[str, str]]:
+        from ..llm.personas import PERSONA_VARIABLES
+
+        return [dict(item) for item in PERSONA_VARIABLES]
+
+    @protected.get("/personas/{name}", summary="人格详情", dependencies=[Depends(settings_write)])
+    async def persona_detail(name: str, response: Response) -> dict[str, Any]:
+        bot.personas.reload()
         persona = bot.personas.find(name)
         if persona is None:
             raise HTTPException(404, f"人格不存在: {name}")
+        response.headers['ETag'] = persona.revision
         return {**persona.summary(), "content": persona.content, "editable": bot.personas.is_editable(name)}
 
-    @protected.put("/personas/{name}", summary="创建或更新自定义人格")
-    async def save_persona(name: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
+    def check_persona_revision(name: str, if_match: str | None, if_none_match: str | None = None) -> None:
+        if if_match is not None and if_none_match is not None:
+            raise HTTPException(400, '不能同时指定 If-Match 和 If-None-Match')
+        if if_none_match is not None and if_none_match != '*':
+            raise HTTPException(400, '创建人格仅支持 If-None-Match: *')
+        bot.personas.reload()
+        current = bot.personas.find(name)
+        if if_none_match == '*' and current is not None:
+            raise HTTPException(409, '同名人格已存在，草稿已保留；请更换标识或重新读取现有人格')
+        if if_match is not None and (current is None or current.revision != if_match):
+            raise HTTPException(409, '人格已被修改或删除，草稿已保留；请复制草稿后重新读取，再核对并保存')
+
+    @protected.put("/personas/{name}", summary="创建或更新自定义人格", dependencies=[Depends(settings_write)])
+    async def save_persona(name: str, response: Response, payload: dict[str, Any] = Body(...),
+                           if_match: str | None = Header(default=None),
+                           if_none_match: str | None = Header(default=None)) -> dict[str, Any]:
+        check_persona_revision(name, if_match, if_none_match)
+        operation = 'persona_saved' if bot.personas.find(name) is not None else 'persona_created'
+        await bot.storage.record_management_change(f'{operation}_started', [f'persona:{name}'])
         try:
             persona = bot.personas.save(
                 name,
@@ -369,24 +491,52 @@ def create_api_router(bot: FLLBot) -> APIRouter:
                 str(payload.get("content", "")),
             )
         except ValueError as exc:
+            await bot.storage.record_management_change(f'{operation}_failed', [f'persona:{name}', 'outcome:failed'])
             raise HTTPException(400, str(exc)) from exc
+        except Exception:
+            await bot.storage.record_management_change(f'{operation}_failed', [f'persona:{name}', 'outcome:failed'])
+            raise
+        await bot.storage.record_management_change(operation, [f'persona:{name}', 'outcome:success'])
+        response.headers['ETag'] = persona.revision
         return {**persona.summary(), "content": persona.content, "editable": True}
 
-    @protected.delete("/personas/{name}", summary="删除自定义人格")
-    async def delete_persona(name: str) -> dict[str, Any]:
-        if bot.config.llm.persona == name:
-            raise HTTPException(409, "当前默认人格不能删除，请先切换默认人格")
+    @protected.delete("/personas/{name}", summary="删除自定义人格", dependencies=[Depends(settings_write)])
+    async def delete_persona(name: str, if_match: str | None = Header(default=None)) -> dict[str, Any]:
+        check_persona_revision(name, if_match)
+        bindings = [item for item in resource_references(bot, "persona", name) if item["scope"] != "system"]
+        if bindings:
+            raise HTTPException(409, "人格仍被机器人或群配置引用，请先到引用位置更换人格，再删除。")
+        was_default = bot.config.llm.persona == name
+        await bot.storage.record_management_change('persona_delete_started', [f'persona:{name}', f'default:{str(was_default).lower()}'])
         try:
+            if was_default:
+                await bot.update_config({"llm": {"persona": ""}})
             bot.personas.delete(name)
         except KeyError as exc:
+            await bot.storage.record_management_change('persona_delete_failed', [f'persona:{name}', 'outcome:failed'])
             raise HTTPException(404, f"人格不存在: {name}") from exc
         except ValueError as exc:
+            if was_default:
+                await bot.update_config({"llm": {"persona": name}})
+            await bot.storage.record_management_change('persona_delete_failed', [f'persona:{name}', 'outcome:failed'])
             raise HTTPException(400, str(exc)) from exc
-        return {"ok": True, "personas": bot.personas.names()}
+        except Exception:
+            # A cleared default is safe if restoring it fails: runtime falls back instead of holding a dangling reference.
+            if was_default:
+                try:
+                    await bot.update_config({"llm": {"persona": name}})
+                except Exception:
+                    await bot.storage.record_management_change('persona_default_restore_failed', [f'persona:{name}', 'outcome:failed'])
+            await bot.storage.record_management_change('persona_delete_failed', [f'persona:{name}', 'outcome:failed'])
+            raise
+        await bot.storage.record_management_change('persona_deleted', [f'persona:{name}', 'outcome:success', f'default_cleared:{str(was_default).lower()}'])
+        return {"ok": True, "personas": bot.personas.names(), "default": bot.config.llm.persona}
 
-    @protected.post("/personas/reload", summary="重新扫描人格目录")
+    @protected.post("/personas/reload", summary="重新扫描人格目录", dependencies=[Depends(settings_write)])
     async def reload_personas() -> dict[str, Any]:
+        await bot.storage.record_management_change('persona_reload_started', ['scope:all'])
         bot.personas.reload()
+        await bot.storage.record_management_change('personas_reloaded', ['scope:all', f'count:{len(bot.personas.names())}', 'outcome:success'])
         return {"ok": True, "personas": bot.personas.names()}
 
     @protected.post("/llm/test", summary="直接测试模型连通性")
@@ -404,6 +554,7 @@ def create_api_router(bot: FLLBot) -> APIRouter:
         if not bot.chat.available:
             raise HTTPException(400, "尚未启用 LLM 或未配置 API Key")
         scene = payload.scene if payload.scene in {"group", "private"} else "private"
+        generation = bot.storage.conversation_generation
         messages = await bot.chat.build_messages(
             scene,
             payload.scene_id,
@@ -421,13 +572,26 @@ def create_api_router(bot: FLLBot) -> APIRouter:
         except LLMError as exc:
             raise HTTPException(502, str(exc)) from exc
         if payload.save:
-            await bot.storage.add_chat_message(scene, payload.scene_id, "user", payload.message)
-            await bot.storage.add_chat_message(scene, payload.scene_id, "assistant", reply.text)
+            async with bot.storage.data_lock:
+                if generation != bot.storage.conversation_generation:
+                    raise HTTPException(409, '会话数据已清理，本次测试结果未保存，请重新测试')
+                await bot.storage.add_chat_message(scene, payload.scene_id, "user", payload.message, generation=generation)
+                await bot.storage.add_chat_message(scene, payload.scene_id, "assistant", reply.text, generation=generation)
         return {**reply.summary(), "messages": len(messages)}
 
     @protected.get("/llm/providers", summary="模型提供方状态")
     async def llm_providers() -> list[dict[str, Any]]:
         return bot.chat.client.providers_status()
+
+    @protected.post("/llm/diagnose", summary="验证已保存模型的对话、工具和识图能力")
+    async def llm_diagnose(payload: ModelDiagnosticRequest) -> dict[str, Any]:
+        if not bot.chat.available:
+            raise HTTPException(400, "尚未启用 LLM 或未配置 API Key")
+        from ..llm.diagnostics import diagnose
+        try:
+            return await diagnose(bot.chat, payload.provider)
+        except LLMError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
     @protected.get("/llm/models", summary="可选模型列表")
     async def llm_models(provider: str | None = None) -> list[str]:
@@ -484,8 +648,10 @@ def create_api_router(bot: FLLBot) -> APIRouter:
             ],
         }
 
-    @protected.delete("/chat/{scene}/{scene_id}", summary="清空会话历史")
+    @protected.delete("/chat/{scene}/{scene_id}", summary="清空会话历史", dependencies=[Depends(settings_write)])
     async def clear_chat(scene: str, scene_id: int) -> dict[str, Any]:
+        if scene not in {"group", "private"} or scene_id <= 0:
+            raise HTTPException(400, "会话场景或编号无效")
         removed = await bot.storage.clear_chat(scene, scene_id)
         return {"ok": True, "removed": removed}
 
@@ -510,23 +676,19 @@ def create_api_router(bot: FLLBot) -> APIRouter:
     async def kv_all(scope: str) -> dict[str, Any]:
         return await bot.storage.kv_all(scope)
 
-    @protected.put("/kv/{scope}/{key}", summary="写入 KV")
+    @protected.put("/kv/{scope}/{key}", summary="写入 KV", dependencies=[Depends(settings_write)])
     async def kv_set(scope: str, key: str, payload: dict[str, Any] = Body(...)) -> dict[str, Any]:
-        await bot.storage.kv_set(scope, key, payload.get("value"))
+        await bot.storage.admin_kv_set(scope, key, payload.get("value"))
         return {"ok": True, "scope": scope, "key": key}
 
-    @protected.delete("/kv/{scope}/{key}", summary="删除 KV")
+    @protected.delete("/kv/{scope}/{key}", summary="删除 KV", dependencies=[Depends(settings_write)])
     async def kv_delete(scope: str, key: str) -> dict[str, Any]:
-        await bot.storage.kv_delete(scope, key)
-        return {"ok": True}
+        deleted = await bot.storage.admin_kv_delete(scope, key)
+        return {"ok": True, "deleted": deleted}
 
     # -- 实时事件流 ------------------------------------------------------- #
-    @router.get("/events/stream", summary="SSE 实时事件流")
-    async def event_stream(token: str = Query(default="")) -> StreamingResponse:
-        expected = bot.admin_token
-        if expected and token != expected:
-            raise HTTPException(401, "管理令牌无效")
-
+    @protected.get("/events/stream", summary="SSE 实时事件流")
+    async def event_stream() -> StreamingResponse:
         async def generator():
             async with bot.hub.subscribe() as queue:
                 yield ": connected\n\n"

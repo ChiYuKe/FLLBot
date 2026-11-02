@@ -209,7 +209,7 @@ async def test_agent_only_sees_selected_tools(tmp_path: Path, monkeypatch: pytes
 
     bot = await make_bot(
         tmp_path,
-        llm={"enabled": True, "api_key": "fake-test-key"},
+        llm={"enabled": True, "api_key": "fake-test-key", "context_window": 8192},
         plugin_dirs=[plugin_dir],
     )
     try:
@@ -225,7 +225,7 @@ async def test_agent_only_sees_selected_tools(tmp_path: Path, monkeypatch: pytes
         await bot.dispatcher.dispatch(parse_event(group_message("武汉现在天气怎么样")), FakeConnection())
 
         tools = complete.call_args.kwargs["tools"]
-        assert {item["function"]["name"] for item in tools} == {"web__get_weather"}
+        assert {item["function"]["name"] for item in tools} == {"web__get_weather", "agent__stay_silent"}
     finally:
         await bot.stop()
 
@@ -237,7 +237,7 @@ async def test_tool_titles_are_exposed_to_console(tmp_path: Path) -> None:
 
     bot = await make_bot(
         tmp_path,
-        llm={"enabled": True, "api_key": "fake-test-key"},
+        llm={"enabled": True, "api_key": "fake-test-key", "context_window": 8192},
         plugin_dirs=[plugin_dir],
     )
     try:
@@ -262,7 +262,7 @@ async def test_agent_sees_all_granted_web_tools(tmp_path: Path, monkeypatch: pyt
 
     bot = await make_bot(
         tmp_path,
-        llm={"enabled": True, "api_key": "fake-test-key"},
+        llm={"enabled": True, "api_key": "fake-test-key", "context_window": 8192},
         plugin_dirs=[plugin_dir],
     )
     try:
@@ -279,6 +279,7 @@ async def test_agent_sees_all_granted_web_tools(tmp_path: Path, monkeypatch: pyt
 
         tools = complete.call_args.kwargs["tools"]
         assert {item["function"]["name"] for item in tools} == {
+            "agent__stay_silent",
             "web__web_search",
             "web__get_weather",
             "web__get_current_time",

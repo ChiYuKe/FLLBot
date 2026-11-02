@@ -12,6 +12,8 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Any
 
+from .tracing import current_trace_id
+
 DEFAULT_FORMAT = "%(asctime)s %(levelname)-5s %(name)s: %(message)s"
 DATE_FORMAT = "%H:%M:%S"
 
@@ -63,6 +65,9 @@ def record_to_dict(record: logging.LogRecord) -> dict[str, Any]:
         "message": record.getMessage(),
     }
     extras = _extras(record)
+    trace_id = current_trace_id()
+    if trace_id:
+        payload['trace_id'] = trace_id
     if extras:
         payload["extra"] = extras
     if record.exc_info:

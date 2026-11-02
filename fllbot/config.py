@@ -13,11 +13,38 @@ import tomllib
 from pathlib import Path
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 DEFAULT_CONFIG_FILE = "config.toml"
 ENV_PREFIX = "FLLBOT_"
 ENV_DELIMITER = "__"
+
+# These values determine constructed components or local management access.
+# They must come from the startup configuration, never a runtime DB override.
+STARTUP_FIELDS = frozenset({
+    'server.host', 'server.port', 'server.cors_origins', 'admin.enabled', 'admin.token_file',
+    'plugin.dirs', 'plugin.builtin', 'plugin.hot_reload', 'plugin.watch_interval',
+    'plugin.max_concurrency', 'plugin.max_pending_events', 'storage.path',
+    'logging.dir', 'logging.file', 'logging.json_lines', 'logging.ring_size',
+})
+
+
+class StartupConfigError(ValueError):
+    def __init__(self, fields: list[str]) -> None:
+        self.fields = fields
+        super().__init__('这些参数只能在启动配置文件或启动命令中修改并重启：' + '、'.join(fields) + '；本次未保存任何改动')
+
+
+def split_startup_overrides(overrides: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+    active = copy.deepcopy(overrides)
+    archived = {}
+    for path in sorted(STARTUP_FIELDS):
+        section, key = path.split('.')
+        if isinstance(active.get(section), dict) and key in active[section]:
+            archived[path] = active[section].pop(key)
+            if not active[section]:
+                active.pop(section)
+    return active, archived
 
 
 class ServerConfig(BaseModel):
@@ -75,6 +102,7 @@ class PluginConfig(BaseModel):
     hot_reload: bool = True
     watch_interval: float = 2.0
     max_concurrency: int = 8
+    max_pending_events: int = Field(default=1000, ge=1, le=100_000)
     handler_timeout: float = 60.0
 
 
@@ -82,6 +110,7 @@ class StorageConfig(BaseModel):
     """持久化配置。"""
 
     path: str = "data/fllbot.db"
+    backup_dir: str = "data/backups"
 
 
 class LoggingConfig(BaseModel):
@@ -94,7 +123,18 @@ class LoggingConfig(BaseModel):
     ring_size: int = 500
 
 
-class LLMProviderConfig(BaseModel):
+class ModelCapabilities(BaseModel):
+    """显式能力声明；默认保持旧版兼容行为，不根据模型名称猜测。"""
+
+    context_window: int | None = Field(default=None, ge=1, le=10_000_000)
+    supports_tools: bool = True
+    supports_images: bool = True
+    supports_temperature: bool = True
+    token_parameter: Literal["max_tokens", "max_completion_tokens"] = "max_tokens"
+    image_token_budget: int = Field(default=4096, ge=1)
+
+
+class LLMProviderConfig(ModelCapabilities):
     """单个模型提供方（OpenAI 兼容协议）。留空的字段继承 ``[llm]`` 里的默认值。"""
 
     base_url: str = ""
@@ -102,14 +142,16 @@ class LLMProviderConfig(BaseModel):
     api_key_env: str = ""
     model: str = ""
     timeout: float | None = None
-    max_tokens: int | None = None
+    max_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
     temperature: float | None = None
     no_stream: bool = False
-    input_price: float = 0.0
-    output_price: float = 0.0
+    input_price: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    output_price: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    max_concurrency: int = Field(default=2, ge=1, le=100)
 
 
-class LLMConfig(BaseModel):
+
+class LLMConfig(ModelCapabilities):
     """大模型对话配置（OpenAI 兼容接口）。"""
 
     enabled: bool = False
@@ -117,9 +159,8 @@ class LLMConfig(BaseModel):
     api_key: str = ""
     model: str = "deepseek-chat"
     timeout: float = 60.0
-    max_tokens: int = 800
+    max_tokens: int = Field(default=800, ge=1, le=1_000_000)
     temperature: float = 0.8
-    context_window: int | None = Field(default=None, ge=1)
     context_mode: Literal["model", "custom"] = "model"
     max_context_messages: int = 16
     max_context_chars: int = 4000
@@ -127,13 +168,28 @@ class LLMConfig(BaseModel):
     enable_group: bool = True
     trigger: str = "at"
     trigger_prefix: str = "ai"
-    persona: str = "fllbot"
+    persona: str = ""
     chunk_size: int = 500
     cooldown_seconds: float = 3.0
     system_extra: str = ""
     default: str = "default"
     providers: dict[str, LLMProviderConfig] = Field(default_factory=dict)
     routes: dict[str, str] = Field(default_factory=dict)
+    fallback_providers: list[str] = Field(default_factory=list)
+    group_daily_token_limit: int = Field(default=0, ge=0)
+    group_daily_cost_limit: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    max_concurrency: int = Field(default=2, ge=1, le=100)
+
+    input_price: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    output_price: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+
+    @model_validator(mode="after")
+    def validate_fallbacks(self):
+        unknown = set(self.fallback_providers) - set(self.provider_names())
+        if unknown:
+            raise ValueError("备用模型服务不存在：" + ", ".join(sorted(unknown)))
+        self.fallback_providers = list(dict.fromkeys(self.fallback_providers))
+        return self
 
     def provider_names(self) -> list[str]:
         return list(self.providers) or ["default"]
@@ -150,6 +206,10 @@ class LLMConfig(BaseModel):
             else:
                 raw = LLMProviderConfig()
         return requested, LLMProviderConfig(
+            **{
+                key: getattr(raw, key) if key in raw.model_fields_set else getattr(self, key)
+                for key in ModelCapabilities.model_fields
+            },
             base_url=raw.base_url or self.base_url,
             api_key=raw.api_key or self.api_key,
             api_key_env=raw.api_key_env,
@@ -158,8 +218,9 @@ class LLMConfig(BaseModel):
             max_tokens=raw.max_tokens if raw.max_tokens is not None else self.max_tokens,
             temperature=raw.temperature if raw.temperature is not None else self.temperature,
             no_stream=raw.no_stream,
-            input_price=raw.input_price,
-            output_price=raw.output_price,
+            input_price=raw.input_price if "input_price" in raw.model_fields_set else self.input_price,
+            output_price=raw.output_price if "output_price" in raw.model_fields_set else self.output_price,
+            max_concurrency=raw.max_concurrency if "max_concurrency" in raw.model_fields_set else self.max_concurrency,
         )
 
     def route(self, *, scene: str | None = None, task: str | None = None) -> str:
@@ -181,6 +242,10 @@ class ChatConfig(BaseModel):
     send_time: bool = False
     allow_images: bool = False
     read_forward: bool = False
+    group_memory: bool = True
+    memory_session_gap_minutes: int = Field(default=30, ge=5, le=1440)
+    memory_recent_messages: int = Field(default=200, ge=10, le=1000)
+    memory_context_chars: int = Field(default=24000, ge=4000, le=200000)
     reply_mode: Literal["auto", "forward", "split"] = "auto"
     forward_threshold: int = Field(default=1200, ge=200, le=20000)
     reply_chunk_size: int = Field(default=0, ge=0, le=5000)
@@ -199,6 +264,15 @@ class ChatConfig(BaseModel):
         return [item.strip() for item in value if item and item.strip()][:50]
 
 
+class RetentionConfig(BaseModel):
+    enabled: bool = False
+    interval_seconds: int = Field(default=3600, ge=60, le=86400)
+    messages_days: int = Field(default=0, ge=0, le=3650)
+    conversations_days: int = Field(default=0, ge=0, le=3650)
+    usage_days: int = Field(default=0, ge=0, le=3650)
+    changes_days: int = Field(default=0, ge=0, le=3650)
+
+
 class AppConfig(BaseModel):
     """完整配置树。"""
 
@@ -211,6 +285,7 @@ class AppConfig(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     chat: ChatConfig = Field(default_factory=ChatConfig)
+    retention: RetentionConfig = Field(default_factory=RetentionConfig)
 
 
 # --------------------------------------------------------------------------- #
@@ -367,15 +442,40 @@ class ConfigStore:
         self._base = copy.deepcopy(base)
         self._overrides: dict[str, Any] = {}
         self.current = AppConfig.model_validate(self._base)
+        self._startup_values: dict[str, Any] | None = None
+
+    def freeze_startup_values(self) -> dict[str, Any]:
+        """Pin values used to construct the instance; later writes cannot change them."""
+        values = self.current.model_dump()
+        self._startup_values = {}
+        for path in STARTUP_FIELDS:
+            section, key = path.split('.')
+            value = copy.deepcopy(values[section][key])
+            self._startup_values[path] = value
+            self._base.setdefault(section, {})[key] = value
+        self._overrides, _ = split_startup_overrides(self._overrides)
+        return copy.deepcopy(self._startup_values)
 
     def patch(self, overrides: dict[str, Any]) -> AppConfig:
         """合并覆盖项并重新校验；失败时抛出 ``ValidationError`` 且不生效。"""
-        merged_overrides = deep_merge(self._overrides, overrides)
-        data = deep_merge(self._base, merged_overrides)
-        config = AppConfig.model_validate(data)
+        config, merged_overrides = self.prepare_patch(overrides)
         self._overrides = merged_overrides
         self.current = config
         return config
+
+    def prepare_patch(self, overrides: dict[str, Any]) -> tuple[AppConfig, dict[str, Any]]:
+        """Validate a candidate without publishing it before persistence succeeds."""
+        merged_overrides = deep_merge(self._overrides, overrides)
+        data = deep_merge(self._base, merged_overrides)
+        config = AppConfig.model_validate(data)
+        if self._startup_values is not None:
+            current = config.model_dump()
+            changed = sorted(path for path, value in self._startup_values.items()
+                             if current[path.split('.')[0]][path.split('.')[1]] != value)
+            if changed:
+                raise StartupConfigError(changed)
+            merged_overrides, _ = split_startup_overrides(merged_overrides)
+        return config, merged_overrides
 
     def restore(self, overrides: dict[str, Any]) -> AppConfig:
         """启动时从数据库恢复运行时覆盖。"""

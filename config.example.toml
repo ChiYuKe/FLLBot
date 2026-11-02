@@ -4,6 +4,7 @@
 # 例如 FLLBOT_SERVER__PORT=6702、FLLBOT_LLM__API_KEY=sk-xxx。
 
 [server]
+# 监听地址、端口和 CORS 仅从启动配置读取，修改后重启；后台不接受在线更改。
 # 监听地址。NapCat 与本程序在同一台机器时保持 127.0.0.1 即可。
 host = "127.0.0.1"
 port = 6701
@@ -20,6 +21,7 @@ call_timeout = 30.0
 cors_origins = ["*"]
 
 [admin]
+# enabled/token_file 仅从启动配置读取。关闭管理入口保留健康检查与 OneBot 连接。
 enabled = true
 # 留空则启动时自动生成，并写入 data/admin_token.txt。
 token = ""
@@ -57,11 +59,14 @@ hot_reload = true
 watch_interval = 2.0
 # 全局并发处理上限，防止刷屏把进程打满。
 max_concurrency = 8
+# 队列中的待处理事件上限；超出时丢弃新到事件并记录日志。
+max_pending_events = 1000
 # 单个处理器超时秒数。
 handler_timeout = 60.0
 
 [storage]
 path = "data/fllbot.db"
+backup_dir = "data/backups"
 
 [logging]
 level = "INFO"
@@ -80,6 +85,20 @@ model = "deepseek-chat"
 timeout = 60.0
 max_tokens = 800
 temperature = 0.8
+# 模型能力：未知时沿用旧版行为；可按服务商说明或管理页诊断结果调整。
+supports_tools = true
+supports_images = true
+supports_temperature = true
+token_parameter = "max_tokens"   # 也可使用 max_completion_tokens
+image_token_budget = 4096
+max_concurrency = 2
+input_price = 0.0                # 每百万 Token 单价；费用限额要求正数价格
+output_price = 0.0
+# 每个群独立累计，0 表示不限；按服务器本地日期重置。
+group_daily_token_limit = 0
+group_daily_cost_limit = 0.0
+# 临时服务故障时按顺序切换；名称必须已在 providers 中配置。
+fallback_providers = []
 # 可选：手动指定上下文窗口（Token），优先于模型目录自动发现；留空时跟随模型目录。
 # context_window = 1000000
 # 默认跟随模型接口返回的上下文窗口；未返回时使用 8192 Token 保守预算。
@@ -92,8 +111,8 @@ enable_group = true
 # 群聊触发方式：at（@机器人）| prefix（以 trigger_prefix 开头）| always
 trigger = "at"
 trigger_prefix = "ai"
-# 默认人格，对应 personas/ 目录下的文件名（不含 .md）。
-persona = "fllbot"
+# 默认人格，对应 personas/ 目录下的文件名（不含 .md）；留空则使用兜底提示词。
+persona = ""
 # 超长回复按该长度分条发送。
 chunk_size = 500
 # 同一用户两次对话的最小间隔（秒）。
@@ -112,6 +131,10 @@ system_extra = ""
 # model = "deepseek-chat"
 # input_price = 0.27                 # 元/百万 token，用于费用估算
 # output_price = 1.10
+# context_window = 65536            # 每个服务可覆盖全局窗口和能力设置
+# supports_tools = true
+# supports_images = false
+# max_concurrency = 2
 #
 # [llm.providers.local]
 # base_url = "http://127.0.0.1:11434/v1"
@@ -121,4 +144,21 @@ system_extra = ""
 # [llm.routes]
 # group = "deepseek"
 # private = "deepseek"
-# summary = "local"                  # 以后摘要任务用便宜模型
+# summary = "local"                  # 群聊话题摘要可使用单独的模型服务（群/账号指定服务仍优先）
+
+[chat]
+# 仅作用于已开启 Agent 的群：近期普通群聊也会按需发送给配置的模型服务。
+group_memory = true
+memory_session_gap_minutes = 30
+memory_recent_messages = 200
+memory_context_chars = 24000
+
+[retention]
+# 自动清理默认关闭；0 表示该类不自动清理。保存策略不会立即删除数据。
+enabled = false
+interval_seconds = 3600
+messages_days = 0
+conversations_days = 0            # AI 会话、群记忆原文与相关摘要一起处理
+usage_days = 0
+changes_days = 0
+# 消息诊断保持固定 7 天/10000 条；备份、日志文件、配置与插件 KV 不在本策略范围。

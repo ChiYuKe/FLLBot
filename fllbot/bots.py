@@ -2,6 +2,9 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
+import json
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -30,13 +33,39 @@ class BotProfiles:
         self.items = await self.bot.storage.kv_all("bot-profiles")
 
     def get(self, self_id: int | None) -> dict[str, Any]:
-        return dict(self.items.get(str(self_id), {}))
+        return copy.deepcopy(self.items.get(str(self_id), {}))
+
+    def revision(self, self_id: int) -> str:
+        data = [self_id, self.defaults(self_id).model_dump()]
+        return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
 
     async def update(self, self_id: int, **fields: Any) -> None:
-        async with self.lock:
-            value = {**self.get(self_id), **fields}
-            await self.bot.storage.kv_set("bot-profiles", str(self_id), value)
-            self.items[str(self_id)] = value
+        async with self.bot.storage.settings_lock:
+            async with self.lock:
+                previous = self.get(self_id)
+                fields = copy.deepcopy(fields)
+                if 'defaults' in fields:
+                    fields['defaults'] = BotDefaults.model_validate(fields['defaults']).model_dump()
+                value = {**previous, **fields}
+                if value == previous:
+                    return
+                changed = [key for key in fields if key != 'defaults' and previous.get(key) != value[key]]
+                if 'defaults' in fields:
+                    before = self.defaults(self_id).model_dump()
+                    changed += ['defaults.'+key for key, item in fields['defaults'].items() if before[key] != item]
+                transaction = asyncio.create_task(self.bot.storage.save_bot_profile(self_id, value, changed))
+                cancelled = False
+                while True:
+                    try:
+                        await asyncio.shield(transaction)
+                        break
+                    except asyncio.CancelledError:
+                        if transaction.cancelled():
+                            raise
+                        cancelled = True
+                self.items[str(self_id)] = value
+                if cancelled:
+                    raise asyncio.CancelledError
 
     def nickname(self, self_id: int) -> str:
         if not self_id:
@@ -70,4 +99,5 @@ class BotProfiles:
             "self_id": int(key), "nickname": self.nickname(int(key)),
             "online": bool(key in live and live[key].online),
             "defaults": self.defaults(int(key)).model_dump(),
+            "revision": self.revision(int(key)),
         } for key in sorted(ids, key=int)]

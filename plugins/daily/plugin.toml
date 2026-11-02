@@ -1,0 +1,7 @@
+schema_version = 1
+api_version = 1
+name = "daily"
+version = "0.1.0"
+description = "日常助手：提醒待办、群资料、成员查询与引用读取"
+author = ""
+category = "plugin"

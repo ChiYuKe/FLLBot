@@ -44,6 +44,15 @@ class AIToolSpec:
 
 
 @dataclass
+class TaskSourceSpec:
+    """A plugin-owned persistent task adapter, independent of AI tool access."""
+
+    name: str
+    title: str
+    callback: Callable[..., Awaitable[dict[str, Any]]]
+
+
+@dataclass
 class HandlerSpec:
     """一个事件处理器的声明。"""
 
@@ -85,6 +94,15 @@ class LoopSpec:
     seconds: float
     name: str
     initial_delay: float = 0.0
+
+
+@dataclass
+class ServiceCheckSpec:
+    name: str
+    title: str
+    callback: Callable[[], Awaitable[dict[str, str]]]
+    timeout: float = 3.0
+    selected_when: tuple[str, Any] | None = None
 
 
 class Plugin:
@@ -135,6 +153,8 @@ class Plugin:
         self._handlers: list[HandlerSpec] = []
         self._loops: list[LoopSpec] = []
         self._ai_tools: list[AIToolSpec] = []
+        self.service_checks: list[ServiceCheckSpec] = []
+        self.task_sources: list[TaskSourceSpec] = []
         self._settings = PluginSettings(lambda: self.name)
         self.bot: Any = None
         self.module: Any = None
@@ -144,6 +164,35 @@ class Plugin:
         self.readme: str = ""
         self.logger = logging.getLogger(f"fllbot.plugin.{self.name or 'unnamed'}")
         self._cleanups: list[Callable[[], Any]] = []
+
+    def task_source(self, name: str, title: str) -> Callable:
+        """Expose list/runs/action operations to the authenticated task console."""
+        if not re.fullmatch(r'[a-z][a-z0-9_]{0,63}', name):
+            raise ValueError('Invalid task source name')
+        if any(source.name == name for source in self.task_sources):
+            raise ValueError('Duplicate task source name')
+
+        def decorate(callback: Callable) -> Callable:
+            if not inspect.iscoroutinefunction(callback):
+                raise ValueError('Task source callback must be async')
+            self.task_sources.append(TaskSourceSpec(name, title, callback))
+            return callback
+        return decorate
+
+    def service_check(self, name: str, title: str, *, timeout: float = 3.0,
+                      selected_when: tuple[str, Any] | None = None) -> Callable:
+        """Declare an async, read-only external-service check for the management console."""
+        if not re.fullmatch(r'[a-z][a-z0-9_]{0,63}', name) or not 0 < timeout <= 10:
+            raise ValueError('服务检查名称或超时无效')
+
+        def decorate(callback: Callable) -> Callable:
+            if not inspect.iscoroutinefunction(callback):
+                raise ValueError('服务检查必须使用 async 函数')
+            if len(self.service_checks) >= 8 or any(item.name == name for item in self.service_checks):
+                raise ValueError('服务检查重复或超过每插件 8 项上限')
+            self.service_checks.append(ServiceCheckSpec(name, title, callback, timeout, selected_when))
+            return callback
+        return decorate
 
     @classmethod
     def from_manifest(cls, location: str | Path) -> Plugin:

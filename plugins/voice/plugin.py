@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import json
 import logging
 import re
 from pathlib import Path
@@ -55,6 +56,43 @@ plugin.setting(
     options=("qwen", "indextts"),
     description="qwen：描述固定、稳定不漂；indextts：用参考音频克隆",
 )
+
+
+async def _service_health(server: str) -> dict[str, str]:
+    try:
+        async with httpx.AsyncClient(timeout=2.5, follow_redirects=False, trust_env=False) as client:
+            async with client.stream('GET', server + '/health') as response:
+                response.raise_for_status()
+                body = bytearray()
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > 16384:
+                        return {'state': 'error', 'code': 'invalid_response'}
+        data = json.loads(body)
+        if not isinstance(data, dict):
+            return {'state': 'error', 'code': 'invalid_response'}
+        if data.get('ok') is True:
+            return {'state': 'ready', 'code': 'ready'}
+        state = data.get('state')
+        if state in ('loading', 'idle'):
+            return {'state': state, 'code': state}
+        return {'state': 'error', 'code': 'service_unhealthy'}
+    except httpx.TimeoutException:
+        return {'state': 'unavailable', 'code': 'timeout'}
+    except httpx.HTTPError:
+        return {'state': 'unavailable', 'code': 'connection_failed'}
+    except (ValueError, UnicodeError):
+        return {'state': 'error', 'code': 'invalid_response'}
+
+
+@plugin.service_check('qwen', 'Qwen 语音服务', selected_when=('backend', 'qwen'))
+async def check_qwen() -> dict[str, str]:
+    return await _service_health(QWEN_SERVER)
+
+
+@plugin.service_check('indextts', 'IndexTTS 语音服务', selected_when=('backend', 'indextts'))
+async def check_indextts() -> dict[str, str]:
+    return await _service_health(INDEXTTS_SERVER)
 plugin.setting(
     "qwen_voice",
     type="select",
@@ -607,5 +645,3 @@ async def speak(
         "segments": len(segments or []),
         "emotion": emotion_text or resolved,
     }
-
-

@@ -14,6 +14,10 @@ if TYPE_CHECKING:
 async def send_chat_reply(ctx: Context, text: str) -> None:
     from .chat import split_text
 
+    if not ctx.data_current:
+        ctx.trace_event('trigger', 'context_cleared', 'skipped')
+        return
+
     options = ctx.config.chat
     chunks = split_text(text, options.reply_chunk_size or ctx.config.llm.chunk_size)
     if not chunks:
@@ -25,12 +29,13 @@ async def send_chat_reply(ctx: Context, text: str) -> None:
         name = getattr(ctx.connection, "nickname", "") or "FLLBot"
         nodes = [MessageSegment.node(ctx.self_id, name, chunk).to_dict() for chunk in chunks]
         try:
-            if ctx.is_group and ctx.group_id is not None:
-                await ctx.connection.send_group_forward_msg(ctx.group_id, nodes)
-            elif ctx.is_private and ctx.user_id:
-                await ctx.connection.send_private_forward_msg(ctx.user_id, nodes)
-            else:
-                raise ValueError("无法确定聊天记录的发送目标")
+            with ctx.trace_span('send', 'forward'):
+                if ctx.is_group and ctx.group_id is not None:
+                    await ctx.connection.send_group_forward_msg(ctx.group_id, nodes)
+                elif ctx.is_private and ctx.user_id:
+                    await ctx.connection.send_private_forward_msg(ctx.user_id, nodes)
+                else:
+                    raise ValueError("无法确定聊天记录的发送目标")
             return
         except Exception:
             # Forward support differs between protocol implementations. Preserve the reply.

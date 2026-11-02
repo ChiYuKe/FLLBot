@@ -11,8 +11,12 @@
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
+import json
 import logging
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -51,7 +55,7 @@ class SettingField:
             "key": self.key,
             "type": self.type,
             "label": self.label or self.key,
-            "default": self.default,
+            "default": MASK if self.secret and self.default else self.default,
             "description": self.description,
             "options": list(self.options),
             "min": self.minimum,
@@ -224,29 +228,53 @@ class PluginSettings:
                 values[setting.key] = MASK
         return values
 
+    def revision(self, group_id: int | None = None) -> str:
+        data = [self.scope, group_id, self.schema(), self.values(group_id),
+                self._values.get(0, {}), self._values.get(int(group_id or 0), {})]
+        return hashlib.sha256(json.dumps(data, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+    async def _write(self, entries: list[tuple[int, str, Any]]) -> None:
+        entries = [(sid, key, value) for sid, key, value in entries
+                   if self._values.get(sid, {}).get(key, MISSING) != value]
+        cancelled = False
+        if self._storage is not None and entries:
+            transaction = asyncio.create_task(self._storage.save_plugin_settings(self.scope, entries))
+            while True:
+                try:
+                    await asyncio.shield(transaction)
+                    break
+                except asyncio.CancelledError:
+                    if transaction.cancelled():
+                        raise
+                    cancelled = True
+        for scope_id, key, value in entries:
+            self._values.setdefault(scope_id, {})[key] = value
+        if cancelled:
+            raise asyncio.CancelledError
+
     # -- 写入 ------------------------------------------------------------- #
     async def set(self, key: str, value: Any, group_id: int | None = None) -> Any:
-        setting = self._fields.get(key)
-        coerced = setting.coerce(value) if setting is not None else value
-        scope_id = int(group_id or 0)
-        if setting is not None and not setting.group_scoped:
-            scope_id = 0
-        if self._storage is not None:
-            await self._storage.kv_set(self.scope, f"{scope_id}:{key}", coerced)
-        self._values.setdefault(scope_id, {})[key] = coerced
-        return coerced
+        async with self._storage.settings_lock if self._storage is not None else nullcontext():
+            setting = self._fields.get(key)
+            coerced = setting.coerce(value) if setting is not None else value
+            scope_id = int(group_id or 0)
+            if setting is not None and not setting.group_scoped:
+                scope_id = 0
+            await self._write([(scope_id, key, coerced)])
+            return coerced
 
     async def update(self, values: dict[str, Any], group_id: int | None = None) -> dict[str, Any]:
         """批量写入；任一字段非法则整体不生效。"""
-        prepared: list[tuple[str, Any]] = []
-        for key, value in values.items():
-            setting = self._fields.get(key)
-            if setting is None:
-                raise ValueError(f"未知的配置项：{key}")
-            prepared.append((key, setting.coerce(value)))
-        for key, value in prepared:
-            await self.set(key, value, group_id)
-        return self.values(group_id)
+        async with self._storage.settings_lock if self._storage is not None else nullcontext():
+            prepared: list[tuple[int, str, Any]] = []
+            for key, value in values.items():
+                setting = self._fields.get(key)
+                if setting is None:
+                    raise ValueError(f"未知的配置项：{key}")
+                scope_id = int(group_id or 0) if setting.group_scoped else 0
+                prepared.append((scope_id, key, setting.coerce(value)))
+            await self._write(prepared)
+            return self.values(group_id)
 
     def view(self, group_id: int | None) -> SettingsView:
         return SettingsView(self, group_id)

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from fllbot.storage import Storage
+from fllbot.storage.db import SCHEMA_VERSION
 
 
 @pytest.fixture
@@ -21,9 +22,9 @@ async def storage(tmp_path: Path):
 
 
 async def test_migration_creates_schema(storage: Storage) -> None:
-    assert await storage.schema_version() == 4
+    assert await storage.schema_version() == SCHEMA_VERSION
     summary = await storage.summary()
-    assert summary["schema_version"] == 4
+    assert summary["schema_version"] == SCHEMA_VERSION
     assert summary["messages"] == 0
 
 
@@ -59,6 +60,11 @@ async def test_llm_usage_roundtrip(storage: Storage) -> None:
     assert summary["total_tokens"] == 150
     assert summary["by_model"][0]["model"] == "deepseek-chat"
     assert summary["by_model"][0]["requests"] == 2
+    assert summary["by_model"][0]["prompt_tokens"] == 120
+    assert summary["by_model"][0]["completion_tokens"] == 30
+    assert summary["by_model"][0]["failures"] == 1
+    assert summary["by_model"][0]["avg_latency_ms"] == 500.0
+    assert summary["by_model"][0]["cost"] == 0.0001
 
     assert await storage.llm_usage_summary(time.time() + 60) == {
         "requests": 0,
@@ -68,6 +74,7 @@ async def test_llm_usage_roundtrip(storage: Storage) -> None:
         "total_tokens": 0,
         "avg_latency_ms": 0.0,
         "cost": 0.0,
+        "estimated_requests": 0,
         "by_model": [],
     }
 

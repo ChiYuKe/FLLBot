@@ -5,7 +5,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 from fllbot.app import create_app
-from helpers import build_bot
+from helpers import build_bot, seed_personas
 
 AUTH = {"Authorization": "Bearer admin-token"}
 
@@ -49,10 +49,11 @@ def test_table_bulk_access_only_updates_selected_groups(tmp_path: Path) -> None:
 
 
 def test_access_in_configuration_table_preserves_existing_lists_and_rules(tmp_path: Path) -> None:
+    seed_personas(tmp_path, "concise")
     bot = build_bot(tmp_path, overrides={"permission": {"allow_groups": [123, 456], "deny_groups": [789]}})
     with TestClient(create_app(bot)) as client:
         assert client.get("/api/console/access").status_code == 401
-        assert client.get("/api/console/access", headers=AUTH).json() == {"mode": "listed"}
+        assert client.get("/api/console/access", headers=AUTH).json()["mode"] == "listed"
         items = client.get("/api/console/groups?group_ids=123&group_ids=789&group_ids=999", headers=AUTH).json()["items"]
         assert [(item["access"], item["has_override"]) for item in items] == [("allow", True), ("deny", True), ("inherit", False)]
         assert bot.permissions.group_enabled(999) is False
@@ -84,6 +85,7 @@ def test_access_in_configuration_table_preserves_existing_lists_and_rules(tmp_pa
 
 
 def test_explicit_group_rules_create_remove_and_restart(tmp_path: Path) -> None:
+    seed_personas(tmp_path, "concise")
     bot = build_bot(tmp_path, overrides={"permission": {"deny_groups": [456]}})
     with TestClient(create_app(bot)) as client:
         assert client.portal is not None
@@ -133,6 +135,7 @@ def test_existing_custom_settings_are_kept_but_defaults_not_listed(tmp_path: Pat
 
 
 def test_group_table_bulk_read_and_inline_update_preserve_details(tmp_path: Path) -> None:
+    seed_personas(tmp_path, "concise")
     with TestClient(create_app(build_bot(tmp_path))) as client:
         url = "/api/console/groups?group_ids=123&group_ids=456&group_ids=123"
         assert client.get(url).status_code == 401
@@ -166,6 +169,7 @@ def test_console_readiness_and_auth(tmp_path: Path) -> None:
 
 
 def test_group_settings_preserve_existing_config_and_reset_overrides(tmp_path: Path) -> None:
+    seed_personas(tmp_path, "fllbot")
     bot = build_bot(tmp_path, overrides={"permission": {"deny_groups": [123]}})
     with TestClient(create_app(bot)) as client:
         client.patch("/api/groups/123/config", headers=AUTH, json={"custom": {"keep": True}, "llm": {"other": 7}})
@@ -190,6 +194,7 @@ def test_group_settings_preserve_existing_config_and_reset_overrides(tmp_path: P
 
 
 def test_group_settings_persist_after_restart(tmp_path: Path) -> None:
+    seed_personas(tmp_path, "fllbot")
     with TestClient(create_app(build_bot(tmp_path))) as client:
         response = client.patch("/api/console/groups/123", headers=AUTH, json={"enabled": False, "persona": "fllbot"})
         assert response.status_code == 200

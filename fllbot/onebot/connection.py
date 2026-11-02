@@ -8,10 +8,12 @@ import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import nullcontext
 from typing import Any
 
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
+from ..tracing import span
 from .segments import MessageSegment, as_segments
 
 
@@ -126,35 +128,36 @@ class OneBotConnection:
 
     async def call(self, action: str, params: dict[str, Any] | None = None, *, timeout: float | None = None) -> Any:
         """调用 OneBot API 并等待同 echo 的响应，返回 ``data`` 字段。"""
-        if self._closed:
-            raise ActionError(action, message="连接已关闭")
+        with span('protocol_send', action) if action.startswith('send_') else nullcontext():
+            if self._closed:
+                raise ActionError(action, message="连接已关闭")
 
-        echo = uuid.uuid4().hex
-        loop = asyncio.get_running_loop()
-        future: asyncio.Future[dict[str, Any]] = loop.create_future()
-        self._pending[echo] = future
-        self.actions_sent += 1
-        try:
-            await self.send_json({"action": action, "params": params or {}, "echo": echo})
-            response = await asyncio.wait_for(future, timeout or self.call_timeout)
-        except TimeoutError as exc:
-            raise ActionError(action, message="调用超时") from exc
-        except asyncio.CancelledError:
-            raise
-        finally:
-            self._pending.pop(echo, None)
+            echo = uuid.uuid4().hex
+            loop = asyncio.get_running_loop()
+            future: asyncio.Future[dict[str, Any]] = loop.create_future()
+            self._pending[echo] = future
+            self.actions_sent += 1
+            try:
+                await self.send_json({"action": action, "params": params or {}, "echo": echo})
+                response = await asyncio.wait_for(future, timeout or self.call_timeout)
+            except TimeoutError as exc:
+                raise ActionError(action, message="调用超时") from exc
+            except asyncio.CancelledError:
+                raise
+            finally:
+                self._pending.pop(echo, None)
 
-        status = str(response.get("status") or "")
-        retcode = response.get("retcode")
-        if status == "failed" or (retcode is not None and retcode not in (0, 1)):
-            self.errors += 1
-            raise ActionError(
-                action,
-                retcode=retcode,
-                message=str(response.get("msg") or response.get("wording") or ""),
-            )
-        data = response.get("data")
-        return data if data is not None else response
+            status = str(response.get("status") or "")
+            retcode = response.get("retcode")
+            if status == "failed" or (retcode is not None and retcode not in (0, 1)):
+                self.errors += 1
+                raise ActionError(
+                    action,
+                    retcode=retcode,
+                    message=str(response.get("msg") or response.get("wording") or ""),
+                )
+            data = response.get("data")
+            return data if data is not None else response
 
     async def read_loop(self) -> None:
         """持续读取 NapCat 上报，直到连接断开。"""

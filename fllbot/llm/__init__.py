@@ -4,10 +4,11 @@ from __future__ import annotations
 
 from .chat import ChatReply, ChatService, split_text
 from .client import LLMClient, LLMError
-from .personas import DEFAULT_PERSONA_TEXT, Persona, PersonaStore, render_template
+from .personas import DEFAULT_PERSONA_TEXT, PERSONA_VARIABLES, Persona, PersonaStore, render_template
 
 __all__ = [
     "DEFAULT_PERSONA_TEXT",
+    "PERSONA_VARIABLES",
     "ChatReply",
     "ChatService",
     "LLMClient",

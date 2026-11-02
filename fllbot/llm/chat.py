@@ -10,6 +10,8 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
 from ..onebot.models import MessageEvent
+from ..tracing import record, span
+from .budget import request_tokens
 from .client import DEFAULT_CONTEXT_WINDOW, LLMClient, LLMError
 from .personas import PersonaStore
 
@@ -57,6 +59,7 @@ class ChatReply:
     provider: str = ""
     usage: dict[str, int] = field(default_factory=dict)
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    finish_reason: str = ""
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -66,6 +69,8 @@ class ChatReply:
             "provider": self.provider,
             "usage": dict(self.usage),
             "latency_ms": round(self.latency_ms, 1),
+            "finish_reason": self.finish_reason,
+            "truncated": self.finish_reason == "length",
         }
 
 
@@ -77,10 +82,13 @@ class ChatService:
         self.logger = logging.getLogger("fllbot.llm")
         self.client = LLMClient(lambda: self.bot.config.llm)
         self._locks: dict[str, asyncio.Lock] = {}
+        self._quota_locks: dict[int, asyncio.Lock] = {}
         self.requests = 0
         self.failures = 0
         self.last_error: str | None = None
         self.last_latency_ms: float = 0.0
+        from .memory import GroupMemory
+        self.memory = GroupMemory(bot)
 
     # -- 查询 ------------------------------------------------------------- #
     @property
@@ -204,12 +212,17 @@ class ChatService:
             user_content = self._group_content(ctx.user_id, ctx.nickname, ctx.sender.role, user_text, getattr(ctx.event, "time", 0))
         user = {"role": "user", "content": user_content}
 
+        if scene == "group" and ctx is not None and ctx.memory_message_id and self.memory.enabled(ctx):
+            if include_history:
+                return self._with_images(await self.memory.build(ctx, system, user), ctx)
+            return self._with_images([system, user], ctx)
+
         history: list[dict[str, str]] = []
         if config.context_mode == "model":
             # Respect an explicit user setting first, then provider metadata, then
             # the conservative fallback. Metadata is never inferred from names.
             selected_provider = self.provider_name(scene, scene_id, "agent" if ctx and ctx.plugin and ctx.plugin.name == "agent" else None, ctx.self_id if ctx else None)
-            window = config.context_window or await self.client.context_window(scene=scene, provider=selected_provider) or DEFAULT_CONTEXT_WINDOW
+            window = await self.client.context_window(scene=scene, provider=selected_provider) or DEFAULT_CONTEXT_WINDOW
             _, provider = self.client.resolve(provider=selected_provider, scene=scene)
             budget = max(0, window - (provider.max_tokens or config.max_tokens) - len(self._current_images(ctx)) * 2048)
             if include_history:
@@ -299,6 +312,54 @@ class ChatService:
 
     # -- 调用 ------------------------------------------------------------- #
     async def complete(
+        self, messages: list[dict[str, Any]], *, max_tokens: int | None = None,
+        provider: str | None = None, scene: str | None = None, scene_id: int = 0,
+        task: str | None = None, tools: list[dict[str, Any]] | None = None,
+        self_id: int | None = None, allow_fallback: bool = True,
+    ) -> ChatReply:
+        with span('model', provider or 'route'):
+            return await self._complete_with_quota(messages, max_tokens=max_tokens, provider=provider, scene=scene,
+                                                   scene_id=scene_id, task=task, tools=tools, self_id=self_id,
+                                                   allow_fallback=allow_fallback)
+
+    async def _complete_with_quota(
+        self, messages: list[dict[str, Any]], *, max_tokens: int | None = None,
+        provider: str | None = None, scene: str | None = None, scene_id: int = 0,
+        task: str | None = None, tools: list[dict[str, Any]] | None = None,
+        self_id: int | None = None, allow_fallback: bool = True,
+    ) -> ChatReply:
+        options = dict(max_tokens=max_tokens, provider=provider, scene=scene, scene_id=scene_id,
+                       task=task, tools=tools, self_id=self_id, allow_fallback=allow_fallback)
+        if scene != "group" or not (self.config.group_daily_token_limit or self.config.group_daily_cost_limit):
+            return await self._complete(messages, **options)
+        # Check and record within the same group lock, including concurrent admin/summary calls.
+        async with self._quota_locks.setdefault(scene_id, asyncio.Lock()):
+            name = provider or self.provider_name(scene, scene_id, task, self_id)
+            _, resolved = self.client.resolve(provider=name)
+            prepared = await self.client.prepare_messages(messages, provider=name, tools=tools, max_tokens=max_tokens)
+            midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+            usage = await self.bot.storage.group_llm_usage(scene_id, midnight)
+            candidates = [resolved]
+            if allow_fallback:
+                candidates += [self.config.resolve(item)[1] for item in self.config.fallback_providers
+                               if item in self.config.provider_names()]
+            reservations = [
+                (request_tokens(prepared, tools, item.image_token_budget),
+                 max_tokens if max_tokens is not None else item.max_tokens or 800, item)
+                for item in candidates
+            ]
+            if self.config.group_daily_token_limit and usage["tokens"] + max(p + o for p, o, _ in reservations) > self.config.group_daily_token_limit:
+                raise LLMError("本群今日 Token 额度不足，已暂停本次模型调用")
+            estimated_cost = max((p * item.input_price + o * item.output_price) / 1_000_000
+                                 for p, o, item in reservations)
+            if self.config.group_daily_cost_limit:
+                if any(item.input_price <= 0 or item.output_price <= 0 for item in candidates):
+                    raise LLMError("费用额度已启用，请为使用的模型及备用服务填写正数输入、输出单价")
+                if usage["cost"] + estimated_cost > self.config.group_daily_cost_limit:
+                    raise LLMError("本群今日费用额度不足，已暂停本次模型调用")
+            return await self._complete(prepared, **options)
+
+    async def _complete(
         self,
         messages: list[dict[str, Any]],
         *,
@@ -309,10 +370,12 @@ class ChatService:
         task: str | None = None,
         tools: list[dict[str, Any]] | None = None,
         self_id: int | None = None,
+        allow_fallback: bool = True,
     ) -> ChatReply:
         started = time.perf_counter()
         self.requests += 1
         name = provider or self.provider_name(scene, scene_id, task, self_id)
+        record('model', 'provider_selected', component=name)
         try:
             result = await self.client.chat_result(
                 messages,
@@ -321,6 +384,7 @@ class ChatService:
                 scene=scene,
                 task=task,
                 tools=tools,
+                allow_fallback=allow_fallback,
             )
         except LLMError as exc:
             self.failures += 1
@@ -338,17 +402,26 @@ class ChatService:
             )
             raise
         latency = (time.perf_counter() - started) * 1000
+        record('model', 'response_received', component=result.provider)
         self.last_latency_ms = latency
         self.last_error = None
         await self._record_usage(scene or "", scene_id, result.provider, result.model, result.usage, latency, ok=True)
+        text = result.text
+        tool_calls = result.tool_calls
+        if result.finish_reason == "length":
+            # Incomplete JSON must never reach a tool with external side effects.
+            tool_calls = []
+            text = (text + "\n\n[回复已达到长度上限，可发送“继续”接着回答。]" if not result.tool_calls
+                    else "工具调用参数未生成完整，本次未执行工具，请缩短请求或提高回复长度上限。")
         return ChatReply(
-            text=result.text,
+            text=text,
             persona="",
             model=result.model,
             latency_ms=latency,
             provider=result.provider,
             usage=result.usage,
-            tool_calls=result.tool_calls,
+            tool_calls=tool_calls,
+            finish_reason=result.finish_reason,
         )
 
     def _cost(self, provider: str, usage: dict[str, int]) -> float:
@@ -373,6 +446,12 @@ class ChatService:
         error: str = "",
     ) -> None:
         try:
+            if not model:
+                try:
+                    provider, resolved = self.config.resolve(provider or None)
+                    model = resolved.model
+                except KeyError:
+                    pass
             await self.bot.storage.record_llm_usage(
                 scene=scene,
                 scene_id=scene_id,
@@ -384,6 +463,7 @@ class ChatService:
                 cost=self._cost(provider, usage) if ok else 0.0,
                 ok=ok,
                 error=error,
+                usage_estimated=bool(usage.get("estimated", 0)),
             )
         except Exception:  # pragma: no cover - 统计失败不影响对话
             self.logger.exception("记录 LLM 用量失败")
@@ -396,31 +476,9 @@ class ChatService:
             "content": self.system_prompt("private", 0, None, persona_name),
         }
         messages = [system, {"role": "user", "content": prompt}]
-        self.requests += 1
-        started = time.perf_counter()
-        try:
-            result = await self.client.chat_result(
-                messages,
-                max_tokens=config.max_tokens,
-                provider=provider,
-                task="chat",
-            )
-        except LLMError as exc:
-            self.failures += 1
-            self.last_error = str(exc)
-            raise
-        latency = (time.perf_counter() - started) * 1000
-        self.last_latency_ms = latency
-        self.last_error = None
-        await self._record_usage("test", 0, result.provider, result.model, result.usage, latency, ok=True)
-        return ChatReply(
-            text=result.text,
-            persona=persona_name or config.persona,
-            model=result.model,
-            latency_ms=latency,
-            provider=result.provider,
-            usage=result.usage,
-        )
+        reply = await self.complete(messages, provider=provider, scene="test", task="chat")
+        reply.persona = persona_name or config.persona
+        return reply
 
     # -- QQ 对话 ---------------------------------------------------------- #
     async def respond(self, ctx: Context, text: str, *, persona_name: str | None = None) -> ChatReply | None:
@@ -452,11 +510,14 @@ class ChatService:
         async with lock:
             try:
                 messages = await self.build_messages(scene, scene_id, content, persona_name=persona, ctx=ctx)
-                reply = await self.complete(messages, max_tokens=config.max_tokens, scene=scene, scene_id=scene_id, self_id=ctx.self_id)
+                reply = await self.complete(messages, scene=scene, scene_id=scene_id, self_id=ctx.self_id)
             except LLMError:
                 return None
 
             reply.persona = persona
+            if not ctx.data_current:
+                ctx.trace_event('trigger', 'context_cleared', 'skipped')
+                return None
             try:
                 await self.bot.storage.add_chat_message(
                     scene,
@@ -466,8 +527,9 @@ class ChatService:
                     user_id=ctx.user_id,
                     nickname=ctx.nickname,
                     sender_role=ctx.sender.role,
+                    generation=ctx.data_epoch,
                 )
-                await self.bot.storage.add_chat_message(scene, scene_id, "assistant", reply.text)
+                await self.bot.storage.add_chat_message(scene, scene_id, "assistant", reply.text, generation=ctx.data_epoch)
             except Exception:  # pragma: no cover - 存历史失败不影响回复
                 self.logger.exception("保存聊天历史失败")
 

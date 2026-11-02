@@ -35,6 +35,7 @@ class ConnectionManager:
         self.logger = logger or logging.getLogger("fllbot.onebot")
         self._connections: list[OneBotConnection] = []
         self._monitor: asyncio.Task[None] | None = None
+        self._connection_tasks: set[asyncio.Task[Any]] = set()
 
     # -- 查询 ------------------------------------------------------------- #
     def list(self) -> list[OneBotConnection]:
@@ -70,6 +71,12 @@ class ConnectionManager:
             self._connections.remove(conn)
             self.logger.info("NapCat 连接断开：self_id=%s 剩余连接数=%d", conn.self_id or "?", len(self._connections))
 
+    def track_connection_task(self, task: asyncio.Task[Any]) -> None:
+        self._connection_tasks.add(task)
+
+    def untrack_connection_task(self, task: asyncio.Task[Any]) -> None:
+        self._connection_tasks.discard(task)
+
     async def handle_event(self, conn: OneBotConnection, payload: dict[str, Any]) -> None:
         await self._on_event(conn, payload)
 
@@ -91,6 +98,15 @@ class ConnectionManager:
             except Exception:  # pragma: no cover
                 pass
         self._connections.clear()
+        tasks = [task for task in self._connection_tasks if task is not asyncio.current_task()]
+        if tasks:
+            done, pending = await asyncio.wait(tasks, timeout=5.0)
+            if pending:
+                self.logger.warning("%d 条 WebSocket 连接未能及时退出，正在取消", len(pending))
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+            await asyncio.gather(*done, return_exceptions=True)
 
     async def _monitor_loop(self) -> None:
         interval = max(5.0, min(30.0, self.heartbeat_timeout / 4 if self.heartbeat_timeout else 15.0))
@@ -153,6 +169,9 @@ async def serve_connection(websocket: WebSocket, bot: FLLBot) -> None:
         logger=bot.logger.getChild("ws"),
     )
     bot.manager.add(conn)
+    connection_task = asyncio.current_task()
+    if connection_task is not None:
+        bot.manager.track_connection_task(connection_task)
     bot.hub.publish(
         {
             "type": "connection",
@@ -174,6 +193,8 @@ async def serve_connection(websocket: WebSocket, bot: FLLBot) -> None:
     except Exception:  # pragma: no cover - 防御式
         bot.logger.exception("WS 连接异常")
     finally:
+        if connection_task is not None:
+            bot.manager.untrack_connection_task(connection_task)
         identity_task.cancel()
         await asyncio.gather(identity_task, return_exceptions=True)
         bot.manager.remove(conn)

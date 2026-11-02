@@ -8,12 +8,13 @@ from fastapi.testclient import TestClient
 from fllbot.app import create_app
 from fllbot.onebot.models import parse_event
 from fllbot.policy import agent_settings, effective_policy
-from helpers import FakeConnection, build_bot, group_message, make_bot
+from helpers import FakeConnection, build_bot, group_message, make_bot, seed_personas
 
 AUTH = {"Authorization": "Bearer admin-token"}
 
 
 def test_bot_api_validation_identity_and_restart(tmp_path: Path) -> None:
+    seed_personas(tmp_path, "concise")
     bot = build_bot(tmp_path)
     conn = FakeConnection()
     conn.get_login_info = AsyncMock(return_value={"user_id": 10001, "nickname": "木鱼"})
@@ -36,10 +37,12 @@ def test_bot_api_validation_identity_and_restart(tmp_path: Path) -> None:
     restored = build_bot(tmp_path)
     with TestClient(create_app(restored)) as client:
         account = client.get("/api/console/bots", headers=AUTH).json()["items"][0]
+        assert account.pop('revision') == restored.bots.revision(10001)
         assert account == {"self_id": 10001, "nickname": "木鱼", "online": False, "defaults": values}
 
 
 async def test_each_bot_uses_own_nickname_and_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    seed_personas(tmp_path, "concise")
     bot = await make_bot(tmp_path, llm={"enabled": True, "api_key": "fake-key"})
     complete = AsyncMock(return_value=SimpleNamespace(text="收到", tool_calls=[]))
     monkeypatch.setattr(bot.chat, "complete", complete)
@@ -78,6 +81,7 @@ async def test_each_bot_uses_own_nickname_and_defaults(tmp_path: Path, monkeypat
 
 
 async def test_bot_model_persona_precedence_and_identity_refresh(tmp_path: Path) -> None:
+    seed_personas(tmp_path, "concise", "fllbot")
     bot = await make_bot(tmp_path, llm={"enabled": True, "api_key": "fake-key", "default": "normal",
                                      "providers": {"normal": {"model": "normal"}, "other": {"model": "other"}}})
     try:

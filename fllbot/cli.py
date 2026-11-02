@@ -6,7 +6,9 @@ import argparse
 import json
 import logging
 import socket
+import sqlite3
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,8 @@ from .app import FLLBot, create_app
 from .config import ConfigStore, load_config_dict, mask_secrets, resolve_path
 from .logging_setup import configure_logging
 from .plugin.scaffold import check_package, create_package
+from .storage.backup import DatabaseInUseError, create_backup, restore_backup
+from .storage.db import SCHEMA_VERSION
 
 _MINIMAL_CONFIG = """# FLLBot 配置（由 fllbot init 生成）
 [server]
@@ -78,6 +82,17 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--config", default="config.toml")
     check.add_argument("--root", default=".")
 
+    backup = sub.add_parser("backup", help="创建一致性 SQLite 数据库备份")
+    backup.add_argument("--config", default="config.toml")
+    backup.add_argument("--root", default=".")
+    backup.add_argument("--destination", default=None, help="备份文件路径（默认 data/backups/ 下带时间戳）")
+
+    restore = sub.add_parser("restore", help="验证备份并恢复数据库（需要先停止 FLLBot）")
+    restore.add_argument("--config", default="config.toml")
+    restore.add_argument("--root", default=".")
+    restore.add_argument("--source", required=True, help="备份数据库路径")
+    restore.add_argument("--confirm", action="store_true", help="确认替换当前数据库；现有数据库会先另存副本")
+
     plugin = sub.add_parser("plugin", help="新建、校验和列出独立插件包")
     actions = plugin.add_subparsers(dest="plugin_action", required=True)
     new = actions.add_parser("new", help="生成带包头、文档、配置与处理器的插件包")
@@ -109,6 +124,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_init(args)
     if command == "check":
         return cmd_check(args)
+    if command == "backup":
+        return cmd_backup(args)
+    if command == "restore":
+        return cmd_restore(args)
     if command == "plugin":
         return cmd_plugin(args)
     parser.print_help()
@@ -271,6 +290,51 @@ def cmd_check(args: argparse.Namespace) -> int:
         print("\n配置检查通过。")
     print("\n生效配置（密钥已隐藏）：")
     print(json.dumps(mask_secrets(config), ensure_ascii=False, indent=2))
+    return 0
+
+
+def _storage_path(args: argparse.Namespace) -> tuple[Path, ConfigStore]:
+    root = Path(args.root).resolve()
+    store = ConfigStore(load_config_dict(args.config, root=root))
+    return resolve_path(root, store.current.storage.path), store
+
+
+def cmd_backup(args: argparse.Namespace) -> int:
+    root = Path(args.root).resolve()
+    try:
+        source, store = _storage_path(args)
+        if args.destination:
+            destination = resolve_path(root, args.destination)
+        else:
+            stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{time.time_ns() % 1_000_000_000:09d}"
+            destination = resolve_path(root, store.current.storage.backup_dir) / f"fllbot-{stamp}.db"
+        metadata = create_backup(source, destination, max_schema_version=SCHEMA_VERSION)
+    except (OSError, ValueError, sqlite3.Error) as exc:
+        print(f"数据库备份失败：{exc}", file=sys.stderr)
+        return 1
+    print(json.dumps({"ok": True, "path": str(destination), **metadata}, ensure_ascii=False, indent=2))
+    return 0
+
+
+def cmd_restore(args: argparse.Namespace) -> int:
+    if not args.confirm:
+        print("恢复会替换当前数据库。停止 FLLBot 并在确认后添加 --confirm。", file=sys.stderr)
+        return 2
+    root = Path(args.root).resolve()
+    try:
+        destination, _store = _storage_path(args)
+        source = resolve_path(root, args.source)
+        metadata, safety_copy = restore_backup(source, destination, max_schema_version=SCHEMA_VERSION)
+    except (DatabaseInUseError, OSError, ValueError, sqlite3.Error) as exc:
+        print(f"数据库恢复失败：{exc}", file=sys.stderr)
+        return 1
+    print(json.dumps({
+        "ok": True,
+        "source": str(source),
+        "restored_to": str(destination),
+        "safety_copy": str(safety_copy) if safety_copy else None,
+        **metadata,
+    }, ensure_ascii=False, indent=2))
     return 0
 
 

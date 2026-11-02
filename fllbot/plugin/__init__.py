@@ -16,7 +16,7 @@ from ..rules import (
     startswith,
     to_me,
 )
-from .base import AIToolSpec, HandlerKind, HandlerSpec, LoopSpec, Plugin
+from .base import AIToolSpec, HandlerKind, HandlerSpec, LoopSpec, Plugin, ServiceCheckSpec, TaskSourceSpec
 from .context import Context
 from .settings import MASK, PluginSettings, SettingField, SettingsView
 
@@ -30,6 +30,8 @@ __all__ = [
     "Plugin",
     "PluginSettings",
     "SettingField",
+    "ServiceCheckSpec",
+    "TaskSourceSpec",
     "SettingsView",
     "all_rules",
     "any_rule",

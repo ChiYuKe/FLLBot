@@ -223,9 +223,10 @@ class PluginLoader:
                 await asyncio.sleep(spec.initial_delay)
             while True:
                 try:
-                    result = spec.callback(self.bot)
-                    if asyncio.iscoroutine(result):
-                        await result
+                    if self.bot.permissions.plugin_loop_enabled(plugin.name):
+                        result = spec.callback(self.bot)
+                        if asyncio.iscoroutine(result):
+                            await result
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -272,17 +273,33 @@ class PluginLoader:
                 self.failed[str(source)] = str(exc)
                 raise
 
-    async def reload_all(self) -> None:
+    async def reload_all(self) -> dict[str, list[str]]:
+        reloaded: list[str] = []
+        failed: list[str] = []
         for name in list(self._loaded):
             try:
                 await self.reload(name)
+                reloaded.append(name)
             except Exception:
+                failed.append(name)
                 self.logger.exception("重载插件失败：%s", name)
+        return {"reloaded": reloaded, "failed": failed}
 
     async def shutdown(self) -> None:
-        await self.stop_watcher()
+        await self.stop_background_tasks()
         for name in list(self._loaded):
             await self.unload(name)
+
+    async def stop_background_tasks(self) -> None:
+        """Stop hot reload and periodic callbacks while leaving handlers/resources alive."""
+        await self.stop_watcher()
+        loops = [task for entry in self._loaded.values() for task in entry.loops]
+        for task in loops:
+            task.cancel()
+        if loops:
+            await asyncio.gather(*loops, return_exceptions=True)
+        for entry in self._loaded.values():
+            entry.loops.clear()
 
     # -- 热重载 ----------------------------------------------------------- #
     def start_watcher(self) -> None:

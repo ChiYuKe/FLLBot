@@ -9,14 +9,15 @@ ROOT = Path(__file__).resolve().parents[1]
 BOUNDARIES = {
     "config": {"config"},
     "events": {"events"},
-    "logging_setup": {"logging_setup"},
+    "logging_setup": {"logging_setup", "tracing"},
+    "tracing": {"tracing"},
     "storage": {"storage"},
-    "onebot": {"onebot"},
+    "onebot": {"onebot", "tracing"},
     "rules": {"rules"},
     "permission": {"permission"},
     "policy": {"policy"},
-    "llm": {"llm", "config", "onebot", "policy"},
-    "plugin": {"plugin", "rules", "onebot"},
+    "llm": {"llm", "config", "onebot", "policy", "tracing"},
+    "plugin": {"plugin", "rules", "onebot", "tracing"},
 }
 
 

@@ -55,6 +55,18 @@ async def make_bot(root: Path, **kwargs: Any) -> FLLBot:
     return bot
 
 
+def seed_personas(root: Path, *names: str) -> None:
+    """写入测试用的人格文件；程序本身不内置任何人格。"""
+    directory = root / "personas"
+    directory.mkdir(parents=True, exist_ok=True)
+    for name in names:
+        (directory / f"{name}.md").write_text(
+            f"---\nname: {name}\ntitle: {name}\ndescription: 测试人格\n---\n\n"
+            "你是一个测试用聊天助手，名字叫 {bot_name}。\n",
+            encoding="utf-8",
+        )
+
+
 # --------------------------------------------------------------------------- #
 # 假连接
 # --------------------------------------------------------------------------- #

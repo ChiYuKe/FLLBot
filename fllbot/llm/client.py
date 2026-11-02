@@ -12,16 +12,19 @@ import logging
 import os
 import time
 from collections.abc import AsyncIterator, Callable, Sequence
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 
 from ..config import LLMConfig, LLMProviderConfig
+from ..tracing import record, span
+from .budget import fit_messages, request_tokens
 
 DEFAULT_CONTEXT_WINDOW = 8192
 
-# 网络抖动/瞬断时重试的次数与间隔；只重试传输层错误，HTTP 4xx/5xx 不重试。
+# 网络异常、429 和临时 5xx 的有限重试间隔；其他 HTTP 错误直接返回。
 TRANSIENT_RETRY_DELAYS: tuple[float, ...] = (0.6, 1.5)
 
 
@@ -46,11 +49,11 @@ class ChatResult:
 
 
 def estimate_tokens(text: str) -> int:
-    """粗略估算 token：中文约 1 字 1 token，英文约 2 字符 1 token，取折中。"""
+    """缺失服务商用量时，使用 UTF-8 字节数作保守文本估算。"""
     stripped = (text or "").strip()
     if not stripped:
         return 0
-    return max(1, (len(stripped) + 1) // 2)
+    return len(stripped.encode("utf-8"))
 
 
 class LLMClient:
@@ -67,6 +70,8 @@ class LLMClient:
         self._owns_client = http_client is None
         self.logger = logging.getLogger("fllbot.llm")
         self._catalogs: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
+        self._capacity = asyncio.Condition()
+        self._active: dict[str, int] = {}
 
     @property
     def config(self) -> LLMConfig:
@@ -128,6 +133,11 @@ class LLMClient:
                     "stream": not provider.no_stream,
                     "api_key_env": provider.api_key_env,
                     "is_default": resolved == config.route(),
+                    **{key: getattr(provider, key) for key in (
+                        "context_window", "supports_tools", "supports_images", "supports_temperature",
+                        "token_parameter", "image_token_budget", "max_concurrency",
+                        "max_tokens", "input_price", "output_price",
+                    )},
                 }
             )
         return result
@@ -159,12 +169,13 @@ class LLMClient:
         payload = {
             "model": provider.model,
             "messages": [dict(item) for item in messages],
-            "max_tokens": int(max_tokens if max_tokens is not None else provider.max_tokens or 800),
-            "temperature": float(
-                temperature if temperature is not None else provider.temperature if provider.temperature is not None else 0.8
-            ),
+            provider.token_parameter: int(max_tokens if max_tokens is not None else provider.max_tokens or 800),
             "stream": stream,
         }
+        if provider.supports_temperature:
+            payload["temperature"] = float(
+                temperature if temperature is not None else provider.temperature if provider.temperature is not None else 0.8
+            )
         if tools:
             payload["tools"] = [dict(item) for item in tools]
             payload["tool_choice"] = "auto"
@@ -181,12 +192,30 @@ class LLMClient:
         attempts = len(TRANSIENT_RETRY_DELAYS) + 1
         for attempt in range(attempts):
             try:
-                return await self._client().post(
+                response = await self._client().post(
                     url,
                     headers=self._headers(config),
                     json=payload,
                     timeout=timeout or config.timeout or 60.0,
                 )
+                if response.status_code not in {429, 500, 502, 503, 504} or attempt + 1 >= attempts:
+                    return response
+                delay = TRANSIENT_RETRY_DELAYS[attempt]
+                retry_after = response.headers.get("retry-after", "")
+                try:
+                    delay = max(delay, float(retry_after)) if retry_after else delay
+                except ValueError:
+                    from email.utils import parsedate_to_datetime
+                    try:
+                        delay = max(delay, parsedate_to_datetime(retry_after).timestamp() - time.time())
+                    except (TypeError, ValueError, OverflowError):
+                        pass
+                # Do not retry sooner than requested when the wait exceeds our bounded retry policy.
+                if delay > 30:
+                    return response
+                await response.aclose()
+                record('model', 'retry_scheduled', 'skipped')
+                await asyncio.sleep(max(0, delay))
             except httpx.TransportError as exc:
                 if attempt + 1 >= attempts:
                     raise
@@ -197,11 +226,67 @@ class LLMClient:
                     attempts - 1,
                     exc,
                 )
+                record('model', 'retry_scheduled', 'skipped')
                 await asyncio.sleep(TRANSIENT_RETRY_DELAYS[attempt])
         raise AssertionError("重试循环不应到达这里")
 
     # -- 调用 ------------------------------------------------------------- #
+    @asynccontextmanager
+    async def capacity(self, name: str):
+        async with self._capacity:
+            await self._capacity.wait_for(
+                lambda: self._active.get(name, 0) < self.config.resolve(name)[1].max_concurrency
+            )
+            self._active[name] = self._active.get(name, 0) + 1
+        try:
+            yield
+        finally:
+            async with self._capacity:
+                self._active[name] -= 1
+                self._capacity.notify_all()
+
+    async def prepare_messages(self, messages, *, provider=None, scene=None, tools=None, max_tokens=None):
+        name, config = self.resolve(provider=provider, scene=scene)
+        if tools and not config.supports_tools:
+            raise LLMError("该模型未启用工具调用能力，请调整模型能力或该群工具设置")
+        if not config.supports_images and any(
+            isinstance(item.get("content"), list) and any(part.get("type") == "image_url" for part in item["content"])
+            for item in messages
+        ):
+            raise LLMError("该模型未启用识图能力，请关闭图片输入或选择支持识图的模型")
+        window = config.context_window or (
+            await self.context_window(provider=name) if self.config.context_mode == "model" else None
+        ) or DEFAULT_CONTEXT_WINDOW
+        try:
+            return fit_messages(list(messages), list(tools) if tools else None, window,
+                                max_tokens if max_tokens is not None else config.max_tokens or 800,
+                                config.image_token_budget)
+        except ValueError as exc:
+            raise LLMError(str(exc)) from exc
+
     async def chat_result(
+        self, messages: Sequence[dict[str, Any]], *, allow_fallback: bool = True, **kwargs: Any,
+    ) -> ChatResult:
+        name, _ = self.resolve(provider=kwargs.get("provider"), scene=kwargs.get("scene"), task=kwargs.get("task"))
+        names = [name]
+        if allow_fallback:
+            names += [item for item in self.config.fallback_providers if item != name and item in self.config.provider_names()]
+        for index, candidate in enumerate(dict.fromkeys(names)):
+            try:
+                with span('model', candidate):
+                    async with self.capacity(candidate):
+                        return await self._chat_result_once(messages, **{**kwargs, "provider": candidate})
+            except LLMError as exc:
+                if index + 1 >= len(set(names)) or (exc.status is not None and exc.status not in {429, 500, 502, 503, 504}):
+                    raise
+                # Local capability/budget errors do not trigger a network failover.
+                if exc.status is None and not str(exc).startswith("网络请求失败"):
+                    raise
+                self.logger.warning("模型服务 %s 暂不可用，尝试备用服务", candidate)
+                record('model', 'fallback_selected', component=candidate)
+        raise AssertionError("没有可用模型服务")
+
+    async def _chat_result_once(
         self,
         messages: Sequence[dict[str, Any]],
         *,
@@ -215,6 +300,7 @@ class LLMClient:
     ) -> ChatResult:
         """调用模型并返回文本与用量。"""
         name, config = self.resolve(provider=provider, scene=scene, task=task)
+        messages = await self.prepare_messages(messages, provider=name, tools=tools, max_tokens=max_tokens)
         url = self.endpoint(config.base_url)
         payload = self._payload(
             config, messages, max_tokens=max_tokens, temperature=temperature, stream=False, tools=tools
@@ -252,10 +338,11 @@ class LLMClient:
         usage = data.get("usage") or {}
         prompt_tokens = int(usage.get("prompt_tokens") or 0)
         completion_tokens = int(usage.get("completion_tokens") or 0)
-        if prompt_tokens <= 0:
-            prompt_tokens = sum(estimate_tokens(str(item.get("content") or "")) for item in messages)
-        if completion_tokens <= 0:
-            completion_tokens = estimate_tokens(text)
+        estimated = "prompt_tokens" not in usage or "completion_tokens" not in usage
+        if "prompt_tokens" not in usage:
+            prompt_tokens = request_tokens(list(messages), list(tools) if tools else None, config.image_token_budget)
+        if "completion_tokens" not in usage:
+            completion_tokens = estimate_tokens(text) + (estimate_tokens(json.dumps(tool_calls, ensure_ascii=False)) if tool_calls else 0)
 
         return ChatResult(
             text=text,
@@ -265,6 +352,7 @@ class LLMClient:
                 "prompt_tokens": prompt_tokens,
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
+                "estimated": int(estimated),
             },
             finish_reason=str(choices[0].get("finish_reason") or ""),
             tool_calls=tool_calls,
@@ -294,6 +382,15 @@ class LLMClient:
         return result.text
 
     async def chat_stream(
+        self, messages: Sequence[dict[str, Any]], **kwargs: Any,
+    ) -> AsyncIterator[str]:
+        name, _ = self.resolve(provider=kwargs.get("provider"), scene=kwargs.get("scene"), task=kwargs.get("task"))
+        # Never restart a stream after yielding text; it would duplicate partial replies.
+        async with self.capacity(name):
+            async for piece in self._chat_stream_once(messages, **{**kwargs, "provider": name}):
+                yield piece
+
+    async def _chat_stream_once(
         self,
         messages: Sequence[dict[str, Any]],
         *,
@@ -307,7 +404,7 @@ class LLMClient:
         """流式返回增量文本（P1 接入对话链路）。"""
         name, config = self.resolve(provider=provider, scene=scene, task=task)
         if config.no_stream:
-            result = await self.chat_result(
+            result = await self._chat_result_once(
                 messages,
                 max_tokens=max_tokens,
                 temperature=temperature,
@@ -318,6 +415,7 @@ class LLMClient:
                 yield result.text
             return
 
+        messages = await self.prepare_messages(messages, provider=name, max_tokens=max_tokens)
         url = self.endpoint(config.base_url)
         payload = self._payload(config, messages, max_tokens=max_tokens, temperature=temperature, stream=True)
         try:
@@ -406,6 +504,8 @@ class LLMClient:
 
     async def context_window(self, *, scene: str | None = None, provider: str | None = None) -> int | None:
         name, config = self.resolve(scene=scene, provider=provider)
+        if config.context_window:
+            return config.context_window
         try:
             catalog = await self.model_catalog(provider=name, cached=True)
         except LLMError:

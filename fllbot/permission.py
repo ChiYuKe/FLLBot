@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import logging
 import time
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:  # pragma: no cover
@@ -71,49 +74,66 @@ class PermissionManager:
     def group_config(self, group_id: int) -> dict[str, Any]:
         state = self._groups.get(int(group_id)) or {}
         config = state.get("config") or {}
-        return dict(config) if isinstance(config, dict) else {}
+        return deepcopy(config) if isinstance(config, dict) else {}
+
+    def group_revision(self, group_id: int) -> str:
+        """Version the editable group state, including legacy settings and access defaults."""
+        permission = self.bot.config.permission
+        agent = self.bot.plugins.get("agent")
+        snapshot = {
+            "state": self._groups.get(group_id),
+            "legacy": agent.settings.group_overrides(group_id) if agent else {},
+            "access": [permission.group_access, bool(permission.allow_groups),
+                       group_id in permission.allow_groups, group_id in permission.deny_groups],
+            "default_enabled": permission.default_group_enabled,
+        }
+        return hashlib.sha256(json.dumps(snapshot, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
     async def ensure_group(self, group_id: int) -> dict[str, Any]:
         """登记一个群（首次见到时自动入库）。"""
-        gid = int(group_id)
-        state = self._groups.get(gid)
-        if state is not None:
-            return state
-        async with self._group_lock:
+        async with self.bot.storage.settings_lock:
+            gid = int(group_id)
             state = self._groups.get(gid)
             if state is not None:
                 return state
-            state = {
-                "enabled": bool(self.bot.config.permission.default_group_enabled),
-                "config": {},
-            }
-            await self.bot.storage.upsert_group(gid, enabled=state["enabled"], config={})
-            self._groups[gid] = state
-            return state
+            async with self._group_lock:
+                state = self._groups.get(gid)
+                if state is not None:
+                    return state
+                state = {
+                    "enabled": bool(self.bot.config.permission.default_group_enabled),
+                    "config": {},
+                }
+                await self.bot.storage.upsert_group(gid, enabled=state["enabled"], config={})
+                self._groups[gid] = state
+                return state
 
     async def set_group_enabled(self, group_id: int, enabled: bool) -> None:
-        gid = int(group_id)
-        await self.ensure_group(gid)
-        config = self.group_config(gid)
-        config.pop("_inherit_enabled", None)
-        await self.save_group(gid, enabled=enabled, config=config)
+        async with self.bot.storage.settings_lock:
+            gid = int(group_id)
+            await self.ensure_group(gid)
+            config = self.group_config(gid)
+            config.pop("_inherit_enabled", None)
+            await self.save_group(gid, enabled=enabled, config=config)
 
     async def set_group_config(self, group_id: int, config: dict[str, Any]) -> None:
-        gid = int(group_id)
-        await self.ensure_group(gid)
-        await self.bot.storage.upsert_group(gid, enabled=None, config=config)
-        self._groups.setdefault(gid, {})["config"] = dict(config)
+        async with self.bot.storage.settings_lock:
+            gid = int(group_id)
+            await self.ensure_group(gid)
+            await self.bot.storage.upsert_group(gid, enabled=None, config=config)
+            self._groups.setdefault(gid, {})["config"] = dict(config)
 
     async def save_group(self, group_id: int, *, enabled: bool, config: dict[str, Any], reset_agent: bool = False) -> None:
         """将一组单群设置作为一次数据库更新保存。"""
-        gid = int(group_id)
-        async with self._group_lock:
-            agent = self.bot.plugins.get("agent") if reset_agent else None
-            await self.bot.storage.upsert_group(gid, enabled=enabled, config=config,
-                                                clear_settings_scope=agent.settings.scope if agent else None)
-            if agent:
-                agent.settings.forget_group(gid)
-            self._groups[gid] = {"enabled": enabled, "config": dict(config)}
+        async with self.bot.storage.settings_lock:
+            gid = int(group_id)
+            async with self._group_lock:
+                agent = self.bot.plugins.get("agent") if reset_agent else None
+                await self.bot.storage.upsert_group(gid, enabled=enabled, config=config,
+                                                    clear_settings_scope=agent.settings.scope if agent else None)
+                if agent:
+                    agent.settings.forget_group(gid)
+                self._groups[gid] = {"enabled": enabled, "config": dict(config)}
 
     def list_groups(self) -> list[dict[str, Any]]:
         result = []
@@ -122,13 +142,19 @@ class PermissionManager:
                 {
                     "group_id": gid,
                     "enabled": bool(state.get("enabled", True)),
-                    "config": state.get("config") or {},
+                    "config": deepcopy(state.get("config") or {}),
                 }
             )
         return result
 
+    def publish_groups(self, groups: list[dict[str, Any]]) -> None:
+        """Publish a snapshot already committed by an atomic management operation."""
+        self._groups = {item['group_id']: {'enabled': item['enabled'], 'config': deepcopy(item['config'])} for item in groups}
+
     # -- 插件开关 --------------------------------------------------------- #
     def plugin_enabled(self, plugin_name: str, group_id: int | None) -> bool:
+        if self._plugin_state.get((plugin_name, 0)) is False:
+            return False
         if group_id is not None:
             override = self._plugin_state.get((plugin_name, int(group_id)))
             if override is not None:
@@ -139,10 +165,49 @@ class PermissionManager:
         plugin = self.bot.plugins.get(plugin_name)
         return bool(plugin.enabled_by_default) if plugin is not None else True
 
+    def plugin_revision(self, plugin_name: str, group_id: int | None = None) -> str:
+        plugin = self.bot.plugins.get(plugin_name)
+        data = [plugin_name, int(group_id or 0), self.plugin_state(plugin_name),
+                self.plugin_state(plugin_name, group_id), bool(plugin.enabled_by_default) if plugin else True]
+        return hashlib.sha256(json.dumps(data).encode()).hexdigest()
+
+    def plugin_loop_enabled(self, plugin_name: str) -> bool:
+        if self.plugin_state(plugin_name) is False:
+            return False
+        if self.plugin_enabled(plugin_name, None):
+            return True
+        return any(name == plugin_name and group_id > 0 and enabled
+                   for (name, group_id), enabled in self._plugin_state.items())
+
+    def plugin_status(self, plugin_name: str, group_id: int | None = None) -> dict[str, Any]:
+        plugin = self.bot.plugins.get(plugin_name)
+        global_state = self.plugin_state(plugin_name)
+        group_state = self.plugin_state(plugin_name, group_id) if group_id else None
+        source = 'global' if global_state is False else 'group' if group_state is not None else 'global' if global_state is not None else 'default'
+        return {'name': plugin_name, 'group_id': group_id, 'enabled': self.plugin_enabled(plugin_name, group_id),
+                'global_state': global_state, 'group_state': group_state,
+                'default_enabled': bool(plugin.enabled_by_default) if plugin else True,
+                'blocked_by_global': global_state is False, 'source': source,
+                'loop_enabled': self.plugin_loop_enabled(plugin_name),
+                'revision': self.plugin_revision(plugin_name, group_id),
+                'note': '全局明确停用会阻止所有群的新处理和后续任务调度；群覆盖保留。进行中的操作可能继续，已发送的请求无法撤回。'}
+
     async def set_plugin_enabled(self, plugin_name: str, enabled: bool, group_id: int | None = None) -> None:
-        gid = int(group_id or 0)
-        await self.bot.storage.set_plugin_state(plugin_name, gid, enabled)
-        self._plugin_state[(plugin_name, gid)] = bool(enabled)
+        async with self.bot.storage.settings_lock:
+            gid = int(group_id or 0)
+            transaction = asyncio.create_task(self.bot.storage.set_plugin_state(plugin_name, gid, enabled))
+            cancelled = False
+            while True:
+                try:
+                    await asyncio.shield(transaction)
+                    break
+                except asyncio.CancelledError:
+                    if transaction.cancelled():
+                        raise
+                    cancelled = True
+            self._plugin_state[(plugin_name, gid)] = bool(enabled)
+            if cancelled:
+                raise asyncio.CancelledError
 
     def plugin_state(self, plugin_name: str, group_id: int | None = None) -> bool | None:
         return self._plugin_state.get((plugin_name, int(group_id or 0)))
