@@ -27,7 +27,7 @@
 - **持久化**：SQLite + `PRAGMA user_version` 迁移；插件配置、群配置、插件状态、聊天历史、消息统计
 - **LLM 子系统**：OpenAI 兼容接口、上下文与人格管理，可供管理 API 和自定义插件使用
 - **管理 API**：状态/连接/插件/群/配置/日志/统计/人格/插件配置、通用 OneBot 调用、KV 读写、SSE 实时事件流
-- **可靠性**：事件短窗去重（防重连重放）、端口占用自检、处理器超时与异常隔离
+- **可靠性**：有界事件队列与溢出统计、分阶段关闭与任务排空、SQLite 在线备份和校验后恢复
 - **开箱内置插件**：`basic`（包含 `ping`、`echo`、`help`、`plugins` 命令）和 `agent`（群级自然语言智能体，按需调用插件工具）
 
 ## 快速开始（Windows）
@@ -94,12 +94,12 @@ INFO  fllbot: FLLBot 0.1.0 已启动：WS /onebot/v11/ws | 插件 2 个 | LLM �
 | `admin` | `token` `token_file` | 管理 API 令牌；空则首次启动自动生成到文件 |
 | `bot` | `superusers` `command_prefix` `allow_bare_command` `error_reply` | 超管 QQ、命令前缀、@ 时是否允许裸命令 |
 | `permission` | `allow_groups` `deny_groups` `default_group_enabled` `allow_private` | 群白/黑名单与私聊开关 |
-| `plugin` | `dirs` `builtin` `hot_reload` `max_concurrency` `handler_timeout` | 插件目录、内置插件、热重载与并发 |
-| `storage` | `path` | SQLite 路径（改动需重启） |
+| `plugin` | `dirs` `builtin` `hot_reload` `max_concurrency` `max_pending_events` `handler_timeout` | 插件目录、内置插件、热重载、并发与事件队列上限 |
+| `storage` | `path` `backup_dir` | SQLite 路径只在启动来源修改；备份目录可在线更新 |
 | `logging` | `level` `dir` `json_lines` `ring_size` | 控制台 + JSONL 文件 + 内存环形缓冲 |
 | `llm` | `enabled` `base_url` `api_key` `model` `persona` ... | LLM 服务配置，供 API 与自定义插件使用 |
 
-> 运行时用 `PATCH /api/config` 修改的配置会存进数据库 `meta` 表并覆盖文件配置，重启后仍然生效；`storage.path`、`plugin.dirs` 这类启动期路径需要重启才能生效。
+> 运行时用 `PATCH /api/config` 修改的参数会保存到数据库并在重启后保留。监听、数据库位置、插件加载、日志文件和管理入口等启动参数必须在配置文件/启动命令中修改并重启；在线修改返回 409，整次请求不保存。旧版未生效的启动覆盖会归档保留，后台可只读查看。完整范围见 [配置与数据作用域](docs/admin-scope.md)。
 
 ## 内置命令
 
@@ -182,8 +182,8 @@ async def morning(ctx: Context) -> None:
 
 ## 管理 API
 
-默认地址 `http://127.0.0.1:6701`，交互式文档 `/api/docs`，令牌用
-`Authorization: Bearer <token>`（或 `X-Admin-Token`、`?token=`）。
+默认地址 `http://127.0.0.1:6701`，交互式文档 `/api/docs`。令牌建议通过
+`Authorization: Bearer <token>` 发送（也支持 `X-Admin-Token`）；`?token=` 仅保留旧客户端兼容，避免用于可被记录或转发的 URL。
 
 ```powershell
 $token = Get-Content data\admin_token.txt
@@ -192,7 +192,18 @@ curl.exe -H "Authorization: Bearer $token" http://127.0.0.1:6701/api/status
 
 常用端点：`/api/status`、`/api/connections`、`/api/plugins`、`/api/groups`、`/api/config`、
 `/api/logs`、`/api/stats`、`/api/personas`、`/api/llm/test`、`/api/actions`、
-`/api/events/stream`（SSE）。完整列表见 [docs/api.md](docs/api.md)。
+`/api/storage/backup`、`/api/events/stream`（SSE）。完整列表见 [docs/api.md](docs/api.md)。
+
+### 数据库备份与恢复
+
+运行中的机器人可以通过 `POST /api/storage/backup` 或命令行创建一致性备份。恢复前先停止 FLLBot；恢复命令会验证备份并在替换前自动保留当前数据库副本：
+
+```powershell
+python -m fllbot backup --root .
+python -m fllbot restore --root . --source data\backups\fllbot-<时间戳>.db --confirm
+```
+
+备份目录可通过 `storage.backup_dir` 设置；命令行也支持 `--destination` 指定单次备份位置。
 
 LLM 子系统（多 provider、记忆、工具调用）的设计见 [docs/llm.md](docs/llm.md)。
 
@@ -207,7 +218,7 @@ http://127.0.0.1:6701/ui?token=<data/admin_token.txt 里的令牌>
 - **概览**：连接、模型、回复与插件就绪检查，直接定位缺少的配置
 - **配置**：页内切换“群聊设置 / 默认行为”，只显示主动新增及已有的单群覆盖；未添加的群使用默认行为。常用项紧凑排列并自动保存，详细参数点击“编辑”；访问准入与默认访问范围也在同一张表内修改
 - **模型服务**：页内切换“模型接入 / 对话测试”，维护模型资源并测试回答
-- **人格库**：新建、编辑、删除自定义人格，设置默认人格，供群策略选择
+- **人格库**：人格全部由你创建，可新建、编辑、删除并设置默认人格，供群策略选择；「说明」列出 `{bot_name}` 等可用变量
 - **插件**：管理已安装插件、配置与使用说明
 - **数据与日志**：页内切换“运行日志 / 会话记录 / 用量统计”
 - **底部系统设置**：连接地址、管理员、命令前缀、私聊、黑名单、上下文和日志级别
@@ -260,9 +271,8 @@ fllbot/
 ├── llm/                # 客户端、人格、多轮对话
 ├── api/                # 管理 REST + SSE
 ├── builtin_plugins/    # basic 与 agent
-└── personas/           # 内置人格
 plugins/                # 用户插件（运行时加载，已 gitignore 之外）
-personas/               # 用户人格（同名覆盖内置）
+personas/               # 用户人格（全部由你创建，程序不内置人格）
 tools/                  # fake_napcat.py、smoke_test.py
 tests/                  # pytest：单元 + API + 端到端 WS
 ```
@@ -272,6 +282,8 @@ tests/                  # pytest：单元 + API + 端到端 WS
 ```powershell
 .\.venv\Scripts\python.exe -m pytest -q
 .\.venv\Scripts\python.exe -m ruff check .
+.\.venv\Scripts\python.exe scripts/check_architecture.py
+.\.venv\Scripts\python.exe scripts/check_admin_scope.py
 ```
 
 端到端测试会真的拉起 uvicorn 并用 WebSocket 客户端模拟 NapCat，覆盖「连接 → 收消息 → 插件 → 回调用 → 响应」全链路。

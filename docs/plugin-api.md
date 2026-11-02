@@ -20,6 +20,17 @@
 
 ## 装饰器最小示例（旧声明写法仍兼容）
 
+插件可用 `@plugin.service_check("tts", "语音服务", timeout=3, selected_when=("backend", "qwen"))`
+声明后台健康检查。回调为无参数 async 函数，只做只读、不会触发生成的健康请求，返回
+`{"state": "ready", "code": "ready"}`。state 支持 ready/loading/idle/unavailable/error，code 使用固定英文原因码，
+不返回异常正文或密钥。每个插件最多 8 个不重名检查，超时不超过 10 秒；回调不能使用阻塞式 I/O。
+selected_when 为可选配置字段和值，仅标记当前选用状态。声明不会自动执行；由管理员在“系统设置 → 外部服务”按需调用。
+
+消息处理期间可以使用 `ctx.trace_event(stage, code, status="passed", component="")` 记录固定原因码，
+或使用 `with ctx.trace_span(stage, component=""):` 包住一次异步操作，自动记录耗时与成功/失败。
+仅传入固定原因码和插件/工具标识，不能传入消息、提示词、参数、结果或密钥。没有活动消息链路时这些调用不记录数据，
+不会改变插件控制流；插件脱离当前消息启动的后台任务不写入已结束的消息记录。宿主已自动记录常规处理器、模型和发送阶段。
+
 ```python
 from fllbot.plugin import Context, Plugin
 
@@ -436,3 +447,17 @@ await ctx.connection.send_group_forward_msg(ctx.group_id, [node.to_dict()])
 
 
 插件是启停和配置的完整功能包；Agent 工具是插件通过 `on_ai_tool(...)` 暴露的单个可调用动作。同一个插件可以同时包含命令、配置和多个 Agent 工具，例如语音插件提供 Qwen / IndexTTS 后端配置及 `voice__speak`。`category` 字段保留用于兼容和描述，不决定插件是否出现在插件管理页；工具目录按具体 `on_ai_tool` 注册项展示，并标出来源插件。
+
+### 持久化任务来源
+
+通过 `@plugin.task_source("reminders", "提醒与待办")` 声明异步回调 `async def console(operation, **values)`。来源名称为小写字母开头的字母/数字/下划线，最多 64 字符，不得重复；只注册管理能力，不授予模型工具权限。宿主不读取或导入某个具体插件的数据表。
+
+回调支持三个 operation：list（before/limit/self_id/scene/scene_id/owner/state）、runs（task_id/before/limit）和 action（task_id/action/revision/acknowledge_duplicate）。list/runs 返回 `{items: [...], next_cursor: int|null}`；action 返回更新后的任务。任务字段及 API 见 [任务中心接口](api.md#插件任务中心)。回调以 KeyError 表示任务不存在，ValueError 表示版本/状态冲突。回调应仅做本地快速操作，不在管理请求内发送 QQ；版本检查和操作必须在同一事务中。
+
+插件负责持久化任务、运行记录和重启恢复；发送前检查目标场景权限与连接，先落盘认领状态再调用发送接口，避免并发重复执行。未取得回执不能假定未送达；中断遗留应标记不确定，显式确认后方可重试。任务动作不得绕过插件或场景硬限制。daily 提供实现示例；其任务库独立于主数据库备份。
+
+### 全局插件停用与周期任务
+
+PermissionManager.plugin_enabled 将全局明确 false 作为优先硬限制，群覆盖不能绕过；全局无显式停用时，声明默认 false 的插件可由群单独开启。周期回调由宿主根据 plugin_loop_enabled 调度：实例默认启用或至少一个群单独启用才运行，全局 false 阻止新的周期回调。面向具体会话的任务仍需在执行前检查该群/私聊权限及连接，不得换账号代发。
+
+停用不会卸载代码、删除数据或阻止生命周期初始化及管理读取；已开始的回调不会被强制取消，插件需在长操作后的实际发送前再次检查权限。此契约约束宿主入口，不能将任意插件自行创建的任务或低层外部调用描述为受宿主完整隔离。
