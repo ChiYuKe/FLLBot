@@ -22,7 +22,7 @@ async def main():
         row = db.execute("SELECT value FROM meta WHERE key='config_overrides'").fetchone()
     store = ConfigStore(load_config_dict(root=ROOT))
     store.restore(json.loads(row[0]) if row else {})
-    personas = PersonaStore([ROOT / 'fllbot/personas', ROOT / 'personas'])
+    personas = PersonaStore([ROOT / 'personas'], default_name=store.current.llm.persona)
     personas.load()
     system = personas.get(store.current.llm.persona).render(bot_name='猫猫', date='2026-10-31', weekday='六', time='23:13', user_name='测试用户')
     system += '\n\n' + store.current.llm.system_extra

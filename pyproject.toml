@@ -34,7 +34,7 @@ license-files = ["LICENSE"]
 include = ["fllbot*"]
 
 [tool.setuptools.package-data]
-fllbot = ["personas/*.md", "builtin_plugins/*/*.md", "builtin_plugins/*/plugin.toml",
+fllbot = ["builtin_plugins/*/*.md", "builtin_plugins/*/plugin.toml",
     "builtin_plugins/*/docs/*.md", "plugin/templates/*.tmpl", "plugin/templates/docs/*.tmpl",
     "ui/*.html", "ui/*.css", "ui/*.js"]
 
