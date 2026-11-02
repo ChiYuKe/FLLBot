@@ -11,11 +11,11 @@ def render_index() -> str:
     """组装页面；管理数据由带令牌的 API 请求提供。"""
     html = (_UI / "index.html").read_text(encoding="utf-8")
     styles = "\n".join((_UI / name).read_text(encoding="utf-8") for name in (
-        "console.css", "controls.css", "desktop.css", "scrollbars.css",
+        "console.css", "controls.css", "desktop.css", "scrollbars.css", "admin-layout.css",
     ))
     script = (_UI / "app.js").read_text(encoding="utf-8")
     features = "\n".join((_UI / name).read_text(encoding="utf-8") for name in (
-        "console.js", "navigation.js", "policy.js", "chat-settings.js", "group-table.js",
+        "console.js", "navigation.js", "policy.js", "chat-settings.js", "group-table.js", "traces.js", "maintenance.js", "retention.js", "tasks.js", "resource-replace.js", "accounts.js", "startup-config.js", "admin-layout.js",
     ))
     script = script.replace("/* CONSOLE_FEATURES */", features)
     script += "\n" + (_UI / "desktop-theme.js").read_text(encoding="utf-8")

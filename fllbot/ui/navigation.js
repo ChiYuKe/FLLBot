@@ -1,15 +1,18 @@
 // Resource pages, configuration and operational data are separate concerns.
 // Existing hashes stay valid after folding the old entries into page tabs.
 var sectionForView = {
+  bots: 'bots', accounts: 'bots',
   groups: 'config', agent: 'config', models: 'models', playground: 'models',
-  history: 'data', usage: 'data', logs: 'data'
+  history: 'data', usage: 'data', logs: 'data', traces: 'data', system: 'system', maintenance: 'system', services: 'system', retention: 'system'
 };
 var sectionInfo = {
-  config: { title: '配置', tabs: ['groups', 'agent'] },
+  bots: { title: 'Agent', tabs: ['bots', 'accounts'] },
+  config: { title: '群与回复', tabs: ['groups', 'agent'] },
   models: { title: '模型服务', tabs: ['models', 'playground'] },
-  data: { title: '数据与日志', tabs: ['logs', 'history', 'usage'] }
+  data: { title: '数据与日志', tabs: ['logs', 'traces', 'history', 'usage'] },
+  system: { title: '系统设置', tabs: ['system', 'services', 'maintenance', 'retention'] }
 };
-var lastSectionViews = { config: 'groups', models: 'models', data: 'logs' };
+var lastSectionViews = { bots: 'bots', config: 'groups', models: 'models', data: 'logs', system: 'system' };
 
 function renderSectionTabs(view) {
   var node = document.getElementById('section-tabs');
@@ -65,6 +68,7 @@ function navigate(view) {
   if (!token || needsAuth) return;
   if ((view === 'models' || view === 'personas') && !agentModelLoaded) loadAgentModel();
   if (view === 'bots' && !dirtyPages.has('bots')) loadChatSettings();
+  if (view === 'accounts') loadAccounts();
   if (view === 'models') loadProviders();
   if (view === 'tools') loadTools();
   if (view === 'agent' && !loadedPages.has('agent')) loadAgentSettings();
@@ -73,6 +77,12 @@ function navigate(view) {
   if (view === 'playground') loadTestOptions();
   if (view === 'history') loadHistory();
   if (view === 'usage') loadUsage();
+  if (view === 'traces') loadTraces();
+  if (view === 'services') loadServiceHealth();
+  if (view === 'maintenance') loadBackups();
+  if (view === 'retention') loadRetention();
+  if (view === 'tasks') loadTaskSources();
+  if (view === 'overview') loadOverviewUsage(true);
   if (view === 'system' && !systemInitial) loadSystem();
 }
 

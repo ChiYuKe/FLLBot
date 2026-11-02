@@ -20,13 +20,29 @@ function renderPolicy(group,providers){
   provider.value=policy.provider||'';
   policyField('response').value=policy.auto_group==null?'inherit':policy.auto_group?'on':'off';
   policyField('trigger').value=policy.trigger_mode||'';
-  [['prefix','trigger_prefix'],['cooldown','cooldown_seconds'],['rounds','max_tool_rounds'],['extra','system_extra']].forEach(function(pair){policyField(pair[0]).value=policy[pair[1]]==null?'':policy[pair[1]];});
+  [['prefix','trigger_prefix'],['cooldown','cooldown_seconds'],['auto-reply-probability','auto_reply_probability'],['rounds','max_tool_rounds'],['extra','system_extra']].forEach(function(pair){policyField(pair[0]).value=policy[pair[1]]==null?'':policy[pair[1]];});
   policyField('tools-inherit').checked=policy.allowed_tools==null;
   policyToolValues=(policy.allowed_tools||[]).slice();policyInheritValues=((group.inherited_policy||{}).allowed_tools||[]).slice();renderPolicyTools();
   var node=policyField('effective');node.textContent='';
-  [['策略',effective.name],['模型',effective.provider+' · '+effective.model],['人格',effective.persona],['回复方式',effective.auto_group?(effective.trigger_modes||[effective.trigger_mode]).map(function(mode){return {at:'被 @',prefix:'唤醒词',all:'自动参与'}[mode];}).join(' / '):'关闭群聊响应'],['用户冷却',effective.cooldown_seconds+' 秒'],['可用工具',(effective.tools||[]).map(function(tool){return tool.title;}).join('、')||'不开放工具']].forEach(function(row){node.appendChild(h('div',{},h('span',{text:row[0]}),h('strong',{text:row[1]||'—'})));});
+  var sourceNames={system:'系统默认',bot:'机器人默认',group:'本群覆盖',legacy_group:'旧版群插件配置',nickname:'机器人昵称',unresolved:'尚未选择机器人'};
+  var sources=effective.sources||{};
+  [['策略',effective.name],['模型',effective.provider+' · '+effective.model,'provider'],['人格',effective.persona||'兜底提示词','persona'],['群聊响应',effective.auto_group?'开启':'关闭','auto_group'],['回复方式',(effective.trigger_modes||[effective.trigger_mode]).map(function(mode){return {at:'被 @',prefix:'唤醒词',all:'自动参与'}[mode]||mode;}).join(' / '),'trigger_modes'],['唤醒词',effective.trigger_prefix,'trigger_prefix'],['自动参与概率',effective.auto_reply_probability+'%','auto_reply_probability'],['用户冷却',effective.cooldown_seconds+' 秒','cooldown_seconds'],['工具调用轮数',String(effective.max_tool_rounds),'max_tool_rounds'],['可用工具',(effective.tools||[]).map(function(tool){return tool.title;}).join('、')||'不开放工具','allowed_tools']].forEach(function(row){
+    var value=h('strong',{text:row[1]||'—'});
+    if(row[2])value.appendChild(h('small',{class:'policy-source',text:'来源：'+(sourceNames[sources[row[2]]]||'系统默认')}));
+    node.appendChild(h('div',{},h('span',{text:row[0]}),value));
+  });
   if((effective.unavailable_tools||[]).length)node.appendChild(h('p',{class:'policy-state blocked',text:'以下工具当前不可用（插件未加载或已停用）：'+effective.unavailable_tools.join('、')}));
-  var blocked=effective.blocked_by||[];node.appendChild(h('p',{class:'policy-state'+(blocked.length?' blocked':''),text:blocked.length?'未就绪：'+blocked.join('；'):'配置就绪；保存后的修改立即生效。'}));
+  var blocked=effective.blocked_by||[],diagnostics=effective.diagnostics;
+  node.appendChild(h('p',{class:'policy-state'+(blocked.length?' blocked':''),text:blocked.length?'配置未就绪：'+blocked.join('；'):'配置已就绪；实际连通性以调用结果为准。'}));
+  if(diagnostics){
+    node.appendChild(h('h4',{text:'不回复诊断（已保存设置）'}));
+    (diagnostics.checks||[]).forEach(function(check){
+      var row=h('div',{class:'policy-diagnostic'},h('span',{text:(check.passed?'✓ ':'待处理 · ')+check.title}),h('span',{text:check.passed?'检查通过':check.message}));
+      if(!check.passed)row.appendChild(h('button',{type:'button',class:'btn',text:'查看设置',onclick:function(){closeGroupDetails();navigate(check.target);}}));
+      node.appendChild(row);
+    });
+    node.appendChild(h('p',{class:'settings-note',text:diagnostics.note}));
+  }
   var reply = 'inherit';
   if(group.llm_enabled===false || policy.auto_group===false)reply='off';
   else if(policy.auto_group===true || policy.trigger_mode && effective.auto_group)reply=effective.trigger_mode || 'at';
@@ -35,8 +51,8 @@ function renderPolicy(group,providers){
 }
 function collectPolicy(){
   var response=policyField('response').value;
-  function integer(key,min,max){var value=policyField(key).value.trim();if(!value)return null;var n=Number(value);if(!Number.isInteger(n)||n<min||n>max)throw new Error('冷却需在 0–120 秒之间，工具调用轮数需在 1–5 之间。');return n;}
-  var policy={name:policyField('name').value.trim(),provider:policyField('provider').value,auto_group:response==='inherit'?null:response==='on',trigger_mode:policyField('trigger').value||null,trigger_modes:policyTriggerModes,cooldown_seconds:integer('cooldown',0,120),max_tool_rounds:integer('rounds',1,5),allowed_tools:policyField('tools-inherit').checked?null:policyToolValues,system_extra:policyField('extra').value.trim()};
+  function integer(key,min,max){var value=policyField(key).value.trim();if(!value)return null;var n=Number(value);if(!Number.isInteger(n)||n<min||n>max)throw new Error('概率需在 0–100% 之间，冷却需在 0–120 秒之间，工具调用轮数需在 1–5 之间。');return n;}
+  var policy={name:policyField('name').value.trim(),provider:policyField('provider').value,auto_group:response==='inherit'?null:response==='on',trigger_mode:policyField('trigger').value||null,trigger_modes:policyTriggerModes,cooldown_seconds:integer('cooldown',0,120),auto_reply_probability:integer('auto-reply-probability',0,100),max_tool_rounds:integer('rounds',1,5),allowed_tools:policyField('tools-inherit').checked?null:policyToolValues,system_extra:policyField('extra').value.trim()};
   return Object.keys(policy).some(function(key){return policy[key]!==null && policy[key]!=='';})?policy:null;
 }
 policyField('tools-inherit').addEventListener('change',renderPolicyTools);

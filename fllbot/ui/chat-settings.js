@@ -1,8 +1,9 @@
 // Agent chat settings are global; account management stays in the desktop launcher.
 var chatSettingsLoaded = false;
+var chatRevision = null;
 var chatSettingsLoading = false;
-var chatFlagKeys = ['send_nickname', 'send_user_id', 'send_role', 'send_time', 'allow_images', 'read_forward', 'quote_reply', 'at_sender'];
-var chatNumberFields = {'forward_threshold': 'chat-forward-threshold', 'reply_chunk_size': 'chat-reply-chunk-size', 'reply_interval_ms': 'chat-reply-interval-ms'};
+var chatFlagKeys = ['send_nickname', 'send_user_id', 'send_role', 'send_time', 'allow_images', 'read_forward', 'quote_reply', 'at_sender', 'group_memory'];
+var chatNumberFields = {'forward_threshold': 'chat-forward-threshold', 'reply_chunk_size': 'chat-reply-chunk-size', 'reply_interval_ms': 'chat-reply-interval-ms', 'memory_session_gap_minutes': 'chat-memory-gap-minutes', 'memory_recent_messages': 'chat-memory-recent-messages', 'memory_context_chars': 'chat-memory-context-chars'};
 function chatDraft() {
   var values = {};
   chatFlagKeys.forEach(function (key) { values[key] = document.getElementById('chat-' + key).checked; });
@@ -43,7 +44,7 @@ function loadChatSettings() {
   document.querySelectorAll('#chat-form input,#chat-form select,#chat-form textarea').forEach(function (control) { control.disabled = true; });
   document.getElementById('chat-save').disabled = true;
   document.getElementById('chat-note').textContent = '正在读取聊天参数…';
-  return request('/api/console/chat').then(function (values) {
+  return request('/api/console/chat',{onRevision:function(revision){chatRevision=revision;}}).then(function (values) {
     chatFlagKeys.forEach(function (key) { document.getElementById('chat-' + key).checked = Boolean(values[key]); });
     document.getElementById('chat-wake-word').value = values.wake_word || '';
     document.getElementById('chat-wake-only-mode').value = values.wake_only_mode;
@@ -52,7 +53,7 @@ function loadChatSettings() {
     document.getElementById('chat-reply-mode').value = values.reply_mode || 'auto';
     Object.keys(chatNumberFields).forEach(function (key) { document.getElementById(chatNumberFields[key]).value = values[key] == null ? ({forward_threshold:1200, reply_chunk_size:0, reply_interval_ms:350})[key] : values[key]; });
     chatSettingsLoaded = true;
-    document.getElementById('chat-note').textContent = '';
+    document.getElementById('chat-note').textContent = '已读取最新设置 · 修改后请保存';
     renderChatPreview(); refreshSelectControls();
   }).catch(function (error) {
     document.getElementById('chat-note').textContent = error.message || '读取失败，请重新读取。';
@@ -62,10 +63,15 @@ function loadChatSettings() {
     document.getElementById('chat-save').disabled = !chatSettingsLoaded;
   });
 }
-document.getElementById('chat-form').addEventListener('input', renderChatPreview);
-document.getElementById('chat-form').addEventListener('change', renderChatPreview);
+function chatSettingsEdited() {
+  renderChatPreview();
+  if (chatSettingsLoaded && !chatSettingsLoading) document.getElementById('chat-note').textContent = '有未保存的修改 · 保存后对后续消息生效';
+}
+document.getElementById('chat-form').addEventListener('input', chatSettingsEdited);
+document.getElementById('chat-form').addEventListener('change', chatSettingsEdited);
 document.getElementById('chat-reload').addEventListener('click', function () {
-  if (dirtyPages.has('bots')) { toast('请先保存当前修改。'); return; }
+  if (dirtyPages.has('bots')&&!window.confirm('重新读取会放弃当前未保存的聊天设置，继续吗？'))return;
+  markSaved('bots');
   loadChatSettings();
 });
 document.getElementById('chat-form').addEventListener('submit', function (event) {
@@ -80,9 +86,21 @@ document.getElementById('chat-form').addEventListener('submit', function (event)
   }
   document.getElementById('chat-save').disabled = true;
   chatSettingsLoading = true;
-  request('/api/console/chat', {method: 'PUT', body: values}).then(function () {
+  document.getElementById('chat-save').textContent = '正在保存…';
+  document.getElementById('chat-note').textContent = '正在保存聊天设置…';
+  document.getElementById('chat-reload').disabled = true;
+  document.querySelectorAll('#chat-form input,#chat-form select,#chat-form textarea').forEach(function (control) { control.disabled = true; });
+  refreshSelectControls();
+  request('/api/console/chat', {method: 'PUT', headers:chatRevision?{'If-Match':chatRevision}:{},onRevision:function(revision){chatRevision=revision;}, body: values}).then(function () {
     markSaved('bots'); document.getElementById('chat-note').textContent = '已保存，后续聊天立即生效。'; toast('Agent 聊天参数已保存');
   }).catch(function (error) { document.getElementById('chat-note').textContent = error.message; })
-    .finally(function () { chatSettingsLoading = false; document.getElementById('chat-save').disabled = false; });
+    .finally(function () {
+      chatSettingsLoading = false;
+      document.getElementById('chat-save').disabled = false;
+      document.getElementById('chat-save').textContent = '保存聊天设置';
+      document.getElementById('chat-reload').disabled = false;
+      document.querySelectorAll('#chat-form input,#chat-form select,#chat-form textarea').forEach(function (control) { control.disabled = false; });
+      refreshSelectControls();
+    });
 });
 document.querySelectorAll('#chat-form input,#chat-form select,#chat-form textarea').forEach(function (control) { control.disabled = true; });

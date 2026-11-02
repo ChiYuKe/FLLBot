@@ -1,6 +1,9 @@
 var groupTableSelected = new Set(), groupTableVisibleIds = [];
 var groupTableData = new Map(), groupTableProviders = [], groupTablePersonas = [];
 var groupTableLoadId = 0, groupTableBusy = false, groupDetailSaving = false, groupDetailFocus = null;
+var groupAccessRevision = null;
+function groupVersionHeaders(group) { return group && group.revision ? {'If-Match':group.revision} : {}; }
+function groupContextQuery() { return managedBotId?'?self_id='+managedBotId:''; }
 
 function enhanceReplyModes(select) {
   if(selectControls.has(select))return selectControls.get(select);
@@ -87,9 +90,13 @@ function groupTableSelect(id, label, value, options, save) {
 function renderGroupTableRows() {
   var body = document.getElementById('group-table-body'), query = document.getElementById('group-table-search').value.trim().toLowerCase();
   body.textContent = '';
-  var configured = groupDirectory.filter(function (group) { var detail=groupTableData.get(group.group_id); return detail && detail.has_override; });
+  var view=document.getElementById('group-list-view').value;
+  var configured = groupDirectory.filter(function (group) {
+    var detail=groupTableData.get(group.group_id);
+    return detail && (view==='all'||view==='configured'&&detail.has_override||view==='attention'&&detail.needs_attention);
+  });
   var groups = configured.filter(function (group) { return !query || (String(group.group_id) + ' ' + (group.group_name || '')).toLowerCase().includes(query); });
-  document.getElementById('group-table-count').textContent = '共 ' + configured.length + ' 条配置' + (query ? ' · 筛选到 ' + groups.length + ' 个' : '');
+  document.getElementById('group-table-count').textContent = '共 ' + configured.length + ' 个群' + (query ? ' · 筛选到 ' + groups.length + ' 个' : '');
   groupTableVisibleIds=groups.map(function(group){return group.group_id;});
   groups.forEach(function (group) {
     var data = groupTableData.get(group.group_id), title = group.group_name || '未获取群名', label = title + ' ' + group.group_id;
@@ -102,6 +109,8 @@ function renderGroupTableRows() {
     row.appendChild(identity);
     if (!data) { row.appendChild(h('td', {colspan:6, text:'配置暂未读取，请刷新重试'})); body.appendChild(row); return; }
     if (data.denied || !data.allowed) identity.appendChild(h('span', {class:'group-table-warning', title:'受访问范围限制，配置不会绕过白名单或黑名单', text:' · 受限'}));
+    if(data.needs_attention)identity.appendChild(h('span',{class:'group-table-warning',text:' · 需检查',title:(data.effective_policy.diagnostics.checks||[]).filter(function(check){return !check.passed;}).map(function(check){return check.message;}).join('；')||'已授权工具当前不可用'}));
+    if(!data.has_override)identity.appendChild(h('small',{text:'使用默认设置'}));
     var enabled = h('input', {id:'table-' + group.group_id + '-enabled',type:'checkbox', 'aria-label':label + ' 启用'});
     enabled.checked = data.enabled; enabled.disabled = groupTableBusy;
     enabled.addEventListener('change', function () { saveGroupTableField(group.group_id, 'enabled', enabled.checked); });
@@ -115,13 +124,15 @@ function renderGroupTableRows() {
     fields.forEach(function (field) {
       row.appendChild(h('td', {}, groupTableSelect('table-' + group.group_id + '-' + field[0], label + ' ' + field[1], field[2], field[3], function (value) { saveGroupTableField(group.group_id,field[0],value); })));
     });
-    row.appendChild(h('td', {class:'group-row-actions'}, h('button', {type:'button', class:'btn group-edit-button', 'data-edit-group':group.group_id, text:'编辑', onclick:function () { openGroupDetails(group.group_id); }}), h('button',{type:'button',class:'btn group-remove-button',text:'移除',title:'移除配置后恢复默认行为', 'aria-label':label+' 移除配置',onclick:function(){ removeGroupRule(group.group_id); }})));
+    var actions=h('td', {class:'group-row-actions'}, h('button', {type:'button', class:'btn group-edit-button', 'data-edit-group':group.group_id, text:'编辑', onclick:function () { openGroupDetails(group.group_id); }}));
+    if(data.has_override)actions.appendChild(h('button',{type:'button',class:'btn group-remove-button',text:'移除',title:'移除配置后恢复默认行为', 'aria-label':label+' 移除配置',onclick:function(){ removeGroupRule(group.group_id); }}));
+    row.appendChild(actions);
     if (groupTableBusy) row.querySelectorAll('button').forEach(function(button){button.disabled=true;});
     body.appendChild(row);
   });
   document.getElementById('group-table-head').hidden=!configured.length;
   renderGroupRuleChoices();renderGroupBatchToolbar();
-  if (!groups.length) body.appendChild(h('tr', {}, h('td', {colspan:7, class:'group-table-empty', text:query ? '没有匹配的群聊' : '暂无单群配置，各群按默认访问规则和默认行为运行。点击“新增配置”添加。'})));
+  if (!groups.length) body.appendChild(h('tr', {}, h('td', {colspan:7, class:'group-table-empty', text:query ? '没有匹配的群聊' : view==='attention'?'当前没有需要检查的群聊':view==='configured'?'暂无单群配置，各群使用默认行为。':'暂无已发现的群，连接机器人后刷新群列表。'})));
 }
 function loadGroupTable() {
   if (groupTableBusy) return Promise.resolve();
@@ -130,11 +141,14 @@ function loadGroupTable() {
   var batches = [];
   for (var start = 0; start < groupDirectory.length; start += 100) {
     var query = groupDirectory.slice(start,start + 100).map(function (group) { return 'group_ids=' + group.group_id; }).join('&');
-    batches.push(request('/api/console/groups?' + query));
+    batches.push(request('/api/console/groups?' + query+(managedBotId?'&self_id='+managedBotId:'')));
   }
-  return Promise.all([request('/api/llm/providers'),request('/api/personas'),Promise.all(batches),request('/api/console/access')]).then(function (data) {
+  return Promise.all([request('/api/llm/providers'),request('/api/personas'),Promise.all(batches),request('/api/console/access'),request('/api/console/bots')]).then(function (data) {
     if (loadId !== groupTableLoadId || groupTableBusy) return;
     document.getElementById('group-default-access').value=data[3].mode;
+    groupAccessRevision=data[3].revision;
+    fillOptions('group-bot-view',data[4].items,'自动选择机器人','self_id',function(bot){return (bot.nickname||bot.self_id)+(bot.online?' · 在线':' · 离线');});
+    document.getElementById('group-bot-view').value=managedBotId?String(managedBotId):'';
     groupTableProviders = data[0]; groupTablePersonas = data[1]; groupTableData.clear();
     data[2].forEach(function (batch) { batch.items.forEach(function (item) { groupTableData.set(item.group_id,item); }); });
     document.getElementById('group-table-notice').textContent = '';
@@ -161,7 +175,7 @@ function saveGroupTableField(groupId, key, value) {
   document.getElementById('group-table-notice').textContent = '正在保存…';
   document.querySelectorAll('#group-table-body input,#group-table-body select,#group-table-body button').forEach(function (node) { node.disabled = true; });
   document.getElementById('groups-refresh').disabled = true;
-  request('/api/console/groups/' + groupId + (key==='access'?'/access':''), {method:'PATCH',body:key==='access'?{access:value}:payload}).then(function (result) {
+  request('/api/console/groups/' + groupId + (key==='access'?'/access':'')+groupContextQuery(), {method:'PATCH',headers:groupVersionHeaders(original),body:key==='access'?{access:value}:payload}).then(function (result) {
     groupTableData.set(groupId,result);
     document.getElementById('group-table-notice').textContent = '已保存'; loadedPages.delete('readiness');
   }).catch(function (error) { document.getElementById('group-table-notice').textContent = '保存失败：' + error.message; }).finally(function () {
@@ -194,6 +208,8 @@ function closeGroupDetails() {
   if (groupDetailFocus && groupDetailFocus.isConnected) groupDetailFocus.focus();
 }
 document.getElementById('group-table-search').addEventListener('input',renderGroupTableRows);
+document.getElementById('group-list-view').addEventListener('change',renderGroupTableRows);
+document.getElementById('group-bot-view').addEventListener('change',function(){managedBotId=this.value?Number(this.value):null;loadGroupTable();});
 document.getElementById('group-editor-close').addEventListener('click',closeGroupDetails);
 document.getElementById('group-editor-cancel').addEventListener('click',closeGroupDetails);
 document.getElementById('group-editor-modal').addEventListener('keydown',function (event) {
@@ -222,7 +238,7 @@ function changeGroupRule(groupId,method) {
   groupTableBusy=true;++groupTableLoadId;renderGroupTableRows();
   document.getElementById('groups-refresh').disabled=true;
   document.getElementById('group-table-notice').textContent=method==='POST'?'正在新增…':'正在恢复默认行为…';
-  request('/api/console/groups/'+groupId+'/rule',{method:method}).then(function(result){
+  request('/api/console/groups/'+groupId+'/rule'+groupContextQuery(),{method:method,headers:groupVersionHeaders(groupTableData.get(Number(groupId)))}).then(function(result){
     groupTableData.set(Number(groupId),result);
     document.getElementById('group-rule-create').hidden=true;
     document.getElementById('group-table-search').value='';
@@ -246,7 +262,7 @@ document.getElementById('group-default-access').addEventListener('change',functi
   var mode=this.value;groupTableBusy=true;++groupTableLoadId;renderGroupTableRows();
   document.getElementById('groups-refresh').disabled=true;
   document.getElementById('group-table-notice').textContent='正在保存默认访问规则…';
-  request('/api/console/access',{method:'PATCH',body:{mode:mode}}).then(function(){
+  request('/api/console/access',{method:'PATCH',headers:groupAccessRevision?{'If-Match':groupAccessRevision}:{},body:{mode:mode}}).then(function(){
     document.getElementById('group-table-notice').textContent='默认访问规则已保存';
   }).catch(function(error){toast('保存默认访问规则失败：'+error.message);}).finally(function(){
     groupTableBusy=false;document.getElementById('groups-refresh').disabled=false;loadGroupTable();
@@ -254,7 +270,7 @@ document.getElementById('group-default-access').addEventListener('change',functi
 });
 
 function renderGroupBatchToolbar(){
-  groupTableSelected.forEach(function(id){var data=groupTableData.get(id);if(!data||!data.has_override)groupTableSelected.delete(id);});
+  groupTableSelected.forEach(function(id){if(!groupTableData.has(id))groupTableSelected.delete(id);});
   var count=groupTableSelected.size,select=document.getElementById('group-table-select-visible');
   document.getElementById('group-table-batch').hidden=!count;
   document.getElementById('group-batch-hint').hidden=!!count;
@@ -273,7 +289,8 @@ document.querySelectorAll('[data-batch-access]').forEach(function(button){button
   groupTableBusy=true;++groupTableLoadId;renderGroupTableRows();document.getElementById('groups-refresh').disabled=true;
   var ids=Array.from(groupTableSelected);
   document.getElementById('group-table-notice').textContent='正在保存所选 '+ids.length+' 项…';
-  request('/api/console/groups/batch-access',{method:'PATCH',body:{group_ids:ids,access:button.dataset.batchAccess}}).then(function(result){
+  var revisions={};ids.forEach(function(id){revisions[id]=groupTableData.get(id).revision;});
+  request('/api/console/groups/batch-access'+groupContextQuery(),{method:'PATCH',body:{group_ids:ids,access:button.dataset.batchAccess,revisions:revisions}}).then(function(result){
     result.items.forEach(function(item){groupTableData.set(item.group_id,item);});groupTableSelected.clear();
     document.getElementById('group-table-notice').textContent='已更新所选群的访问规则';
   }).catch(function(error){document.getElementById('group-table-notice').textContent=error.message;}).finally(function(){groupTableBusy=false;document.getElementById('groups-refresh').disabled=false;renderGroupTableRows();});

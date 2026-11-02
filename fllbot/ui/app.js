@@ -38,6 +38,9 @@
   var token = params.get('token') || '';
   if (token) {
     try { localStorage.setItem('fllbot_token', token); } catch (e) {}
+    params.delete('token');
+    var cleanQuery = params.toString();
+    history.replaceState(null, '', location.pathname + (cleanQuery ? '?' + cleanQuery : '') + location.hash);
   } else {
     try { token = localStorage.getItem('fllbot_token') || ''; } catch (e) { token = ''; }
   }
@@ -57,14 +60,21 @@
   var busyPlugins = new Set();
   var agentSettingsSchema = [];
   var agentSettingsInitial = {};
+  var agentSettingsRevision = null;
   var settingsPlugin = null;
   var settingsSchema = [];
   var settingsInitial = {};
+  var settingsRevision = null;
   var agentModelInitial = {};
+  var agentModelRevision = null;
   var agentModelLoaded = false;
   var agentModelLoading = false;
   var personaEditingName = '';
+  var personaRevision = null;
+  var personaSaving = false;
   var personaLoadId = 0;
+  var personaCatalog = [];
+  var personaDetailReady = false;
   var modelCatalog = [];
   var modelFallbackWindow = 8192;
   var contextWindowConfigured = false;
@@ -442,7 +452,8 @@
       headers: Object.assign(
         { 'Accept': 'application/json' },
         token ? { 'Authorization': 'Bearer ' + token } : {},
-        options.body ? { 'Content-Type': 'application/json' } : {}
+        options.body ? { 'Content-Type': 'application/json' } : {},
+        options.headers || {}
       ),
       body: options.body ? JSON.stringify(options.body) : undefined
     }).then(function (response) {
@@ -452,7 +463,12 @@
           error.unauthorized = true;
           throw error;
         }
-        if (!response.ok) throw new Error(payload.detail || ('请求失败 (' + response.status + ')'));
+        if (!response.ok) {
+          var failure = new Error(typeof payload.detail === 'string' ? payload.detail : (payload.detail&&payload.detail.message||'请求失败 (' + response.status + ')'));
+          failure.status = response.status;
+          throw failure;
+        }
+        if(options.onRevision)options.onRevision(response.headers.get('ETag'));
         return payload;
       });
     });
@@ -505,7 +521,7 @@
     badge.className = 'tag ' + (llm.available ? 'on' : 'off');
     var details = document.getElementById('ai-details');
     details.textContent = '';
-    [['当前模型', llm.model || '尚未配置'], ['当前人格', llm.persona || '默认'], ['累计请求', (llm.requests || 0) + ' 次'], ['最近响应', llm.requests ? (llm.last_latency_ms || 0) + ' ms' : '等待首次请求'], ['消息分发', (stats.handled || 0) + ' 次 · 异常 ' + (stats.errors || 0)]].forEach(function (row) {
+    [['当前模型', llm.model || '尚未配置'], ['当前人格', llm.persona || '未设置（兜底提示词）'], ['本次运行请求', (llm.requests || 0) + ' 次'], ['最近响应', llm.requests ? (llm.last_latency_ms || 0) + ' ms' : '等待首次请求'], ['消息分发', (stats.handled || 0) + ' 次 · 异常 ' + (stats.errors || 0)]].forEach(function (row) {
       details.appendChild(h('div', {}, h('dt', { text: row[0] }), h('dd', { text: row[1] })));
     });
   }
@@ -514,7 +530,7 @@
     var list = document.getElementById('plugins');
     list.textContent = '';
     var enabled = plugins.filter(function (item) { return item.enabled; }).length;
-    document.getElementById('plugin-summary').textContent = plugins.length + ' 个，已启用 ' + enabled + ' 个';
+    document.getElementById('plugin-summary').textContent = plugins.length + ' 个，实例默认开启 ' + enabled + ' 个';
     var query = document.getElementById('plugin-search').value.trim().toLowerCase();
     var filtered = plugins.filter(function (plugin) {
       return (pluginFilter === 'all' || Boolean(plugin.enabled) === (pluginFilter === 'enabled')) &&
@@ -536,9 +552,11 @@
           toggle.disabled = true;
           request('/api/plugins/' + encodeURIComponent(plugin.name) + '/enabled', {
             method: 'POST',
+            headers:plugin.revision?{'If-Match':plugin.revision}:{},
             body: { enabled: !plugin.enabled }
-          }).then(function () {
-            plugin.enabled = !plugin.enabled;
+          }).then(function (data) {
+            plugin.enabled = data.effective.enabled;
+            plugin.revision = data.revision;
             return refresh();
           }).catch(function (error) {
             showBanner(error.message);
@@ -551,10 +569,11 @@
         h('div', { class: 'plugin-main' },
           h('div', { class: 'plugin-title' },
             h('strong', { text: plugin.name }),
-            h('span', { class: 'tag ' + (plugin.enabled ? 'on' : 'off'), text: plugin.enabled ? '已启用' : '已停用' }),
+            h('span', { class: 'tag ' + (plugin.enabled ? 'on' : 'off'), text: plugin.enabled ? '已启用' : plugin.global_state===false?'全局停用':'默认关闭' }),
             plugin.builtin ? h('em', { class: 'tag', text: '内置' }) : null
           ),
           h('p', { class: 'plugin-desc', text: 'v' + (plugin.version || '?') + ' · ' + (plugin.description || '无说明') }),
+          plugin.global_state===false?h('p',{class:'settings-note',text:'全局停用阻止各群的新处理和后续任务调度；群覆盖及数据保留，重新启用后恢复。'}):!plugin.enabled?h('p',{class:'settings-note',text:'插件声明默认关闭；已单独开启的群仍可使用。明确全局停用后，所有群均受限制。'}):null,
           h('div', { class: 'plugin-meta' },
             h('span', { text: plugin.name === 'agent' ? '独立配置页' : (plugin.settings || []).length + ' 项配置' }),
             h('span', { text: (plugin.handlers || []).length + ' 个处理器' }),
@@ -737,8 +756,8 @@
   function renderPluginSettings(data, formId) {
     var schema = Array.isArray(data.schema) ? data.schema : (formId ? agentSettingsSchema : settingsSchema);
     var initial = Object.assign({}, data.values || {});
-    if (formId) { agentSettingsSchema = schema; agentSettingsInitial = initial; }
-    else { settingsSchema = schema; settingsInitial = initial; }
+    if (formId) { agentSettingsSchema = schema; agentSettingsInitial = initial; agentSettingsRevision = data.revision; }
+    else { settingsSchema = schema; settingsInitial = initial; settingsRevision = data.revision; }
     var groupId = data.group_id;
     var form = document.getElementById(formId || 'settings-form');
     form.textContent = '';
@@ -803,7 +822,7 @@
     var source = document.createElement('div');
     while (form.firstChild) source.appendChild(form.firstChild);
     var groups = [
-      { title: '群聊响应', description: '控制智能体何时处理本群消息。', keys: ['auto_group', 'trigger_mode', 'trigger_prefix', 'cooldown_seconds'] },
+      { title: '群聊响应', description: '控制智能体何时处理本群消息。', keys: ['auto_group', 'trigger_mode', 'trigger_prefix', 'auto_reply_probability', 'cooldown_seconds'] },
       { title: '工具', description: '选择模型可以调用的工具。工具由插件提供，执行时仍检查插件开关与用户权限。', keys: ['allowed_tools', 'max_tool_rounds'] }
     ];
     var fields = {};
@@ -854,6 +873,7 @@
   }
 
   function renderAgentModel(data) {
+    agentModelRevision=data.revision||null;
     var root = data && data.config;
     var llm = (root && root.llm) || (data && data.llm) || (root && root.config && root.config.llm);
     if (!llm || typeof llm !== 'object') throw new Error('配置接口没有返回 llm 模型设置');
@@ -866,7 +886,7 @@
       context_mode: llm.context_mode || 'custom',
       max_tokens: Number(llm.max_tokens || 800),
       temperature: Number(llm.temperature == null ? 0.8 : llm.temperature),
-      persona: String(llm.persona || 'fllbot'),
+      persona: String(llm.persona || ''),
       system_extra: String(llm.system_extra || '')
     };
     document.getElementById('agent-llm-enabled').checked = agentModelInitial.enabled;
@@ -880,29 +900,72 @@
     modelSelect.appendChild(h('option', { value: agentModelInitial.model, text: (agentModelInitial.model || '尚未选择模型') + '（等待获取）' }));
     syncModelPicker();
     document.getElementById('agent-max-tokens').value = agentModelInitial.max_tokens;
-    contextWindowConfigured = agentModelInitial.context_mode === 'custom' && agentModelInitial.context_window > 0;
+    contextWindowConfigured = agentModelInitial.context_window > 0;
     document.getElementById('agent-context-window').value = agentModelInitial.context_window || modelFallbackWindow;
     document.getElementById('agent-temperature').value = agentModelInitial.temperature;
     document.getElementById('agent-system-extra').value = agentModelInitial.system_extra;
     document.getElementById('model-manual').value = agentModelInitial.model;
   }
 
+  function renderPersonaList() {
+    var query = document.getElementById('persona-search').value.trim().toLowerCase();
+    var selected = document.getElementById('agent-persona').value;
+    var items = personaCatalog.filter(function (item) { return !query || [item.name, item.title, item.description].join(' ').toLowerCase().includes(query); });
+    var list = document.getElementById('persona-list'); list.textContent = '';
+    document.getElementById('persona-count').textContent = '共 ' + personaCatalog.length + ' 个 · 显示 ' + items.length + ' 个';
+    items.forEach(function (item) {
+      var current = item.name === selected;
+      var isDefault = Boolean(agentModelInitial.persona) && item.name === agentModelInitial.persona;
+      list.appendChild(h('button', {type:'button', class:'persona-list-item' + (current ? ' active' : ''), 'aria-pressed':String(current), onclick:function () {
+        if (current || personaSaving) return;
+        if (dirtyPages.has('personas') && !window.confirm('当前人格有未保存的修改，放弃修改并查看其他人格？')) return;
+        markSaved('personas'); document.getElementById('agent-persona').value = item.name;
+        renderPersonaList(); loadPersonaDetail(item.name);
+      }}, h('span', {class:'persona-list-title'}, h('strong', {text:item.title || item.name}), isDefault ? h('span', {class:'tag', text:'默认'}) : null),
+      h('small', {text:item.name}),
+      h('small', {class:'persona-summary', text:item.description || '暂无简介，点击查看完整提示词', title:item.description || ''})));
+    });
+    if (!items.length) list.appendChild(h('div', {class:'empty', text:query ? '没有匹配的人格' : '还没有人格 · 点击右上角“新建人格”创建'}));
+  }
+  function personaEditorEnabled(ready) {
+    personaDetailReady = ready;
+    ['agent-persona-name','agent-persona-title','agent-persona-description','agent-persona-content','agent-persona-save'].forEach(function (id) { document.getElementById(id).disabled = !ready; });
+    document.getElementById('persona-default-save').disabled = !ready || !document.getElementById('agent-persona').value;
+    document.getElementById('agent-persona-delete').disabled = !ready || !personaEditingName;
+  }
+  function clearPersonaEditor() {
+    personaLoadId += 1;
+    personaEditingName = '';
+    personaRevision = null;
+    loadResourceReferences(document.getElementById('persona-references'),'persona','');
+    document.getElementById('persona-editor-heading').textContent = '尚未创建人格';
+    document.getElementById('agent-persona-name').readOnly = false;
+    document.getElementById('agent-persona-name').value = '';
+    document.getElementById('agent-persona-title').value = '';
+    document.getElementById('agent-persona-description').value = '';
+    document.getElementById('agent-persona-content').value = '';
+    document.getElementById('agent-persona-error').textContent = '人格库为空：机器人会使用一段精简的兜底提示词。点击“新建人格”创建属于你的第一个人格。';
+    personaEditorEnabled(false);
+  }
+  document.getElementById('persona-search').addEventListener('input', renderPersonaList);
   function loadPersonaDetail(name) {
     if (!name) return Promise.resolve();
     var requestId = ++personaLoadId;
+    personaEditorEnabled(false);
     document.getElementById('agent-persona-error').textContent = '正在读取人格…';
     return request('/api/personas/' + encodeURIComponent(name)).then(function (persona) {
       if (requestId !== personaLoadId) return;
-      personaEditingName = persona.editable ? persona.name : '';
+      document.getElementById('persona-editor-heading').textContent = persona.title || persona.name;
+      personaEditingName = persona.name;
+      personaRevision = persona.revision;
       document.getElementById('agent-persona-name').value = persona.name || '';
-      document.getElementById('agent-persona-name').readOnly = Boolean(persona.editable);
+      document.getElementById('agent-persona-name').readOnly = true;
       document.getElementById('agent-persona-title').value = persona.title || '';
       document.getElementById('agent-persona-description').value = persona.description || '';
       document.getElementById('agent-persona-content').value = persona.content || '';
-      document.getElementById('agent-persona-delete').disabled = !persona.editable || persona.name === agentModelInitial.persona;
-      document.getElementById('agent-persona-error').textContent = persona.editable
-        ? '正在编辑自定义人格。'
-        : '这是内置人格；修改人格标识后保存，可另存为自定义人格。';
+      document.getElementById('agent-persona-error').textContent = '修改后点击“保存人格”生效；引用此人格的机器人和群会共享修改。发生冲突时保留当前草稿。';
+      personaEditorEnabled(true);
+      loadResourceReferences(document.getElementById('persona-references'),'persona',name).catch(function(){});
     }).catch(function (problem) {
       if (requestId === personaLoadId) document.getElementById('agent-persona-error').textContent = problem.message || '读取人格失败';
     });
@@ -910,16 +973,20 @@
 
   function loadPersonaCatalog(selectedName) {
     return request('/api/personas').then(function (personas) {
+      personaCatalog = Array.isArray(personas) ? personas : [];
       var select = document.getElementById('agent-persona');
       select.textContent = '';
-      (Array.isArray(personas) ? personas : []).forEach(function (persona) {
+      personaCatalog.forEach(function (persona) {
         select.appendChild(h('option', { value: persona.name, text: (persona.title || persona.name) + ' · ' + persona.name }));
       });
-      if (selectedName && !Array.from(select.options).some(function (option) { return option.value === selectedName; })) {
-        select.appendChild(h('option', { value: selectedName, text: selectedName + '（未找到，将回退默认人格）' }));
-      }
       if (selectedName) select.value = selectedName;
       if (!select.value && select.options.length) select.selectedIndex = 0;
+      renderPersonaList();
+      if (!personaCatalog.length) { clearPersonaEditor(); return; }
+      var missingDefault = Boolean(selectedName) && !personaCatalog.some(function (item) { return item.name === selectedName; });
+      document.getElementById('persona-default-note').textContent = missingDefault
+        ? '默认人格“' + selectedName + '”已不存在，请重新选择并点击“设为默认人格”。'
+        : '';
       return loadPersonaDetail(select.value);
     }).catch(function (problem) {
       document.getElementById('agent-persona-error').textContent = problem.message || '读取人格列表失败';
@@ -927,11 +994,28 @@
   }
 
   document.getElementById('agent-persona').addEventListener('change', function () {
+    if (personaSaving) return;
     loadPersonaDetail(this.value);
   });
+  document.getElementById('agent-persona-reload').addEventListener('click', function () {
+    if (personaSaving) return;
+    if (dirtyPages.has('personas') && !window.confirm('重新读取会放弃当前未保存的人格草稿，请先复制需要保留的内容。继续吗？')) return;
+    markSaved('personas');
+    personaLoadId += 1;
+    loadPersonaCatalog(personaEditingName || agentModelInitial.persona);
+  });
   document.getElementById('agent-persona-new').addEventListener('click', function () {
+    if (personaSaving) return;
+    if (dirtyPages.has('personas') && !window.confirm('放弃当前未保存的修改并新建人格？')) return;
+    markSaved('personas');
+    document.getElementById('agent-persona').value = '';
+    document.getElementById('persona-editor-heading').textContent = '新建人格';
+    renderPersonaList();
     personaLoadId += 1;
     personaEditingName = '';
+    personaRevision = null;
+    loadResourceReferences(document.getElementById('persona-references'),'persona','');
+    personaEditorEnabled(true);
     document.getElementById('agent-persona-name').readOnly = false;
     document.getElementById('agent-persona-name').value = '';
     document.getElementById('agent-persona-title').value = '';
@@ -942,6 +1026,7 @@
     document.getElementById('agent-persona-name').focus();
   });
   document.getElementById('agent-persona-save').addEventListener('click', function () {
+    if (!personaDetailReady || personaSaving) return;
     var name = document.getElementById('agent-persona-name').value.trim();
     var payload = {
       title: document.getElementById('agent-persona-title').value.trim(),
@@ -964,8 +1049,9 @@
     var selectedDefault = document.getElementById('agent-persona').value;
     var creating = !personaEditingName;
     button.disabled = true;
+    personaSaving = true; personaEditorEnabled(false);
     document.getElementById('agent-persona-error').textContent = '正在保存人格…';
-    request('/api/personas/' + encodeURIComponent(name), { method: 'PUT', body: payload })
+    request('/api/personas/' + encodeURIComponent(name), { method: 'PUT', headers: creating ? {'If-None-Match':'*'} : {'If-Match':personaRevision}, body: payload })
       .then(function () {
         return loadPersonaCatalog(creating ? name : selectedDefault);
       })
@@ -973,18 +1059,33 @@
         ? '人格已保存并选中；点击“设为默认人格”后生效。'
         : '人格已保存。'; })
       .catch(function (problem) { document.getElementById('agent-persona-error').textContent = problem.message || '保存人格失败'; })
-      .finally(function () { button.disabled = false; });
+      .finally(function () { personaSaving = false; personaEditorEnabled(true); button.disabled = false; });
   });
   document.getElementById('agent-persona-delete').addEventListener('click', function () {
     var name = personaEditingName;
-    if (!name || name === agentModelInitial.persona) return;
-    if (!window.confirm('确定删除人格“' + name + '”？此操作不可撤销。')) return;
+    if (!name || personaSaving) return;
+    var revision = personaRevision;
+    var removingDefault = name === agentModelInitial.persona;
     var button = this;
     button.disabled = true;
-    request('/api/personas/' + encodeURIComponent(name), { method: 'DELETE' })
-      .then(function () { return loadPersonaCatalog(agentModelInitial.persona); })
+    loadResourceReferences(document.getElementById('persona-references'),'persona',name).then(function(references){
+      if(!references||personaEditingName!==name)return null;
+      if(references.items.some(function(item){return item.scope!=='system';})){
+        document.getElementById('persona-references').parentElement.open=true;
+        throw new Error('人格仍被机器人或群配置引用，请先到上方引用位置更换人格。');
+      }
+      if (!window.confirm('确定删除人格“' + name + '”？' + (removingDefault ? '它当前是默认人格，删除后将改用兜底提示词。' : '') + '此操作不可撤销。'))return null;
+      return request('/api/personas/' + encodeURIComponent(name), { method: 'DELETE', headers:{'If-Match':revision} });
+    })
+      .then(function (data) {
+        if(!data)return;
+        if (removingDefault) agentModelInitial.persona = '';
+        if (data && typeof data.default === 'string') agentModelInitial.persona = data.default;
+        document.getElementById('persona-default-note').textContent = removingDefault ? '默认人格已删除，当前使用兜底提示词。' : '';
+        return loadPersonaCatalog(agentModelInitial.persona);
+      })
       .catch(function (problem) { document.getElementById('agent-persona-error').textContent = problem.message || '删除人格失败'; })
-      .finally(function () { button.disabled = !personaEditingName || personaEditingName === agentModelInitial.persona; });
+      .finally(function () { button.disabled = !personaEditingName; });
   });
 
   function loadAgentModel() {
@@ -1028,8 +1129,8 @@
       enabled: document.getElementById('agent-llm-enabled').checked,
       base_url: document.getElementById('agent-base-url').value.trim(),
       model: document.getElementById('agent-model').value.trim(),
-      context_mode: contextWindowConfigured ? 'custom' : 'model',
-      context_window: Number(document.getElementById('agent-context-window').value),
+      context_mode: agentModelInitial.context_mode,
+      context_window: contextWindowConfigured ? Number(document.getElementById('agent-context-window').value) : null,
       max_tokens: Number(document.getElementById('agent-max-tokens').value),
       temperature: Number(document.getElementById('agent-temperature').value),
       persona: agentModelInitial.persona,
@@ -1049,11 +1150,11 @@
       document.getElementById('agent-model-error').textContent = '请先选择模型，或点击“手动填写”输入模型名称。';
       return;
     }
-    if (!Number.isInteger(current.max_tokens) || current.max_tokens < 1 || current.max_tokens > 32768) {
+    if (!Number.isInteger(current.max_tokens) || current.max_tokens < 1 || current.max_tokens > 1000000) {
       document.getElementById('agent-model-error').textContent = '最大回复 Token 必须是正整数。';
       return;
     }
-    if (!Number.isInteger(current.context_window) || current.context_window < 1 || current.context_window > 10000000) {
+    if (current.context_window !== null && (!Number.isInteger(current.context_window) || current.context_window < 1 || current.context_window > 10000000)) {
       document.getElementById('agent-model-error').textContent = '上下文长度必须是 1 到 10,000,000 之间的正整数。';
       return;
     }
@@ -1065,7 +1166,7 @@
     var save = document.getElementById('agent-model-save');
     save.disabled = true;
     document.getElementById('agent-model-error').textContent = '正在保存…';
-    request('/api/config', { method: 'PATCH', body: { llm: values } })
+    request('/api/config', { method: 'PATCH', headers:agentModelRevision?{'If-Match':agentModelRevision}:{}, body: { llm: values } })
       .then(function () { markSaved('models'); return loadAgentModel(); })
       .then(function () { toast('模型设置已保存'); return refresh(); })
       .catch(function (problem) { document.getElementById('agent-model-error').textContent = problem.message || '保存模型配置失败'; })
@@ -1077,10 +1178,12 @@
     var groupId;
     try { groupId = agentGroupId(); }
     catch (problem) { error.textContent = problem.message; return; }
+    agentSettingsRevision=null;
     error.textContent = '正在读取配置…';
     var suffix = groupId === null ? '' : '?group_id=' + encodeURIComponent(groupId);
     request('/api/plugins/agent/settings' + suffix)
       .then(function (data) {
+        if(agentGroupId()!==groupId)return;
         error.textContent = '';
         renderAgentSettings(data);
         loadedPages.add('agent');
@@ -1092,6 +1195,7 @@
   document.getElementById('agent-settings-group').addEventListener('change', loadAgentSettings);
   document.getElementById('agent-settings-reload').addEventListener('click', loadAgentSettings);
   document.getElementById('agent-settings-save').addEventListener('click', function () {
+    if(!agentSettingsRevision){document.getElementById('agent-settings-error').textContent='请先成功读取当前作用域的配置后再保存。';return;}
     var values = {};
     document.querySelectorAll('#agent-settings-form [data-key]').forEach(function (control) {
       if (control.disabled) return;
@@ -1115,14 +1219,15 @@
     var save = document.getElementById('agent-settings-save');
     save.disabled = true;
     document.getElementById('agent-settings-error').textContent = '正在保存…';
-    request('/api/plugins/agent/settings', { method: 'PATCH', body: body })
+    var agentLockedControls=Array.from(document.querySelectorAll('#agent-settings-form [data-key],#agent-settings-group,#agent-settings-reload')).map(function(control){var state=control.disabled;control.disabled=true;return [control,state];});
+    request('/api/plugins/agent/settings', { method: 'PATCH', headers:agentSettingsRevision?{'If-Match':agentSettingsRevision}:{}, body: body })
       .then(function (data) {
         document.getElementById('agent-settings-error').textContent = '';
         renderAgentSettings(data);
         return refresh();
       })
       .catch(function (problem) { document.getElementById('agent-settings-error').textContent = problem.message || '保存失败'; })
-      .finally(function () { save.disabled = false; });
+      .finally(function () { agentLockedControls.forEach(function(pair){if(pair[0].isConnected)pair[0].disabled=pair[1];});save.disabled = false; });
   });
 
   function loadPluginSettings() {
@@ -1132,11 +1237,12 @@
     var groupId;
     try { groupId = settingsGroupId(); }
     catch (problem) { error.textContent = problem.message; return; }
+    settingsRevision=null;
     error.textContent = '正在读取配置…';
     var suffix = groupId === null ? '' : '?group_id=' + encodeURIComponent(groupId);
     request('/api/plugins/' + encodeURIComponent(plugin.name) + '/settings' + suffix)
       .then(function (data) {
-        if (settingsPlugin !== plugin) return;
+        if (settingsPlugin !== plugin || settingsGroupId() !== groupId) return;
         error.textContent = '';
         renderPluginSettings(data);
       })
@@ -1174,6 +1280,8 @@
   });
   document.getElementById('settings-save').addEventListener('click', function () {
     if (!settingsPlugin) return;
+    if(!settingsRevision){document.getElementById('settings-error').textContent='请先成功读取当前作用域的配置后再保存。';return;}
+    var savingPlugin=settingsPlugin;
     var values = {};
     var controls = document.querySelectorAll('#settings-form [data-key]');
     controls.forEach(function (control) {
@@ -1198,14 +1306,16 @@
     var save = document.getElementById('settings-save');
     save.disabled = true;
     document.getElementById('settings-error').textContent = '正在保存…';
-    request('/api/plugins/' + encodeURIComponent(settingsPlugin.name) + '/settings', { method: 'PATCH', body: body })
+    var settingsLockedControls=Array.from(document.querySelectorAll('#settings-form [data-key],#settings-group')).map(function(control){var state=control.disabled;control.disabled=true;return [control,state];});
+    request('/api/plugins/' + encodeURIComponent(savingPlugin.name) + '/settings', { method: 'PATCH', headers:settingsRevision?{'If-Match':settingsRevision}:{}, body: body })
       .then(function (data) {
-        if (settingsPlugin) renderPluginSettings(data);
+        if(settingsPlugin!==savingPlugin)return;
+        renderPluginSettings(data);
         closePluginSettings();
         return refresh();
       })
-      .catch(function (problem) { document.getElementById('settings-error').textContent = problem.message || '保存失败'; })
-      .finally(function () { save.disabled = false; });
+      .catch(function (problem) { if(settingsPlugin===savingPlugin)document.getElementById('settings-error').textContent = problem.message || '保存失败'; })
+      .finally(function () { settingsLockedControls.forEach(function(pair){if(pair[0].isConnected)pair[0].disabled=pair[1];});save.disabled = false; });
   });
 
   var readmeTrigger = null;
@@ -1233,6 +1343,43 @@
       .catch(function (error) { if (requestId === readmeRequest) body.textContent = error.message || '读取 README 失败'; });
   }
 
+  document.getElementById('persona-vars-help').addEventListener('click', function () {
+    readmeTrigger = document.activeElement;
+    readmeRequest += 1;
+    var backdrop = document.getElementById('readme');
+    var body = document.getElementById('readme-body');
+    document.querySelector('#readme .eyebrow').textContent = '人格提示词说明';
+    document.getElementById('readme-title').textContent = '可用变量';
+    document.getElementById('readme-sub').textContent = '在提示词里写入变量，发送给模型前会替换成实际内容。';
+    body.textContent = '正在读取变量说明…';
+    backdrop.classList.add('open');
+    document.getElementById('readme-close').focus();
+    request('/api/personas/variables').then(function (items) {
+      var rows = (Array.isArray(items) ? items : []).map(function (item) {
+        return '| `{' + item.name + '}` | ' + (item.description || '') + ' | `' + (item.example || '') + '` |';
+      }).join('\n');
+      body.innerHTML = renderMarkdown([
+        '把变量写进人格提示词即可，例如：',
+        '',
+        '```',
+        '你叫 {bot_name}，正在和 {user_name} 聊天。现在是 {date} {time}。',
+        '```',
+        '',
+        '| 变量 | 说明 | 示例 |',
+        '| --- | --- | --- |',
+        rows,
+        '',
+        '未知的占位符会原样保留，不会被替换或报错。',
+        '',
+        '昵称、QQ 号、消息时间等变量受「Agent → 聊天设置 → 发送给模型」中的信息开关控制；关闭对应开关后，变量会替换为空字符串。',
+        '',
+        '没有设置默认人格时，机器人使用一段精简的兜底提示词；它不会出现在人格库中，也不能编辑。'
+      ].join('\n'));
+    }).catch(function (error) {
+      body.textContent = error.message || '读取变量说明失败';
+    });
+  });
+
   document.getElementById('readme-close').addEventListener('click', closeReadme);
   document.getElementById('readme').addEventListener('click', function (event) {
     if (event.target === event.currentTarget) closeReadme();
@@ -1259,7 +1406,7 @@
     var filtered = (items || []).filter(function (item) {
       var current = String(item.level || 'INFO').toUpperCase();
       return (level === 'all' || current === level || (level === 'ERROR' && current === 'CRITICAL')) &&
-        ((item.logger || '') + ' ' + (item.message || '')).toLowerCase().includes(query);
+        ((item.logger || '') + ' ' + (item.message || '')+' '+(item.trace_id||'')).toLowerCase().includes(query);
     });
     document.getElementById('log-summary').textContent = logsError ? '日志获取失败 · 下次同步时重试' : (logsPaused ? '已暂停更新' : '自动更新') + ' · 显示 ' + filtered.length + ' / ' + (items || []).length + ' 条';
     logs.textContent = '';
