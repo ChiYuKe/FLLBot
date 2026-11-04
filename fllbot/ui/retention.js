@@ -1,5 +1,5 @@
 var retentionRevision=null,retentionLoaded=false,cleanupPreviewId=null,cleanupPreviewRequest=0,cleanupJobId=sessionStorage.getItem('fllbot-cleanup-job')||null,cleanupPollGeneration=0,cleanupRunCursor=null,cleanupRunRequest=0;
-var cleanupLabels={message_log:'消息记录',chat_messages:'AI 会话记录',group_memory_messages:'群记忆原文',group_memory_summaries:'群记忆摘要',llm_usage:'模型用量',message_traces:'消息诊断',management_changes:'配置变更记录'};
+var cleanupLabels={turn_messages:'轮次输入',reply_deliveries:'候选回复与发送计划',delivery_parts:'分段发送记录',tool_results:'工具结果正文',trigger_decisions:'触发判定',message_events:'接收与排队记录',message_log:'消息记录',chat_messages:'AI 会话记录',group_memory_messages:'群记忆原文',group_memory_summaries:'群记忆摘要',llm_usage:'模型用量',message_traces:'消息诊断',management_changes:'配置变更记录'};
 ['input','change'].forEach(function(type){document.getElementById('retention-form').addEventListener(type,function(){dirtyPages.add('retention');updateDirtyState();});});
 function loadRetention(force){
   loadCleanupRuns(false);if(cleanupJobId)pollCleanupJob(cleanupJobId,++cleanupPollGeneration);
@@ -34,7 +34,7 @@ document.getElementById('cleanup-scope-form').addEventListener('submit',function
     [['cleanup-scene-id','scene_id'],['cleanup-bot','self_id']].forEach(function(pair){var value=document.getElementById(pair[0]).value.trim();if(value){if(!/^\d+$/.test(value)||!Number.isSafeInteger(Number(value))||Number(value)<=0)throw new Error('会话号和 Bot QQ 必须是正整数');values[pair[1]]=Number(value);}});
     var scene=document.getElementById('cleanup-scene').value;if(scene)values.scene=scene;
     if(values.scene_id&&!scene)throw new Error('指定会话号时请选择群聊或私聊');
-    if(values.self_id&&values.datasets.some(function(key){return !['messages','traces'].includes(key);}))throw new Error('指定 Bot 时只能选择消息记录和消息诊断');
+    if(values.self_id&&values.datasets.some(function(key){return !['messages','conversations','traces'].includes(key);}))throw new Error('指定 Bot 时只能选择消息、会话或诊断');
   }catch(error){note.textContent=error.message;return;}
   note.textContent='正在只读预览，不删除数据…';
   request('/api/console/data-cleanup/preview',{method:'POST',body:values}).then(function(data){

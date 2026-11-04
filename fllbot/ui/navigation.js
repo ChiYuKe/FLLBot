@@ -77,7 +77,7 @@ function navigate(view) {
   if (view === 'playground') loadTestOptions();
   if (view === 'history') loadHistory();
   if (view === 'usage') loadUsage();
-  if (view === 'traces') loadTraces();
+  if (view === 'traces') { loadTraces(); loadTurns(false); }
   if (view === 'services') loadServiceHealth();
   if (view === 'maintenance') loadBackups();
   if (view === 'retention') loadRetention();

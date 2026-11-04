@@ -1,3 +1,4 @@
+var accountActive=true;
 var accountRequest=0,accountRevision=null,accountEditingId='',accountPreferredId='',accountSaving=false,accountSyncing=false,accountReady=false;
 function showAccountDefaults(selfId){
   if(accountSaving||accountSyncing){toast('账号默认值正在保存，请稍后再切换。');return;}
@@ -8,6 +9,7 @@ function showAccountDefaults(selfId){
   accountPreferredId=String(selfId);navigate('accounts');
 }
 function accountEditorEnabled(enabled){
+  document.getElementById('account-state-toggle').disabled=!enabled;
   document.querySelectorAll('#account-form input,#account-form select,#account-form button').forEach(function(control){control.disabled=!enabled;});
 }
 function fillAccountChoices(id,items,current,inherit){
@@ -22,6 +24,9 @@ function loadAccountDetail(selfId){
   document.getElementById('account-note').textContent='正在读取账号默认设置…';
   return request('/api/console/bots/'+encodeURIComponent(selfId)+'/defaults').then(function(data){
     if(id!==accountRequest||document.getElementById('account-id').value!==String(data.self_id))return;
+    accountActive=data.enabled!==false;
+    document.getElementById('account-state-label').textContent=accountActive?'聊天已启用':'聊天已停用';
+    document.getElementById('account-state-toggle').textContent=accountActive?'停用聊天':'启用聊天';
     accountEditingId=String(data.self_id);accountRevision=data.revision;accountReady=true;
     document.getElementById('account-reply-mode').value=data.defaults.reply_mode;
     document.getElementById('account-wake-word').value=data.defaults.wake_word;
@@ -63,4 +68,20 @@ document.getElementById('account-form').addEventListener('submit',function(event
   request('/api/console/bots/'+encodeURIComponent(selfId)+'/defaults',{method:'PUT',headers:{'If-Match':accountRevision},body:values}).then(function(data){
     accountRevision=data.revision;document.getElementById('account-wake-word').value=data.defaults.wake_word;markSaved('accounts');document.getElementById('account-note').textContent='账号默认值已保存；群单独配置仍优先。未发送测试消息。';toast('账号默认值已保存');
   }).catch(function(error){document.getElementById('account-note').textContent=error.message;}).finally(function(){accountSaving=false;accountEditorEnabled(accountReady);['account-id','accounts-reload','accounts-sync'].forEach(function(id){document.getElementById(id).disabled=false;});});
+});
+
+document.getElementById('account-state-toggle').addEventListener('click',function(){
+  if(accountSaving||accountSyncing||!accountReady||!accountRevision)return;
+  var selfId=accountEditingId,enabled=!accountActive;
+  accountSaving=true;accountEditorEnabled(false);
+  ['account-id','accounts-reload','accounts-sync'].forEach(function(id){document.getElementById(id).disabled=true;});
+  request('/api/console/bots/'+encodeURIComponent(selfId)+'/state',{method:'PUT',headers:{'If-Match':accountRevision},body:{enabled:enabled}}).then(function(data){
+    accountRevision=data.revision;accountActive=data.enabled;
+    document.getElementById('account-state-label').textContent=accountActive?'聊天已启用':'聊天已停用';
+    document.getElementById('account-state-toggle').textContent=accountActive?'停用聊天':'启用聊天';
+    document.getElementById('account-note').textContent=accountActive?'账号聊天已启用；旧任务不会恢复。':'账号聊天已停用；已执行动作保留记录。';
+  }).catch(function(error){document.getElementById('account-note').textContent=error.message;}).finally(function(){
+    accountSaving=false;accountEditorEnabled(accountReady);
+    ['account-id','accounts-reload','accounts-sync'].forEach(function(id){document.getElementById(id).disabled=false;});
+  });
 });

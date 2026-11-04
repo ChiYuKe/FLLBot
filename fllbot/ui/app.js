@@ -823,7 +823,7 @@
     while (form.firstChild) source.appendChild(form.firstChild);
     var groups = [
       { title: '群聊响应', description: '控制智能体何时处理本群消息。', keys: ['auto_group', 'trigger_mode', 'trigger_prefix', 'auto_reply_probability', 'cooldown_seconds'] },
-      { title: '工具', description: '选择模型可以调用的工具。工具由插件提供，执行时仍检查插件开关与用户权限。', keys: ['allowed_tools', 'max_tool_rounds'] }
+      { title: '工具', description: '选择模型可以调用的工具。工具由插件提供，执行时仍检查插件开关与用户权限。', keys: ['allowed_tools'] }
     ];
     var fields = {};
     while (source.firstChild) {
@@ -884,7 +884,7 @@
       model: String(llm.model || ''),
       context_window: Number(llm.context_window || 0),
       context_mode: llm.context_mode || 'custom',
-      max_tokens: Number(llm.max_tokens || 800),
+      max_tokens: Number(llm.max_tokens || 4000),
       temperature: Number(llm.temperature == null ? 0.8 : llm.temperature),
       persona: String(llm.persona || ''),
       system_extra: String(llm.system_extra || '')

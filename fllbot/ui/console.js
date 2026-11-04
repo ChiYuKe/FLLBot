@@ -28,7 +28,7 @@ function loadSetupGuide(force) {
     var node=document.getElementById('setup-guide-steps');node.textContent='';
     data.steps.forEach(function(step){node.appendChild(h('button',{type:'button',class:'check-item',onclick:function(){
       navigate(step.target);
-      if(step.target==='groups'&&data.group_id)loadGroupDirectory().then(function(){document.getElementById('group-list-view').value='all';document.getElementById('group-table-search').value=String(data.group_id);loadGroupTable();});
+      if(step.target==='groups'&&data.group_id)loadGroupDirectory().then(function(){document.getElementById('group-table-search').value=String(data.group_id);loadGroupTable();});
     }},h('span',{class:'check-dot'+(step.done?'':' pending'),text:step.done?'✓':step.optional?'选填':'↗'}),h('strong',{text:step.title}),h('small',{text:step.detail})));});
     document.getElementById('setup-guide-verification').textContent=data.verification.title+'：'+data.verification.detail;
     note.textContent=data.note;refreshSelectControls();
@@ -310,7 +310,6 @@ function loadResourceReferences(node,kind,name) {
         if(item.scope==='bot'){showAccountDefaults(item.object_id);return;}
         navigate(item.target);
         if(item.scope==='group')loadGroupDirectory().then(function(){
-          document.getElementById('group-list-view').value='all';
           document.getElementById('group-table-search').value=String(item.object_id);
           return loadGroupTable();
         }).then(function(){
@@ -373,9 +372,10 @@ function fillOptions(id, items, firstLabel, key, caption) {
   if (Array.from(select.options).some(function (item) { return item.value === value; })) select.value = value;
 }
 function loadTestOptions() {
-  Promise.all([request('/api/llm/providers'), request('/api/personas')]).then(function (data) {
+  Promise.all([request('/api/llm/providers'), request('/api/personas'), request('/api/console/bots')]).then(function (data) {
     fillOptions('test-provider', data[0], '默认路由', 'name', function (item) { return item.name + ' · ' + item.model; });
     fillOptions('test-persona', data[1], '默认人格', 'name', function (item) { return item.title || item.name; });
+    fillOptions('test-account', data[2].items, '独立调试（不读取 QQ 历史）', 'self_id', function(item){return (item.nickname||'Bot')+' · '+item.self_id+(item.enabled===false?' · 已停用':'');});
   }).catch(function (error) { document.getElementById('test-note').textContent = error.message; });
 }
 function bubble(message, role) {
@@ -386,15 +386,20 @@ document.getElementById('test-form').addEventListener('submit', function (event)
   var input = document.getElementById('test-message'); var message = input.value.trim();
   var send = document.getElementById('test-send');
   if (!message || send.disabled) return;
+  var account=Number(document.getElementById('test-account').value||0),scope=document.getElementById('test-scene-id').value.trim();
+  if((scope&&(!/^\d+$/.test(scope)||!Number.isSafeInteger(Number(scope))||Number(scope)<=0))||(account&&!scope)){
+    document.getElementById('test-note').textContent='读取账号历史时请填写群号或私聊 QQ，号码必须是正整数。';return;
+  }
   var node = document.getElementById('test-messages');
   if (node.querySelector('.empty')) node.textContent = '';
   node.appendChild(bubble(message, 'user')); node.scrollTop = node.scrollHeight;
   send.disabled = true; send.textContent = '正在回答…'; document.getElementById('test-clear').disabled = true;
   document.getElementById('test-note').textContent = '等待模型回复…';
-  request('/api/llm/test', { method:'POST', body:{ prompt:message, persona:document.getElementById('test-persona').value || null, provider:document.getElementById('test-provider').value || null } }).then(function (data) {
+  request('/api/llm/chat', { method:'POST', body:{ message:message, self_id:account, scene:document.getElementById('test-scene').value, scene_id:Number(scope||0), include_history:!!account&&document.getElementById('test-use-history').checked, save:false, persona:document.getElementById('test-persona').value || null, provider:document.getElementById('test-provider').value || null } }).then(function (data) {
     node.appendChild(bubble(data.text || '模型返回了空回复。', 'assistant'));
     input.value = '';
-    document.getElementById('test-note').textContent = (data.model || '') + ' · ' + (data.latency_ms || 0) + ' ms · ' + ((data.prompt_tokens || 0) + (data.completion_tokens || 0)) + ' Token';
+    if(data.turn_id)node.appendChild(h('button',{type:'button',class:'btn',text:'查看本次轮次',onclick:function(){navigate('traces');showTurn(data.turn_id);}}));
+    document.getElementById('test-note').textContent = (data.model || '') + ' · ' + (data.latency_ms || 0) + ' ms · ' + (((data.usage||{}).prompt_tokens || 0) + ((data.usage||{}).completion_tokens || 0)) + ' Token';
   }).catch(function (error) { document.getElementById('test-note').textContent = '测试失败：' + error.message + '。输入已保留，可重试。'; }).finally(function () {
     send.disabled = false; send.textContent = '发送测试 ↗'; document.getElementById('test-clear').disabled = false; node.scrollTop = node.scrollHeight;
   });
@@ -408,8 +413,8 @@ function renderRooms() {
   var rooms = historyRooms.filter(function (room) { return String(room.scene_id).includes(query); });
   if (!rooms.length) node.appendChild(h('div', { class:'empty', text:'暂无匹配的会话；机器人产生 AI 对话后会在这里显示。' }));
   rooms.forEach(function (room) {
-    node.appendChild(h('button', { type:'button', class:'room' + (activeRoom && room.scene === activeRoom.scene && room.scene_id === activeRoom.scene_id ? ' active' : ''), onclick:function () { selectRoom(room); } },
-      h('strong', { text:(room.scene === 'group' ? '群聊 ' : '私聊 ') + room.scene_id }),
+    node.appendChild(h('button', { type:'button', class:'room' + (activeRoom && room.scene === activeRoom.scene && (room.self_id||0) === (activeRoom.self_id||0) && room.scene_id === activeRoom.scene_id ? ' active' : ''), onclick:function () { selectRoom(room); } },
+      h('strong', { text:((room.self_id||0)?'Bot '+room.self_id:'legacy / 独立调试')+' · '+(room.scene === 'group' ? '群聊 ' : '私聊 ') + room.scene_id }),
       h('small', { text:room.messages + ' 条 · ' + new Date(room.last_at * 1000).toLocaleString('zh-CN') })));
   });
 }
@@ -422,11 +427,11 @@ function loadHistory() {
 function selectRoom(room) {
   activeRoom = room; renderRooms();
   var requestId = ++historyRequestId;
-  document.getElementById('history-title').textContent = (room.scene === 'group' ? '群聊 ' : '私聊 ') + room.scene_id;
+  document.getElementById('history-title').textContent = ((room.self_id||0)?'Bot '+room.self_id:'legacy / 独立调试')+' · '+(room.scene === 'group' ? '群聊 ' : '私聊 ') + room.scene_id;
   document.getElementById('history-delete').disabled = true;
   document.getElementById('history-messages').textContent = '正在读取…';
   document.getElementById('history-note').textContent = '';
-  request('/api/chat/' + room.scene + '/' + room.scene_id + '?limit=100').then(function (data) {
+  request('/api/chat/' + room.scene + '/' + room.scene_id + '?limit=100&self_id='+(room.self_id||0)).then(function (data) {
     if (requestId !== historyRequestId) return;
     var node = document.getElementById('history-messages'); node.textContent = '';
     data.messages.forEach(function (message) { node.appendChild(bubble(message.content, message.role)); });
@@ -439,7 +444,7 @@ document.getElementById('history-search').addEventListener('input', renderRooms)
 document.getElementById('history-delete').addEventListener('click', function () {
   if (!activeRoom || !window.confirm('清空此会话的全部 AI 上下文？清空后无法恢复。')) return;
   var room = activeRoom; var button = this; button.disabled = true;
-  request('/api/chat/' + room.scene + '/' + room.scene_id, { method:'DELETE' }).then(function () {
+  request('/api/chat/' + room.scene + '/' + room.scene_id+'?self_id='+(room.self_id||0), { method:'DELETE' }).then(function () {
     ++historyRequestId; activeRoom = null;
     document.getElementById('history-title').textContent = '选择一个会话';
     document.getElementById('history-messages').textContent = '会话已清空。'; toast('会话已清空'); return loadHistory();
@@ -589,7 +594,7 @@ function loadManagedGroup() {
   document.getElementById('group-detail-form').hidden=true;
   document.getElementById('group-editor-empty').hidden=false;
   document.getElementById('group-editor-empty').textContent=groupId?'正在读取这个群的设置…':'选择群聊后，在这里调整回复方式。';
-  ['managed-enabled', 'managed-llm', 'managed-persona','policy-mode'].forEach(function (id) { document.getElementById(id).disabled = true; });
+  ['managed-llm', 'managed-persona','policy-mode'].forEach(function (id) { document.getElementById(id).disabled = true; });
   document.getElementById('policy-editor').hidden=true;
   if (!groupId) { document.getElementById('managed-note').textContent = '选择群聊后编辑。'; document.getElementById('policy-effective').textContent='选择群聊后显示。'; return; }
   document.getElementById('managed-note').textContent = '正在读取…';
@@ -599,7 +604,6 @@ function loadManagedGroup() {
     managedRevision=group.revision;
     loadGroupChanges(groupId,requestId);
     fillOptions('managed-persona', data[1], '跟随默认人格', 'name', function (item) { return item.title || item.name; });
-    document.getElementById('managed-enabled').checked = group.enabled;
     document.getElementById('managed-llm').value = group.llm_enabled == null ? 'inherit' : group.llm_enabled ? 'on' : 'off';
     document.getElementById('managed-persona').value = group.persona;
     renderPolicy(group,data[2]);
@@ -608,7 +612,7 @@ function loadManagedGroup() {
     document.getElementById('managed-note').textContent = failedChecks.length
       ? failedChecks[0].message+'；可展开生效详情查看诊断。'
       : '已保存配置就绪；实际回复取决于消息触发与调用结果。';
-    ['managed-enabled', 'managed-llm', 'managed-persona', 'managed-save','policy-mode'].forEach(function (id) { document.getElementById(id).disabled = false; });
+    ['managed-llm', 'managed-persona', 'managed-save','policy-mode'].forEach(function (id) { document.getElementById(id).disabled = false; });
   }).catch(function (error) { if (requestId === managedRequestId) document.getElementById('group-editor-empty').textContent = error.message; });
 }
 document.getElementById('managed-group').addEventListener('change', loadManagedGroup);
@@ -634,7 +638,7 @@ document.getElementById('group-detail-form').addEventListener('submit', function
   try { policy=collectPolicy(); } catch(error) { document.getElementById('managed-note').textContent=error.message; return; }
   button.disabled = true; groupDetailSaving = true; var choice = document.getElementById('managed-llm').value;
   document.getElementById('managed-note').textContent='正在保存…';
-  request('/api/console/groups/' + document.getElementById('managed-group').value+groupContextQuery(), { method:'PATCH', headers:managedRevision?{'If-Match':managedRevision}:{}, body:{ enabled:document.getElementById('managed-enabled').checked, llm_enabled:choice === 'inherit' ? null : choice === 'on', persona:document.getElementById('managed-persona').value,policy:policy } }).then(function () {
+  request('/api/console/groups/' + document.getElementById('managed-group').value+groupContextQuery(), { method:'PATCH', headers:managedRevision?{'If-Match':managedRevision}:{}, body:{ enabled:true, llm_enabled:choice === 'inherit' ? null : choice === 'on', persona:document.getElementById('managed-persona').value,policy:policy } }).then(function () {
     groupDetailSaving = false; toast('这个群的设置已保存'); closeGroupDetails();loadGroupTable();loadedPages.delete('readiness');
   }).catch(function (error) { groupDetailSaving = false; document.getElementById('managed-note').textContent = error.message; button.disabled = error.status===409; document.getElementById('managed-reload').hidden=error.status!==409; });
 });
@@ -643,11 +647,11 @@ var systemFields = [
   ['bot.command_prefix', '命令前缀', 'list', '多个用逗号分隔，例如 /,!。'],
   ['bot.allow_bare_command', '@ 时允许省略命令前缀', 'bool'],
   ['permission.allow_private', '允许私聊使用机器人', 'bool'],
-  ['permission.default_group_enabled', '新群默认启用机器人', 'bool'],
   ['permission.group_admin_permission', '允许群管理员使用管理命令', 'bool'],
   ['permission.deny_groups', '群聊黑名单', 'ids', '黑名单优先于白名单，多个群号用逗号分隔。'],
   ['llm.enable_group', '允许群聊 AI 对话', 'bool'],
   ['llm.enable_private', '允许私聊 AI 对话', 'bool'],
+  ['plugin.handler_timeout', '消息处理超时（秒）', 'number', '超过此时长仍未完成的处理会被取消；对后续消息生效。建议冷启动语音服务时设为 360 秒。'],
   ['llm.cooldown_seconds', 'AI 对话冷却（秒）', 'number', '自然语言智能体的冷却在“配置 → 默认行为”中设置，单群策略可独立覆盖。'],
   ['llm.max_context_messages', '最多携带的上下文消息数', 'number'],
   ['logging.level', '日志详细程度', 'select', '', ['DEBUG', 'INFO', 'WARNING', 'ERROR']],
@@ -663,7 +667,7 @@ function loadSystem() {
       var value = getNested(systemInitial, field[0]); var id = 'system-' + field[0].replace('.', '-'); var control;
       if (field[2] === 'select') { control = h('select', { id:id }); field[4].forEach(function (choice) { control.appendChild(h('option', { value:choice, text:choice })); }); control.value = value; }
       else if (field[2] === 'bool') { control = h('input', { id:id, type:'checkbox' }); control.checked = value; }
-      else { control = h('input', { id:id, type:field[2] === 'number' ? 'number' : 'text', min:field[0] === 'llm.max_context_messages' ? '1' : '0', step:'1' }); control.value = Array.isArray(value) ? value.join(', ') : value; }
+      else { control = h('input', { id:id, type:field[2] === 'number' ? 'number' : 'text', min:'1', max:field[0] === 'plugin.handler_timeout' ? '3600' : '', step:'1' }); control.value = Array.isArray(value) ? value.join(', ') : value; }
       control.dataset.path = field[0]; control.dataset.kind = field[2];
       var wrap = h('div', { class:'setting-field' + (field[2] === 'bool' ? ' is-check' : '') });
       if (field[2] === 'bool') wrap.appendChild(control);
@@ -690,7 +694,7 @@ document.getElementById('system-form').addEventListener('submit', function (even
         value = value.split(/[,，\s]+/).filter(Boolean);
         if (kind === 'ids') { if (value.some(function (item) { return !/^\d+$/.test(item) || !Number.isSafeInteger(Number(item)) || Number(item) <= 0; })) throw new Error('QQ 号和群号必须是正整数。'); value = value.map(Number); }
       }
-      if (kind === 'number') { value = Number(value); if (control.value.trim() === '' || !Number.isInteger(value) || value < Number(control.min)) throw new Error('数值超出允许范围，请检查。'); }
+      if (kind === 'number') { value = Number(value); if (control.value.trim() === '' || !Number.isInteger(value) || value < Number(control.min) || control.max && value > Number(control.max)) throw new Error('数值超出允许范围，请检查。'); }
       if (JSON.stringify(value) === JSON.stringify(getNested(systemInitial, control.dataset.path))) return;
       if (!patch[path[0]]) patch[path[0]] = {}; patch[path[0]][path[1]] = value;
     });

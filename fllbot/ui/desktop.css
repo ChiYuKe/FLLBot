@@ -326,25 +326,18 @@ input,textarea,select,.ui-select-trigger { background:var(--desktop-field); bord
 
 .group-config-table .group-table-name { white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
 
-/* Access controls are part of the same compact configuration sheet. */
-.group-default-access-label { font-size:12px; color:var(--muted); white-space:nowrap; margin-left:auto; }
+/* Only configured groups appear; unlisted groups inherit the defaults. */
 .group-table-toolbar > .ui-select { width:185px; flex:none; }
 .group-table-toolbar { flex-wrap:wrap; gap:8px 12px; }
-.group-config-table { min-width:900px; }
-.group-config-table th:first-child { width:19%; }
-.group-config-table th:nth-child(2) { width:45px; }
-.group-config-table th:nth-child(3) { width:115px; }
-.group-config-table th:nth-child(4) { width:110px; }
-.group-config-table th:nth-child(5) { width:21%; }
-.group-config-table th:last-child { width:100px; }
-
+#group-table-count { margin-left:auto; }
+.group-config-table { min-width:720px; }
+.group-config-table th:first-child { width:26%; }
+.group-config-table th:nth-child(2) { width:16%; }
+.group-config-table th:nth-child(3) { width:23%; }
+.group-config-table th:nth-child(4) { width:23%; }
+.group-config-table th:last-child { width:108px; }
 .group-table-head-actions { align-items:center; flex-wrap:wrap; }
 #group-table-notice { margin:0; padding:0; min-height:0; min-width:64px; max-width:220px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; text-align:right; }
-.group-table-footer { display:flex; align-items:center; min-height:52px; padding:10px 16px; border-top:1px solid var(--line); }
-.group-table-batch { display:flex; align-items:center; flex-wrap:wrap; width:100%; gap:8px; padding:0; color:var(--muted); font-size:12px; }
-#group-batch-count { margin-right:auto; white-space:nowrap; }
-.group-table-batch[hidden] { display:none; }
-.group-table-batch .btn { min-height:28px; padding:0 10px; }
 .chat-settings-divider { width:100%; margin:6px 0; border:0; border-top:1px solid var(--line); }
 /* One reading direction, consistent controls, and an always reachable save action. */
 .chat-settings-grid { display:grid; gap:0; padding:0 24px 12px; }
@@ -404,3 +397,10 @@ input,textarea,select,.ui-select-trigger { background:var(--desktop-field); bord
 
 #chat-settings-card { max-width:1280px; }
 #chat-form [hidden] { display:none!important; }
+
+.turn-list-item { display:flex; flex-direction:column; gap:6px; width:100%; padding:16px 22px; border:0; border-bottom:1px solid var(--border); background:transparent; color:inherit; text-align:left; cursor:pointer; font:inherit; }
+.turn-list-item:hover,.turn-list-item:focus-visible { background:var(--panel); }
+.turn-list-item small { color:var(--muted); }
+#turn-detail { overflow-wrap:anywhere; }
+#turn-detail .btn { margin:8px 8px 0 0; }
+#turn-diagnostics .split-layout { padding-bottom:16px; }
