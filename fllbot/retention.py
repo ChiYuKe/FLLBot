@@ -31,8 +31,8 @@ class CleanupRequest(BaseModel):
         self.datasets = list(dict.fromkeys(self.datasets))
         if self.scene_id is not None and self.scene is None:
             raise ValueError('指定会话号时必须选择群聊或私聊')
-        if self.self_id is not None and set(self.datasets) - {'messages', 'traces'}:
-            raise ValueError('会话、用量和配置变更记录未按 Bot 隔离；仅消息与诊断支持指定 Bot')
+        if self.self_id is not None and set(self.datasets) - {'messages', 'conversations', 'traces'}:
+            raise ValueError('用量和配置变更记录未按 Bot 隔离；消息、会话与诊断支持指定 Bot')
         return self
 
     def specification(self) -> dict[str, Any]:
@@ -121,6 +121,7 @@ class CleanupManager:
         last = time.monotonic()
         while True:
             await asyncio.sleep(60)
+            await self.bot.storage.expire_message_content(self.bot.config.logging.message_content_hours)
             policy = self.bot.config.retention
             if policy.enabled and not self.active and time.monotonic()-last >= policy.interval_seconds:
                 last = time.monotonic()

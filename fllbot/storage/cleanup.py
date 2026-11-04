@@ -38,11 +38,12 @@ def queries(spec: dict[str, Any], batch: int | None = None) -> tuple[list[tuple[
         return ' AND '.join(where) or '1'
 
     def limited(table: str, where: str) -> str:
-        return f'id IN (SELECT id FROM {table} WHERE {where} ORDER BY id LIMIT {int(batch)})' if batch else where
+        identifier = 'rowid' if table == 'trigger_decisions' else 'id'
+        return f'{identifier} IN (SELECT {identifier} FROM {table} WHERE {where} ORDER BY {identifier} LIMIT {int(batch)})' if batch else where
 
     result = []
     for category, table, clock in [('messages', 'message_log', 'created_at'), ('usage', 'llm_usage', 'created_at'),
-                                   ('traces', 'message_traces', 'started_at'), ('changes', 'management_changes', 'created_at')]:
+                                   ('traces', 'message_traces', 'started_at'), ('traces','trigger_decisions','created_at'), ('traces','message_events','received_at'), ('changes', 'management_changes', 'created_at')]:
         if category in spec['cutoffs']:
             where = scope(table)+f' AND {clock}<:cut_{category}'
             result.append((table, limited(table, where)))
@@ -53,6 +54,13 @@ def queries(spec: dict[str, Any], batch: int | None = None) -> tuple[list[tuple[
                   'r.self_id=group_memory_summaries.self_id AND r.group_id=group_memory_summaries.group_id '
                   'AND r.id BETWEEN group_memory_summaries.first_id AND group_memory_summaries.last_id '
                   f'AND r.id IN (SELECT id FROM group_memory_messages WHERE {raw}))')
+        result.append(('turn_messages', limited('turn_messages',scope('turn_messages')+' AND created_at<:cut_conversations')))
+        result.append(('tool_results', 'execution_id IN (SELECT execution_id FROM tool_executions WHERE '+scope('tool_executions')+' AND created_at<:cut_conversations)'))
+        deliveries = scope('reply_deliveries')+' AND bodies_cleared=0 AND created_at<:cut_conversations'
+        if batch:
+            deliveries = f'rowid IN (SELECT rowid FROM reply_deliveries WHERE {deliveries} ORDER BY rowid LIMIT {int(batch)})'
+        result += [('delivery_parts', 'delivery_id IN (SELECT delivery_id FROM reply_deliveries WHERE '+deliveries+')'),
+                   ('reply_deliveries', deliveries)]
         # Delete summaries first while source rows still exist for the linkage predicate.
         result += [('group_memory_summaries', f'({old_summaries}) OR ({scope("group_memory_summaries")} AND {linked})'),
                    ('group_memory_messages', raw),
@@ -71,7 +79,8 @@ async def plan(connection: aiosqlite.Connection, spec: dict[str, Any], batch: in
     if total <= MAX_ROWS:
         for table, where in statements:
             signature.update(table.encode())
-            cursor = await connection.execute(f'SELECT id FROM {table} WHERE {where} ORDER BY id', params)
+            identifier = 'rowid' if table in {'reply_deliveries', 'delivery_parts', 'tool_results', 'trigger_decisions'} else 'id'
+            cursor = await connection.execute(f'SELECT {identifier} FROM {table} WHERE {where} ORDER BY {identifier}', params)
             while rows := await cursor.fetchmany(512):
                 signature.update(','.join(str(row[0]) for row in rows).encode()+b';')
     return {'counts': counts, 'total': total, 'signature': signature.hexdigest(), 'can_execute': 0 < total <= MAX_ROWS,
@@ -97,7 +106,13 @@ async def execute(storage: Any, spec: dict[str, Any], *, expected: str | None = 
                     raise CleanupChangedError('本次记录超过 50000 条，请缩小时间或会话范围后重新预览')
                 statements, params = queries(spec, batch)
                 for table, where in statements:
-                    await connection.execute(f'DELETE FROM {table} WHERE {where}', params)
+                    if table == 'delivery_parts':
+                        await connection.execute("UPDATE delivery_parts SET content='',status=CASE WHEN status='pending' "
+                                                 "THEN 'cancelled' ELSE status END WHERE "+where,params)
+                    elif table == 'reply_deliveries':
+                        await connection.execute("UPDATE reply_deliveries SET candidate='',metadata='{}',bodies_cleared=1 WHERE "+where,params)
+                    else:
+                        await connection.execute(f'DELETE FROM {table} WHERE {where}', params)
                 run_id = None
                 if current['total']:
                     cursor = await connection.execute(
@@ -106,9 +121,10 @@ async def execute(storage: Any, spec: dict[str, Any], *, expected: str | None = 
                     )
                     run_id = cursor.lastrowid
                     await connection.execute('DELETE FROM cleanup_runs WHERE id <= (SELECT max(id)-1000 FROM cleanup_runs)')
-                await connection.commit()
-                if any(current['counts'].get(table, 0) for table in ('chat_messages', 'group_memory_messages', 'group_memory_summaries')):
-                    storage.conversation_generation += 1
+                change = None
+                if any(current['counts'].get(table, 0) for table in ('chat_messages', 'group_memory_messages', 'group_memory_summaries', 'reply_deliveries', 'delivery_parts', 'tool_results', 'turn_messages')):
+                    change = await storage.advance_scope_epoch(connection,spec.get('self_id'),spec.get('scene'),spec.get('scene_id'))
+                await storage.commit_scope_epoch(connection,change)
                 return {'run_id': run_id, 'counts': current['counts'], 'total': current['total']}
             except BaseException:
                 await connection.rollback()

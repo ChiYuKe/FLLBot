@@ -15,9 +15,79 @@ from .backup import DatabaseFileLock, create_backup
 from .locking import SettingsLock
 from .memory import GroupMemoryStore
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 23
 
 MIGRATIONS: dict[int, list[str]] = {
+    23: ["ALTER TABLE message_traces ADD COLUMN metrics TEXT NOT NULL DEFAULT '{}'",
+         'CREATE INDEX idx_delivery_turn ON reply_deliveries(turn_id,created_at)'],
+    22: ["ALTER TABLE turns ADD COLUMN context_metadata TEXT NOT NULL DEFAULT '{}'"],
+    21: ["ALTER TABLE reply_deliveries ADD COLUMN bodies_cleared INTEGER NOT NULL DEFAULT 0"],
+    20: [
+        """CREATE TABLE conversation_epochs(self_id INTEGER NOT NULL,scene TEXT NOT NULL,scene_id INTEGER NOT NULL,
+        version INTEGER NOT NULL,PRIMARY KEY(self_id,scene,scene_id))""",
+        "ALTER TABLE turns ADD COLUMN scope_epoch INTEGER NOT NULL DEFAULT 0",
+        "ALTER TABLE message_events ADD COLUMN scope_epoch INTEGER NOT NULL DEFAULT 0",
+    ],
+    19: [
+        "ALTER TABLE llm_usage ADD COLUMN turn_id TEXT NOT NULL DEFAULT ''",
+        "CREATE INDEX idx_usage_turn ON llm_usage(turn_id,id)",
+        """CREATE TABLE turn_messages (id INTEGER PRIMARY KEY AUTOINCREMENT,turn_id TEXT NOT NULL UNIQUE,
+        self_id INTEGER NOT NULL,scene TEXT NOT NULL,scene_id INTEGER NOT NULL,message_id INTEGER NOT NULL,
+        sender_id INTEGER NOT NULL,content TEXT NOT NULL,created_at REAL NOT NULL)""",
+        "CREATE INDEX idx_turn_message_scope ON turn_messages(self_id,scene,scene_id,id)",
+    ],
+    18: [
+        """CREATE TABLE message_events (id INTEGER PRIMARY KEY AUTOINCREMENT,event_key TEXT NOT NULL UNIQUE,
+        turn_id TEXT NOT NULL,self_id INTEGER NOT NULL,scene TEXT NOT NULL,scene_id INTEGER NOT NULL,
+        message_id INTEGER NOT NULL,sender_id INTEGER NOT NULL,stable_id INTEGER NOT NULL,
+        received_at REAL NOT NULL,deadline REAL NOT NULL,data_epoch INTEGER NOT NULL,
+        account_epoch INTEGER NOT NULL,trace_id TEXT NOT NULL,status TEXT NOT NULL,reason TEXT NOT NULL DEFAULT '')""",
+        "CREATE INDEX idx_event_scope ON message_events(self_id,scene,scene_id,id DESC)",
+    ],
+    17: ["ALTER TABLE turns ADD COLUMN entrypoint TEXT NOT NULL DEFAULT 'qq'"],
+    16: [
+        """CREATE TABLE trigger_decisions (turn_id TEXT PRIMARY KEY,self_id INTEGER NOT NULL,scene TEXT NOT NULL,
+        scene_id INTEGER NOT NULL,outcome TEXT NOT NULL,reason TEXT NOT NULL,trigger_kind TEXT NOT NULL,
+        effective_policy_version TEXT NOT NULL,created_at REAL NOT NULL)""",
+        "CREATE INDEX idx_trigger_scope ON trigger_decisions(self_id,scene,scene_id,created_at)",
+    ],
+    15: ["ALTER TABLE reply_deliveries ADD COLUMN metadata TEXT NOT NULL DEFAULT ''"],
+    14: [
+        """CREATE TABLE turns (turn_id TEXT PRIMARY KEY, self_id INTEGER NOT NULL, scene TEXT NOT NULL,
+        scene_id INTEGER NOT NULL, message_id INTEGER NOT NULL, status TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '',
+        deadline REAL NOT NULL, data_epoch INTEGER NOT NULL, config_version TEXT NOT NULL,
+        trace_id TEXT NOT NULL, created_at REAL NOT NULL, updated_at REAL NOT NULL)""",
+        "CREATE INDEX idx_turn_scope ON turns(self_id,scene,scene_id,created_at)",
+        "CREATE INDEX idx_turn_status ON turns(status)",
+        "ALTER TABLE reply_deliveries ADD COLUMN turn_id TEXT NOT NULL DEFAULT ''",
+    ],
+    13: [
+        "ALTER TABLE tool_executions ADD COLUMN turn_id TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE tool_executions ADD COLUMN call_id TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE tool_executions ADD COLUMN arguments_hash TEXT NOT NULL DEFAULT ''",
+        "CREATE UNIQUE INDEX idx_tool_call ON tool_executions(turn_id,call_id) WHERE call_id<>''",
+        "CREATE TABLE tool_results (execution_id TEXT PRIMARY KEY, content TEXT NOT NULL, silent INTEGER NOT NULL)",
+    ],
+    12: [
+        """CREATE TABLE tool_executions (execution_id TEXT PRIMARY KEY, self_id INTEGER NOT NULL,
+        scene TEXT NOT NULL, scene_id INTEGER NOT NULL, message_id INTEGER NOT NULL,
+        tool TEXT NOT NULL, effect TEXT NOT NULL, status TEXT NOT NULL,
+        created_at REAL NOT NULL, finished_at REAL, error TEXT NOT NULL DEFAULT '')""",
+        "CREATE INDEX idx_tool_scope ON tool_executions(self_id,scene,scene_id,created_at)",
+    ],
+    11: [
+        """CREATE TABLE reply_deliveries (delivery_id TEXT PRIMARY KEY, self_id INTEGER NOT NULL,
+        scene TEXT NOT NULL, scene_id INTEGER NOT NULL, candidate TEXT NOT NULL,
+        generation INTEGER NOT NULL, created_at REAL NOT NULL)""",
+        """CREATE TABLE delivery_parts (delivery_id TEXT NOT NULL, part_index INTEGER NOT NULL,
+        content TEXT NOT NULL, status TEXT NOT NULL, message_id TEXT, error TEXT,
+        attempted_at REAL, PRIMARY KEY(delivery_id, part_index))""",
+        "CREATE INDEX idx_delivery_status ON delivery_parts(status)",
+    ],
+    10: [
+        "ALTER TABLE chat_messages ADD COLUMN self_id INTEGER NOT NULL DEFAULT 0",
+        "CREATE INDEX idx_chat_account_scope ON chat_messages(self_id, scene, scene_id, id DESC)",
+    ],
     9: [
         """CREATE TABLE cleanup_runs (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
             created_at REAL NOT NULL, specification TEXT NOT NULL, counts TEXT NOT NULL)""",
@@ -238,6 +308,8 @@ class Storage:
         self.settings_lock = SettingsLock()
         self.data_lock = SettingsLock()
         self.conversation_generation = 0
+        self.scope_versions: dict[tuple[int,str,int], int] = {}
+        self.account_versions: dict[int, tuple[int, bool]] = {}
 
     # -- 生命周期 --------------------------------------------------------- #
     async def connect(self) -> None:
@@ -253,6 +325,17 @@ class Storage:
             await self._db.execute("PRAGMA synchronous=NORMAL")
             await self._db.execute("PRAGMA busy_timeout=5000")
             await self._migrate()
+            epochs = await (await self._db.execute('SELECT * FROM conversation_epochs')).fetchall()
+            self.scope_versions = {(row['self_id'],row['scene'],row['scene_id']):row['version']
+                                   for row in epochs if row['self_id'] != -1}
+            self.conversation_generation = next((row['version'] for row in epochs if row['self_id']==-1),0)
+            await self._db.execute("UPDATE delivery_parts SET status='uncertain' WHERE status='sending'")
+            await self._db.execute("UPDATE tool_executions SET status='uncertain' WHERE status='running'")
+            await self._db.execute("UPDATE message_events SET status='cancelled',reason='process_restart' WHERE status IN ('received','queued','processing')")
+            await self._db.execute("UPDATE turns SET status=CASE WHEN status='delivering' THEN 'delivery_uncertain' "
+                                   "ELSE 'cancelled' END,reason='process_restart' "
+                                   "WHERE status IN ('queued','running','reply_ready','delivering')")
+            await self._db.commit()
         except BaseException:
             try:
                 if self._db is not None:
@@ -265,12 +348,13 @@ class Storage:
         self.logger.info("数据库就绪：%s", self.path)
 
     async def close(self) -> None:
-        if self._db is not None:
-            await self._db.close()
-            self._db = None
-        if self._process_lock is not None:
-            self._process_lock.release()
-            self._process_lock = None
+        async with self.data_lock:
+            if self._db is not None:
+                await self._db.close()
+                self._db = None
+            if self._process_lock is not None:
+                self._process_lock.release()
+                self._process_lock = None
 
     async def backup(self, destination: Path | str) -> dict[str, int]:
         """Create a validated, online-safe backup of this database."""
@@ -316,13 +400,18 @@ class Storage:
             return row["value"]
 
     async def kv_set(self, scope: str, key: str, value: Any) -> None:
-        payload = json.dumps(value, ensure_ascii=False)
-        await self.db.execute(
-            "INSERT INTO kv (scope, key, value, updated_at) VALUES (?, ?, ?, ?) "
-            "ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-            (scope, key, payload, time.time()),
-        )
-        await self.db.commit()
+        async with self.data_lock:
+            try:
+                payload = json.dumps(value, ensure_ascii=False)
+                await self.db.execute(
+                    "INSERT INTO kv (scope, key, value, updated_at) VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(scope, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+                    (scope, key, payload, time.time()),
+                )
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
 
     async def save_plugin_settings(self, scope: str, entries: list[tuple[int, str, Any]]) -> None:
         """Commit a validated plugin settings batch and field-only audit atomically."""
@@ -366,8 +455,13 @@ class Storage:
                 raise
 
     async def kv_delete(self, scope: str, key: str) -> None:
-        await self.db.execute("DELETE FROM kv WHERE scope = ? AND key = ?", (scope, key))
-        await self.db.commit()
+        async with self.data_lock:
+            try:
+                await self.db.execute("DELETE FROM kv WHERE scope = ? AND key = ?", (scope, key))
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
 
     async def admin_kv_set(self, scope: str, key: str, value: Any) -> None:
         """Write generic admin KV and its value-free audit atomically."""
@@ -433,12 +527,17 @@ class Storage:
             return row["value"]
 
     async def meta_set(self, key: str, value: Any) -> None:
-        await self.db.execute(
-            "INSERT INTO meta (key, value) VALUES (?, ?) "
-            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, json.dumps(value, ensure_ascii=False)),
-        )
-        await self.db.commit()
+        async with self.data_lock:
+            try:
+                await self.db.execute(
+                    "INSERT INTO meta (key, value) VALUES (?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (key, json.dumps(value, ensure_ascii=False)),
+                )
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
 
     async def archive_startup_overrides(self, active: dict[str, Any], archived: dict[str, Any]) -> dict[str, Any]:
         """Retain legacy startup-only values separately from effective overrides."""
@@ -472,39 +571,44 @@ class Storage:
 
         使用单条 upsert 语句，避免并发首次登记时撞 UNIQUE 约束。
         """
-        now = time.time()
-        gid = int(group_id)
-        if enabled is None and config is None:
-            await self.db.execute(
-                "INSERT OR IGNORE INTO groups (group_id, enabled, config, created_at, updated_at) "
-                "VALUES (?, 1, '{}', ?, ?)",
-                (gid, now, now),
-            )
-        elif config is None:
-            await self.db.execute(
-                "INSERT INTO groups (group_id, enabled, config, created_at, updated_at) "
-                "VALUES (?, ?, '{}', ?, ?) "
-                "ON CONFLICT(group_id) DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at",
-                (gid, int(bool(enabled)), now, now),
-            )
-        elif enabled is None:
-            await self.db.execute(
-                "INSERT INTO groups (group_id, enabled, config, created_at, updated_at) "
-                "VALUES (?, 1, ?, ?, ?) "
-                "ON CONFLICT(group_id) DO UPDATE SET config = excluded.config, updated_at = excluded.updated_at",
-                (gid, json.dumps(config, ensure_ascii=False), now, now),
-            )
-        else:
-            await self.db.execute(
-                "INSERT INTO groups (group_id, enabled, config, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?) "
-                "ON CONFLICT(group_id) DO UPDATE SET "
-                "enabled = excluded.enabled, config = excluded.config, updated_at = excluded.updated_at",
-                (gid, int(bool(enabled)), json.dumps(config, ensure_ascii=False), now, now),
-            )
-        if clear_settings_scope:
-            await self.db.execute("DELETE FROM kv WHERE scope = ? AND key LIKE ?", (clear_settings_scope, f"{gid}:%"))
-        await self.db.commit()
+        async with self.data_lock:
+            try:
+                now = time.time()
+                gid = int(group_id)
+                if enabled is None and config is None:
+                    await self.db.execute(
+                        "INSERT OR IGNORE INTO groups (group_id, enabled, config, created_at, updated_at) "
+                        "VALUES (?, 1, '{}', ?, ?)",
+                        (gid, now, now),
+                    )
+                elif config is None:
+                    await self.db.execute(
+                        "INSERT INTO groups (group_id, enabled, config, created_at, updated_at) "
+                        "VALUES (?, ?, '{}', ?, ?) "
+                        "ON CONFLICT(group_id) DO UPDATE SET enabled = excluded.enabled, updated_at = excluded.updated_at",
+                        (gid, int(bool(enabled)), now, now),
+                    )
+                elif enabled is None:
+                    await self.db.execute(
+                        "INSERT INTO groups (group_id, enabled, config, created_at, updated_at) "
+                        "VALUES (?, 1, ?, ?, ?) "
+                        "ON CONFLICT(group_id) DO UPDATE SET config = excluded.config, updated_at = excluded.updated_at",
+                        (gid, json.dumps(config, ensure_ascii=False), now, now),
+                    )
+                else:
+                    await self.db.execute(
+                        "INSERT INTO groups (group_id, enabled, config, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?) "
+                        "ON CONFLICT(group_id) DO UPDATE SET "
+                        "enabled = excluded.enabled, config = excluded.config, updated_at = excluded.updated_at",
+                        (gid, int(bool(enabled)), json.dumps(config, ensure_ascii=False), now, now),
+                    )
+                if clear_settings_scope:
+                    await self.db.execute("DELETE FROM kv WHERE scope = ? AND key LIKE ?", (clear_settings_scope, f"{gid}:%"))
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
 
     async def list_group_states(self) -> dict[int, dict[str, Any]]:
         cursor = await self.db.execute("SELECT group_id, enabled, config FROM groups ORDER BY group_id")
@@ -530,21 +634,31 @@ class Storage:
 
     async def record_management_change(self, action: str, fields: list[str], *, group_id: int = 0) -> None:
         """Append metadata-only audit for filesystem and lifecycle operations."""
-        await self.db.execute(
-            'INSERT INTO management_changes(group_id,action,fields,created_at) VALUES(?,?,?,?)',
-            (int(group_id), action, json.dumps(fields, ensure_ascii=False), time.time()),
-        )
-        await self.db.commit()
+        async with self.data_lock:
+            try:
+                await self.db.execute(
+                    'INSERT INTO management_changes(group_id,action,fields,created_at) VALUES(?,?,?,?)',
+                    (int(group_id), action, json.dumps(fields, ensure_ascii=False), time.time()),
+                )
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
 
     async def record_message_trace(self, trace: dict[str, Any]) -> None:
-        await self.db.execute(
-            "INSERT INTO message_traces(trace_id,self_id,scene,scene_id,message_id,started_at,duration_ms,outcome,truncated,steps) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?)",
-            tuple(trace[key] for key in ('trace_id', 'self_id', 'scene', 'scene_id', 'message_id', 'started_at',
-                                        'duration_ms', 'outcome', 'truncated')) + (json.dumps(trace['steps'], ensure_ascii=False),),
-        )
-        await self.db.execute("DELETE FROM message_traces WHERE id <= (SELECT max(id) - 10000 FROM message_traces) OR started_at < ?", (time.time() - 7 * 86400,))
-        await self.db.commit()
+        async with self.data_lock:
+            try:
+                await self.db.execute(
+                    "INSERT INTO message_traces(trace_id,self_id,scene,scene_id,message_id,started_at,duration_ms,outcome,truncated,steps,metrics) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    tuple(trace[key] for key in ('trace_id', 'self_id', 'scene', 'scene_id', 'message_id', 'started_at',
+                                                'duration_ms', 'outcome', 'truncated')) + (json.dumps(trace['steps'], ensure_ascii=False),json.dumps(trace.get('metrics',{}))),
+                )
+                await self.db.execute("DELETE FROM message_traces WHERE id <= (SELECT max(id) - 10000 FROM message_traces) OR started_at < ?", (time.time() - 7 * 86400,))
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
 
     async def message_traces(self, *, self_id: int | None = None, scene: str | None = None, scene_id: int | None = None,
                              outcome: str | None = None, message_id: int | None = None, before: int | None = None, limit: int = 30) -> dict[str, Any]:
@@ -558,19 +672,24 @@ class Storage:
             params.append(before)
         limit = max(1, min(limit, 100))
         where = ' WHERE ' + ' AND '.join(conditions) if conditions else ''
-        cursor = await self.db.execute('SELECT id,trace_id,self_id,scene,scene_id,message_id,started_at,duration_ms,outcome,truncated FROM message_traces' + where + ' ORDER BY id DESC LIMIT ?', (*params, limit + 1))
+        cursor = await self.db.execute('SELECT id,trace_id,self_id,scene,scene_id,message_id,started_at,duration_ms,outcome,truncated,metrics FROM message_traces' + where + ' ORDER BY id DESC LIMIT ?', (*params, limit + 1))
         rows = await cursor.fetchall()
-        items = [dict(row) for row in rows[:limit]]
+        items = [{**dict(row),'metrics':json.loads(row['metrics'])} for row in rows[:limit]]
         return {'items': items, 'next_cursor': items[-1]['id'] if len(rows) > limit else None}
 
     async def message_trace(self, trace_id: str) -> dict[str, Any] | None:
         cursor = await self.db.execute('SELECT * FROM message_traces WHERE trace_id = ? AND started_at >= ?', (trace_id, time.time() - 7 * 86400))
         row = await cursor.fetchone()
-        return {**dict(row), 'steps': json.loads(row['steps'])} if row else None
+        return {**dict(row), 'steps': json.loads(row['steps']),'metrics':json.loads(row['metrics'])} if row else None
 
     async def delete_group(self, group_id: int) -> None:
-        await self.db.execute("DELETE FROM groups WHERE group_id = ?", (group_id,))
-        await self.db.commit()
+        async with self.data_lock:
+            try:
+                await self.db.execute("DELETE FROM groups WHERE group_id = ?", (group_id,))
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
 
     # -- 插件状态 --------------------------------------------------------- #
     async def set_plugin_state(self, plugin: str, group_id: int, enabled: bool) -> None:
@@ -598,8 +717,371 @@ class Storage:
         return {(row["plugin"], int(row["group_id"])): bool(row["enabled"]) for row in await cursor.fetchall()}
 
     async def clear_plugin_states(self, plugin: str) -> None:
-        await self.db.execute("DELETE FROM plugin_state WHERE plugin = ?", (plugin,))
-        await self.db.commit()
+        async with self.data_lock:
+            try:
+                await self.db.execute("DELETE FROM plugin_state WHERE plugin = ?", (plugin,))
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
+
+    def scope_generation(self, self_id: int, scene: str, scene_id: int) -> int:
+        return self.scope_versions.get((int(self_id),scene,int(scene_id)),0)
+
+    def scope_current(self, self_id: int, scene: str, scene_id: int, generation: int | None) -> bool:
+        return generation is None or generation == self.scope_generation(self_id,scene,scene_id)
+
+    async def advance_scope_epoch(self, connection: Any, self_id: int | None, scene: str | None,
+                                  scene_id: int | None) -> tuple[tuple[int,str,int],int]:
+        key = (-1,'*',0) if self_id is None or scene is None or scene_id is None else (int(self_id),scene,int(scene_id))
+        await connection.execute('INSERT INTO conversation_epochs VALUES(?,?,?,1) '
+                                 'ON CONFLICT(self_id,scene,scene_id) DO UPDATE SET version=version+1',key)
+        row = await (await connection.execute('SELECT version FROM conversation_epochs '
+                                             'WHERE self_id=? AND scene=? AND scene_id=?',key)).fetchone()
+        return key,int(row[0])
+
+    def publish_scope_epoch(self, change: tuple[tuple[int,str,int],int]) -> None:
+        key,version = change
+        if key[0] == -1:
+            self.conversation_generation = version
+        else:
+            self.scope_versions[key] = version
+
+    async def commit_scope_epoch(self, connection: Any, change: tuple[tuple[int,str,int],int] | None) -> None:
+        """Finish commit and publish under data_lock before honoring caller cancellation."""
+        transaction = asyncio.create_task(connection.commit())
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(transaction)
+                break
+            except asyncio.CancelledError:
+                if transaction.cancelled():
+                    raise
+                cancelled = True
+        if change is not None:
+            self.publish_scope_epoch(change)
+        if cancelled:
+            raise asyncio.CancelledError
+
+    def account_current(self, self_id: int, epoch: int | None) -> bool:
+        current, enabled = self.account_versions.get(int(self_id), (0, True))
+        return epoch is None or (enabled and current == epoch)
+
+    async def receive_event(self, envelope: Any, snapshot: Any, trace_id: str) -> bool:
+        async with self.data_lock:
+            try:
+                cursor = await self.db.execute(
+                    "INSERT OR IGNORE INTO message_events(event_key,turn_id,self_id,scene,scene_id,message_id,sender_id,stable_id,"
+                    "received_at,deadline,data_epoch,account_epoch,trace_id,status,scope_epoch) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,'received',?)",
+                    (envelope.event_key,envelope.turn_id,envelope.self_id,envelope.scene,envelope.scene_id,
+                     envelope.message_id,envelope.sender_id,int(envelope.stable_id),envelope.received_at,snapshot.deadline,
+                     snapshot.data_epoch,snapshot.account_epoch,trace_id,snapshot.scope_generation))
+                await self.db.commit()
+                return cursor.rowcount == 1
+            except BaseException:
+                await self.db.rollback()
+                raise
+
+    async def update_event(self, event_key: str, status: str, reason: str = '') -> None:
+        allowed = {'queued':('received',),'processing':('received','queued'),
+                   'completed':('processing',),'expired':('received','queued','processing'),
+                   'cancelled':('received','queued','processing'),'failed':('received','queued','processing'),
+                   'dropped':('received','queued')}.get(status,())
+        if not allowed:
+            return
+        async with self.data_lock:
+            try:
+                placeholders = ','.join('?' for _ in allowed)
+                await self.db.execute('UPDATE message_events SET status=?,reason=? WHERE event_key=? AND status IN ('+placeholders+')',
+                                      (status,reason,event_key,*allowed))
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
+
+    async def list_message_events(self, *, self_id: int | None = None, scene_id: int | None = None,
+                                  before: int | None = None, limit: int = 50) -> dict:
+        clauses, params = [], []
+        for column,value in [('self_id',self_id),('scene_id',scene_id),('id',before)]:
+            if value is not None:
+                clauses.append(column+('<?' if column=='id' else '=?'))
+                params.append(value)
+        where = ' WHERE '+' AND '.join(clauses) if clauses else ''
+        rows = await (await self.db.execute('SELECT * FROM message_events'+where+' ORDER BY id DESC LIMIT ?',
+                                            (*params,limit+1))).fetchall()
+        items = [dict(row) for row in rows[:limit]]
+        return {'items':items,'next_cursor':items[-1]['id'] if len(rows)>limit else None}
+
+    async def record_trigger(self, ctx: Any, decision: Any) -> None:
+        async with self.data_lock:
+            try:
+                await self.db.execute("INSERT OR IGNORE INTO trigger_decisions VALUES(?,?,?,?,?,?,?,?,?)",
+                    (ctx.turn_id,ctx.self_id,ctx.event.scene,ctx.event.scene_id,decision.outcome,decision.reason,
+                     decision.trigger_kind,decision.effective_policy_version,time.time()))
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
+
+    async def list_trigger_decisions(self, *, self_id: int | None = None, scene_id: int | None = None,
+                                     before: int | None = None, limit: int = 50) -> dict:
+        clauses, params = [], []
+        for column,value in [('self_id',self_id),('scene_id',scene_id),('rowid',before)]:
+            if value is not None:
+                clauses.append(column+('<?' if column == 'rowid' else '=?'))
+                params.append(value)
+        where = ' WHERE '+' AND '.join(clauses) if clauses else ''
+        rows = await (await self.db.execute('SELECT rowid AS cursor,* FROM trigger_decisions'+where+
+                                            ' ORDER BY rowid DESC LIMIT ?',(*params,limit+1))).fetchall()
+        items = [dict(row) for row in rows[:limit]]
+        return {'items':items,'next_cursor':items[-1]['cursor'] if len(rows)>limit else None}
+
+    async def list_turns(self, *, self_id: int | None = None, scene: str | None = None,
+                         scene_id: int | None = None, status: str | None = None,
+                         before: int | None = None, limit: int = 50) -> dict:
+        clauses, params = [], []
+        for column, value in [('self_id',self_id),('scene',scene),('scene_id',scene_id),('status',status)]:
+            if value is not None:
+                clauses.append(column+'=?')
+                params.append(value)
+        if before is not None:
+            clauses.append('rowid<?')
+            params.append(before)
+        where = ' WHERE '+' AND '.join(clauses) if clauses else ''
+        rows = await (await self.db.execute(
+            'SELECT rowid AS cursor,* FROM turns'+where+' ORDER BY rowid DESC LIMIT ?', (*params,limit+1))).fetchall()
+        items = [dict(row) for row in rows[:limit]]
+        return {'items':items, 'next_cursor':items[-1]['cursor'] if len(rows)>limit else None,
+                'delivery_metrics':await self.delivery_metrics(self_id=self_id,scene=scene,scene_id=scene_id,status=status)}
+
+    async def delivery_metrics(self, *, self_id: int | None = None, scene: str | None = None,
+                               scene_id: int | None = None, status: str | None = None) -> dict:
+        clauses, params = [], []
+        for column,value in [('self_id',self_id),('scene',scene),('scene_id',scene_id),('status',status)]:
+            if value is not None:
+                clauses.append('t.'+column+'=?')
+                params.append(value)
+        where = ' WHERE '+' AND '.join(clauses) if clauses else ''
+        rows = await (await self.db.execute('SELECT p.status,count(*) AS n FROM delivery_parts p '
+            'JOIN reply_deliveries d USING(delivery_id) JOIN turns t ON t.turn_id=d.turn_id'+where+' GROUP BY p.status',params)).fetchall()
+        counts = {row['status']:row['n'] for row in rows}
+        terminal = sum(counts.get(state,0) for state in ('sent','failed','uncertain'))
+        tools = await (await self.db.execute("SELECT count(*) FROM tool_executions e JOIN turns t USING(turn_id)"+
+            (where+' AND ' if where else ' WHERE ')+"e.status='uncertain'",params)).fetchone()
+        return {'scope':'matching_recorded_turns','parts':counts,'uncertain_tools':tools[0],
+                'confirmed_delivery_rate':counts.get('sent',0)/terminal if terminal else None}
+
+    async def turn_detail(self, turn_id: str) -> dict | None:
+        row = await (await self.db.execute('SELECT * FROM turns WHERE turn_id=?', (turn_id,))).fetchone()
+        if row is None:
+            return None
+        deliveries = await (await self.db.execute(
+            "SELECT d.delivery_id,d.bodies_cleared,p.part_index,p.status,p.message_id,p.error,p.attempted_at "
+            "FROM reply_deliveries d JOIN delivery_parts p USING(delivery_id) "
+            "WHERE d.turn_id=? ORDER BY d.created_at,p.part_index", (turn_id,))).fetchall()
+        tools = await (await self.db.execute(
+            "SELECT execution_id,call_id,tool,effect,status,created_at,finished_at,error "
+            "FROM tool_executions WHERE turn_id=? ORDER BY created_at", (turn_id,))).fetchall()
+        models = await (await self.db.execute(
+            "SELECT id,provider,model,prompt_tokens,completion_tokens,latency_ms,cost,ok,usage_estimated,created_at "
+            "FROM llm_usage WHERE turn_id=? ORDER BY id", (turn_id,))).fetchall()
+        trace = await (await self.db.execute('SELECT metrics FROM message_traces WHERE trace_id=?',(row['trace_id'],))).fetchone()
+        return {**dict(row),'context_metadata':json.loads(row['context_metadata']),
+                'trace_metrics':json.loads(trace['metrics']) if trace else {},
+                'deliveries':[dict(r) for r in deliveries],'tools':[dict(r) for r in tools],
+                'model_requests':[dict(r) for r in models]}
+
+    async def recovery_plan(self, turn_id: str) -> dict | None:
+        turn = await self.turn_detail(turn_id)
+        if turn is None or turn['status'] != 'failed':
+            return None
+        rows = await (await self.db.execute('SELECT * FROM reply_deliveries WHERE turn_id=?', (turn_id,))).fetchall()
+        if len(rows) != 1 or rows[0]['bodies_cleared'] or not rows[0]['metadata']:
+            return None
+        plan = dict(rows[0])
+        metadata = json.loads(plan['metadata'])
+        if metadata.get('mode') not in ('split','forward') or metadata.get('format_version') != 1:
+            return None
+        parts = await (await self.db.execute('SELECT * FROM delivery_parts WHERE delivery_id=? ORDER BY part_index',
+                                            (plan['delivery_id'],))).fetchall()
+        if metadata.get('mode') == 'forward' and (not parts or parts[0]['status'] != 'superseded'):
+            return None
+        if any(row['status'] not in ('sent','failed','pending','superseded') for row in parts):
+            return None
+        remaining = [dict(row) for row in parts if row['status'] in ('failed','pending')]
+        if any(str(part['part_index']) not in metadata.get('part_segments',{}) for part in remaining):
+            return None
+        if not remaining or plan['generation'] != self.conversation_generation:
+            return None
+        return {**plan,'metadata':metadata,'parts':remaining,'turn':turn}
+
+    async def claim_recovery(self, turn_id: str) -> dict | None:
+        async with self.data_lock:
+            try:
+                plan = await self.recovery_plan(turn_id)
+                if plan is None:
+                    return None
+                cursor = await self.db.execute("UPDATE turns SET status='delivering',reason='manual_delivery_recovery',updated_at=? "
+                                               "WHERE turn_id=? AND status='failed'", (time.time(),turn_id))
+                await self.db.commit()
+                return plan if cursor.rowcount == 1 else None
+            except BaseException:
+                await self.db.rollback()
+                raise
+
+    async def create_turn(self, ctx: Any, deadline: float, config_version: str, trace_id: str) -> bool:
+        async with self.data_lock:
+            if not ctx.data_current:
+                return False
+            try:
+                cursor = await self.db.execute(
+                    "INSERT OR IGNORE INTO turns(turn_id,self_id,scene,scene_id,message_id,status,reason,deadline,"
+                    "data_epoch,config_version,trace_id,created_at,updated_at,entrypoint,scope_epoch) "
+                    "VALUES(?,?,?,?,?,'queued','',?,?,?,?,?,?,?,?)",
+                    (ctx.turn_id,ctx.self_id,ctx.event.scene,ctx.event.scene_id,ctx.message_id or 0,
+                     deadline,ctx.data_epoch,config_version,trace_id,time.time(),time.time(),ctx.entrypoint,ctx.received.scope_generation))
+                claimed = cursor.rowcount == 1
+                if claimed and ctx.entrypoint == 'qq' and ctx.turn_input is not None:
+                    await self.db.execute(
+                        "INSERT INTO turn_messages(turn_id,self_id,scene,scene_id,message_id,sender_id,content,created_at) "
+                        "VALUES(?,?,?,?,?,?,?,?)", (ctx.turn_id,ctx.self_id,ctx.event.scene,ctx.event.scene_id,
+                                                   ctx.message_id or 0,ctx.user_id,ctx.turn_input,time.time()))
+                await self.db.commit()
+                return claimed
+            except BaseException:
+                await self.db.rollback()
+                raise
+
+    async def set_turn_status(self, turn_id: str, status: str, reason: str = '') -> None:
+        async with self.data_lock:
+            try:
+                await self.db.execute("UPDATE turns SET status=?,reason=?,updated_at=? WHERE turn_id=?",
+                                      (status,reason,time.time(),turn_id))
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
+
+    async def set_turn_context(self, turn_id: str, metadata: dict) -> None:
+        async with self.data_lock:
+            try:
+                await self.db.execute("UPDATE turns SET context_metadata=? WHERE turn_id=? AND status='running'",
+                                      (json.dumps(metadata,ensure_ascii=False),turn_id))
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
+
+    async def turn_delivery_state(self, turn_id: str) -> list[str]:
+        rows = await (await self.db.execute(
+            "SELECT p.status FROM delivery_parts p JOIN reply_deliveries d USING(delivery_id) WHERE d.turn_id=?",
+            (turn_id,))).fetchall()
+        return [row[0] for row in rows]
+
+    async def claim_tool(self, execution_id: str, self_id: int, scene: str, scene_id: int,
+                         message_id: int, name: str, effect: str, generation: int,
+                         turn_id: str, call_id: str, arguments_hash: str) -> tuple[bool, dict]:
+        async with self.data_lock:
+            if generation != self.conversation_generation:
+                return False, {}
+            try:
+                cursor = await self.db.execute(
+                    "INSERT OR IGNORE INTO tool_executions(execution_id,self_id,scene,scene_id,message_id,tool,effect,"
+                    "status,created_at,turn_id,call_id,arguments_hash) VALUES (?,?,?,?,?,?,?,'running',?,?,?,?)",
+                    (execution_id,self_id,scene,scene_id,message_id,name,effect,time.time(),turn_id,call_id,arguments_hash))
+                claimed = cursor.rowcount == 1
+                row = await (await self.db.execute(
+                    "SELECT e.*,r.content,r.silent FROM tool_executions e LEFT JOIN tool_results r USING(execution_id) "
+                    "WHERE e.turn_id=? AND e.call_id=?", (turn_id, call_id))).fetchone()
+                await self.db.commit()
+                return claimed, dict(row) if row else {}
+            except BaseException:
+                await self.db.rollback()
+                raise
+
+    async def finish_tool(self, execution_id: str, status: str, error: str = '',
+                          *, output: str | None = None, silent: bool = False, generation: int | None = None, account_epoch: int | None = None, scope_epoch: int | None = None) -> None:
+        async with self.data_lock:
+            try:
+                await self.db.execute("UPDATE tool_executions SET status=?,error=?,finished_at=? WHERE execution_id=?",
+                                      (status,error[:100],time.time(),execution_id))
+                owner = await (await self.db.execute('SELECT self_id,scene,scene_id FROM tool_executions WHERE execution_id=?',
+                                                     (execution_id,))).fetchone()
+                if (output is not None and generation == self.conversation_generation and owner
+                        and self.account_current(owner['self_id'], account_epoch)
+                        and self.scope_current(owner['self_id'],owner['scene'],owner['scene_id'],scope_epoch)):
+                    await self.db.execute("INSERT OR REPLACE INTO tool_results VALUES(?,?,?)",
+                                          (execution_id,output,int(silent)))
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
+
+    async def prepare_delivery(self, delivery_id: str, self_id: int, scene: str, scene_id: int,
+                               text: str, chunks: list[str], generation: int, turn_id: str = '', metadata: dict | None = None) -> bool:
+        async with self.data_lock:
+            if generation != self.conversation_generation:
+                return False
+            if metadata and not self.scope_current(self_id,scene,scene_id,metadata.get('scope_epoch')):
+                return False
+            if metadata and not self.account_current(self_id, metadata.get('account_epoch')):
+                return False
+            try:
+                await self.db.execute("INSERT INTO reply_deliveries(delivery_id,self_id,scene,scene_id,candidate,generation,created_at,turn_id,metadata) VALUES (?,?,?,?,?,?,?,?,?)",
+                                      (delivery_id, self_id, scene, scene_id, text, generation, time.time(),turn_id,json.dumps(metadata or {})))
+                await self.db.execute("UPDATE turns SET status='reply_ready',updated_at=? WHERE turn_id=?",
+                                      (time.time(),turn_id))
+                await self.db.executemany(
+                    "INSERT INTO delivery_parts(delivery_id,part_index,content,status) VALUES (?,?,?,'pending')",
+                    [(delivery_id, i, chunk) for i, chunk in enumerate(chunks)])
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
+            return True
+
+    async def update_delivery(self, delivery_id: str, index: int, status: str,
+                              *, message_id: str = "", error: str = "") -> None:
+        async with self.data_lock:
+            try:
+                cursor = await self.db.execute(
+                    "SELECT p.status,p.content,d.* FROM delivery_parts p JOIN reply_deliveries d "
+                    "USING(delivery_id) WHERE delivery_id=? AND part_index=?", (delivery_id, index))
+                row = await cursor.fetchone()
+                if row is None:
+                    return
+                transitions = {'pending':{'sending','cancelled'}, 'sending':{'sent','failed','uncertain','cancelled'},
+                               'failed':{'sending','superseded'}, 'sent':set(),'uncertain':set(),
+                               'cancelled':set(),'superseded':set()}
+                if status not in transitions.get(row['status'],set()):
+                    return
+                if status in ('sending','superseded') and row['bodies_cleared']:
+                    return
+                await self.db.execute(
+                    "UPDATE delivery_parts SET status=?,message_id=?,error=?,attempted_at=? "
+                    "WHERE delivery_id=? AND part_index=?",
+                    (status, message_id, error[:200], time.time(), delivery_id, index))
+                if status == 'sending':
+                    await self.db.execute("UPDATE turns SET status='delivering',updated_at=? WHERE turn_id=?",
+                                          (time.time(),row['turn_id']))
+                metadata = json.loads(row['metadata'] or '{}')
+                if status == 'sent' and index == 0 and metadata.get('mode') == 'forward':
+                    await self.db.execute("UPDATE delivery_parts SET status='cancelled' "
+                        "WHERE delivery_id=? AND part_index<>? AND status='pending'",(delivery_id,index))
+                account_epoch = metadata.get('account_epoch')
+                if (status == 'sent' and not row['bodies_cleared'] and row['generation'] == self.conversation_generation
+                        and self.account_current(row['self_id'], account_epoch)
+                        and self.scope_current(row['self_id'],row['scene'],row['scene_id'],
+                                               json.loads(row['metadata'] or '{}').get('scope_epoch'))):
+                    await self.db.execute(
+                        "INSERT INTO chat_messages(self_id,scene,scene_id,role,content,created_at) "
+                        "VALUES (?,?,?,'assistant',?,?)",
+                        (row['self_id'], row['scene'], row['scene_id'], row['content'], time.time()))
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
 
     # -- 聊天历史 --------------------------------------------------------- #
     async def add_chat_message(
@@ -609,30 +1091,42 @@ class Storage:
         role: str,
         content: str,
         *,
+        self_id: int = 0,
         user_id: int = 0,
         nickname: str = "",
         sender_role: str = "",
         generation: int | None = None,
+        account_epoch: int | None = None,
+        scope_epoch: int | None = None,
     ) -> None:
         """写入一条历史；``role`` 是消息角色（user/assistant），发送者信息另存。"""
         async with self.data_lock:
-            if generation is not None and generation != self.conversation_generation:
-                return
-            await self.db.execute(
-                "INSERT INTO chat_messages (scene, scene_id, role, content, user_id, nickname, sender_role, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    scene,
-                    int(scene_id),
-                    role,
-                    content,
-                    int(user_id or 0),
-                    str(nickname or "")[:120],
-                    str(sender_role or "")[:20],
-                    time.time(),
-                ),
-            )
-            await self.db.commit()
+            try:
+                if not self.scope_current(self_id,scene,scene_id,scope_epoch):
+                    return
+                if not self.account_current(self_id,account_epoch):
+                    return
+                if generation is not None and generation != self.conversation_generation:
+                    return
+                await self.db.execute(
+                    "INSERT INTO chat_messages (scene, scene_id, role, content, user_id, nickname, sender_role, created_at, self_id) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        scene,
+                        int(scene_id),
+                        role,
+                        content,
+                        int(user_id or 0),
+                        str(nickname or "")[:120],
+                        str(sender_role or "")[:20],
+                        time.time(),
+                        int(self_id or 0),
+                    ),
+                )
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
 
     async def recent_chat(
         self,
@@ -641,15 +1135,20 @@ class Storage:
         limit: int = 20,
         *,
         created_after: float | None = None,
+        created_before: float | None = None,
+        self_id: int = 0,
     ) -> list[ChatRecord]:
         query = (
             "SELECT role, content, user_id, nickname, sender_role, created_at FROM chat_messages "
-            "WHERE scene = ? AND scene_id = ?"
+            "WHERE scene = ? AND scene_id = ? AND self_id = ?"
         )
-        params: list[Any] = [scene, int(scene_id)]
+        params: list[Any] = [scene, int(scene_id), int(self_id or 0)]
         if created_after is not None:
             query += " AND created_at >= ?"
             params.append(float(created_after))
+        if created_before is not None:
+            query += " AND created_at <= ?"
+            params.append(float(created_before))
         query += " ORDER BY id DESC LIMIT ?"
         params.append(int(limit))
         cursor = await self.db.execute(query, params)
@@ -666,23 +1165,39 @@ class Storage:
             for row in reversed(rows)
         ]
 
-    async def clear_chat(self, scene: str, scene_id: int) -> int:
+    async def clear_delivery_bodies(self, connection: Any, where: str, params: Any) -> None:
+        await connection.execute("UPDATE delivery_parts SET content='',status=CASE WHEN status='pending' "
+                                 "THEN 'cancelled' ELSE status END WHERE delivery_id IN "
+                                 "(SELECT delivery_id FROM reply_deliveries WHERE "+where+")",params)
+        await connection.execute("UPDATE reply_deliveries SET candidate='',metadata='{}',bodies_cleared=1 WHERE "+where,params)
+
+    async def clear_chat(self, scene: str, scene_id: int, *, self_id: int | None = None) -> int:
+        # None is an explicit legacy bulk operation; management requests always supply an account.
+        scope = 'scene=? AND scene_id=?' + (' AND self_id=?' if self_id is not None else '')
+        params = (scene,int(scene_id),self_id) if self_id is not None else (scene,int(scene_id))
         async with self.data_lock:
-            cursor = await self.db.execute(
-                "DELETE FROM chat_messages WHERE scene = ? AND scene_id = ?", (scene, int(scene_id))
-            )
-            removed = cursor.rowcount or 0
-            if scene == "group":
-                await self.db.execute("DELETE FROM group_memory_messages WHERE group_id = ?", (int(scene_id),))
-                await self.db.execute("DELETE FROM group_memory_summaries WHERE group_id = ?", (int(scene_id),))
-            await self.db.execute(
-                'INSERT INTO management_changes(group_id,action,fields,created_at) VALUES(?,?,?,?)',
-                (int(scene_id) if scene == 'group' else 0, 'chat_history_cleared',
-                 json.dumps([f'scene:{scene}', f'messages:{removed}']), time.time()),
-            )
-            await self.db.commit()
-            self.conversation_generation += 1
-            return removed
+            try:
+                cursor = await self.db.execute('DELETE FROM chat_messages WHERE '+scope,params)
+                removed = cursor.rowcount or 0
+                await self.db.execute('DELETE FROM turn_messages WHERE '+scope,params)
+                await self.db.execute('DELETE FROM tool_results WHERE execution_id IN '
+                                      '(SELECT execution_id FROM tool_executions WHERE '+scope+')',params)
+                await self.clear_delivery_bodies(self.db,scope,params)
+                if scene == 'group':
+                    memory_scope = 'group_id=?'+(' AND self_id=?' if self_id is not None else '')
+                    memory_params = (int(scene_id),self_id) if self_id is not None else (int(scene_id),)
+                    await self.db.execute('DELETE FROM group_memory_messages WHERE '+memory_scope,memory_params)
+                    await self.db.execute('DELETE FROM group_memory_summaries WHERE '+memory_scope,memory_params)
+                await self.db.execute(
+                    'INSERT INTO management_changes(group_id,action,fields,created_at) VALUES(?,?,?,?)',
+                    (int(scene_id) if scene=='group' else 0,'chat_history_cleared',
+                     json.dumps([f'scene:{scene}',f'account:{self_id if self_id is not None else "all"}',f'messages:{removed}']),time.time()))
+                change = await self.advance_scope_epoch(self.db,self_id,scene,scene_id)
+                await self.commit_scope_epoch(self.db,change)
+                return removed
+            except BaseException:
+                await self.db.rollback()
+                raise
 
     # -- LLM 用量 --------------------------------------------------------- #
     async def record_llm_usage(
@@ -699,26 +1214,33 @@ class Storage:
         ok: bool = True,
         error: str = "",
         usage_estimated: bool = False,
+        turn_id: str = "",
     ) -> None:
-        await self.db.execute(
-            "INSERT INTO llm_usage (scene, scene_id, provider, model, prompt_tokens, completion_tokens,"
-            " latency_ms, cost, ok, error, created_at, usage_estimated) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                scene,
-                int(scene_id),
-                provider,
-                model,
-                int(prompt_tokens),
-                int(completion_tokens),
-                float(latency_ms),
-                float(cost),
-                1 if ok else 0,
-                error[:500],
-                time.time(),
-                int(usage_estimated),
-            ),
-        )
-        await self.db.commit()
+        async with self.data_lock:
+            try:
+                await self.db.execute(
+                    "INSERT INTO llm_usage (scene, scene_id, provider, model, prompt_tokens, completion_tokens,"
+                    " latency_ms, cost, ok, error, created_at, usage_estimated, turn_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        scene,
+                        int(scene_id),
+                        provider,
+                        model,
+                        int(prompt_tokens),
+                        int(completion_tokens),
+                        float(latency_ms),
+                        float(cost),
+                        1 if ok else 0,
+                        error[:500],
+                        time.time(),
+                        int(usage_estimated),
+                        turn_id,
+                    ),
+                )
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
 
     async def group_llm_usage(self, group_id: int, since: float) -> dict[str, Any]:
         cursor = await self.db.execute(
@@ -785,26 +1307,36 @@ class Storage:
         }
 
     async def clear_llm_usage(self) -> int:
-        cursor = await self.db.execute("DELETE FROM llm_usage")
-        await self.db.commit()
-        return cursor.rowcount or 0
+        async with self.data_lock:
+            try:
+                cursor = await self.db.execute("DELETE FROM llm_usage")
+                await self.db.commit()
+                return cursor.rowcount or 0
+            except BaseException:
+                await self.db.rollback()
+                raise
 
     async def chat_rooms(self) -> list[dict[str, Any]]:
         cursor = await self.db.execute(
-            "SELECT scene, scene_id, COUNT(*) AS count, MAX(created_at) AS last_at "
-            "FROM chat_messages GROUP BY scene, scene_id ORDER BY last_at DESC"
-        )
-        return [
-            {
-                "scene": row["scene"],
-                "scene_id": int(row["scene_id"]),
-                "messages": int(row["count"]),
-                "last_at": row["last_at"],
-            }
-            for row in await cursor.fetchall()
-        ]
+            "SELECT self_id,scene,scene_id,MAX(messages) AS messages,MAX(last_at) AS last_at FROM ("
+            "SELECT self_id,scene,scene_id,COUNT(*) AS messages,MAX(created_at) AS last_at "
+            "FROM chat_messages GROUP BY self_id,scene,scene_id UNION ALL "
+            "SELECT self_id,'group' AS scene,group_id AS scene_id,COUNT(*) AS messages,MAX(created_at) AS last_at "
+            "FROM group_memory_messages GROUP BY self_id,group_id) GROUP BY self_id,scene,scene_id ORDER BY last_at DESC")
+        return [dict(row) for row in await cursor.fetchall()]
 
     # -- 消息统计 --------------------------------------------------------- #
+    async def expire_message_content(self, hours: int) -> int:
+        async with self.data_lock:
+            try:
+                cursor = await self.db.execute("UPDATE message_log SET content='' WHERE content<>'' AND created_at<?",
+                                               (time.time()-hours*3600,))
+                await self.db.commit()
+                return cursor.rowcount
+            except BaseException:
+                await self.db.rollback()
+                raise
+
     async def record_message(
         self,
         *,
@@ -814,12 +1346,17 @@ class Storage:
         user_id: int,
         content: str = "",
     ) -> None:
-        await self.db.execute(
-            "INSERT INTO message_log (self_id, scene, scene_id, user_id, content, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (int(self_id), scene, int(scene_id), int(user_id), content[:1000], time.time()),
-        )
-        await self.db.commit()
+        async with self.data_lock:
+            try:
+                await self.db.execute(
+                    "INSERT INTO message_log (self_id, scene, scene_id, user_id, content, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?)",
+                    (int(self_id), scene, int(scene_id), int(user_id), content[:1000], time.time()),
+                )
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
 
     async def daily_message_counts(self, days: int = 7) -> list[dict[str, Any]]:
         cursor = await self.db.execute(
@@ -854,13 +1391,18 @@ class Storage:
         content: str,
         due_at: float,
     ) -> int:
-        cursor = await self.db.execute(
-            "INSERT INTO reminders (scene, scene_id, creator, content, due_at, created_at, fired) "
-            "VALUES (?, ?, ?, ?, ?, ?, 0)",
-            (scene, int(scene_id), int(creator), content, float(due_at), time.time()),
-        )
-        await self.db.commit()
-        return int(cursor.lastrowid or 0)
+        async with self.data_lock:
+            try:
+                cursor = await self.db.execute(
+                    "INSERT INTO reminders (scene, scene_id, creator, content, due_at, created_at, fired) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 0)",
+                    (scene, int(scene_id), int(creator), content, float(due_at), time.time()),
+                )
+                await self.db.commit()
+                return int(cursor.lastrowid or 0)
+            except BaseException:
+                await self.db.rollback()
+                raise
 
     async def due_reminders(self, now: float | None = None, limit: int = 50) -> list[dict[str, Any]]:
         cursor = await self.db.execute(
@@ -871,8 +1413,13 @@ class Storage:
         return [_reminder_row(row) for row in await cursor.fetchall()]
 
     async def mark_reminder_fired(self, reminder_id: int) -> None:
-        await self.db.execute("UPDATE reminders SET fired = 1 WHERE id = ?", (int(reminder_id),))
-        await self.db.commit()
+        async with self.data_lock:
+            try:
+                await self.db.execute("UPDATE reminders SET fired = 1 WHERE id = ?", (int(reminder_id),))
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
 
     async def list_reminders(
         self,
@@ -898,14 +1445,19 @@ class Storage:
         scene: str | None = None,
         scene_id: int | None = None,
     ) -> bool:
-        query = "DELETE FROM reminders WHERE id = ?"
-        params: list[Any] = [int(reminder_id)]
-        if scene is not None and scene_id is not None:
-            query += " AND scene = ? AND scene_id = ?"
-            params.extend([scene, int(scene_id)])
-        cursor = await self.db.execute(query, params)
-        await self.db.commit()
-        return bool(cursor.rowcount)
+        async with self.data_lock:
+            try:
+                query = "DELETE FROM reminders WHERE id = ?"
+                params: list[Any] = [int(reminder_id)]
+                if scene is not None and scene_id is not None:
+                    query += " AND scene = ? AND scene_id = ?"
+                    params.extend([scene, int(scene_id)])
+                cursor = await self.db.execute(query, params)
+                await self.db.commit()
+                return bool(cursor.rowcount)
+            except BaseException:
+                await self.db.rollback()
+                raise
 
     async def count_reminders(self, scene: str, scene_id: int) -> int:
         cursor = await self.db.execute(
@@ -916,12 +1468,17 @@ class Storage:
         return int(row["count"]) if row else 0
 
     async def purge_fired_reminders(self, older_than_days: int = 7) -> int:
-        cutoff = time.time() - max(1, int(older_than_days)) * 86400
-        cursor = await self.db.execute(
-            "DELETE FROM reminders WHERE fired = 1 AND due_at < ?", (cutoff,)
-        )
-        await self.db.commit()
-        return int(cursor.rowcount or 0)
+        async with self.data_lock:
+            try:
+                cutoff = time.time() - max(1, int(older_than_days)) * 86400
+                cursor = await self.db.execute(
+                    "DELETE FROM reminders WHERE fired = 1 AND due_at < ?", (cutoff,)
+                )
+                await self.db.commit()
+                return int(cursor.rowcount or 0)
+            except BaseException:
+                await self.db.rollback()
+                raise
 
     # -- 维护 ------------------------------------------------------------- #
     async def summary(self) -> dict[str, Any]:
@@ -934,8 +1491,13 @@ class Storage:
         }
 
     async def vacuum(self) -> None:
-        await self.db.execute("VACUUM")
-        await self.db.commit()
+        async with self.data_lock:
+            try:
+                await self.db.execute("VACUUM")
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
 
 
 def _reminder_row(row: aiosqlite.Row) -> dict[str, Any]:

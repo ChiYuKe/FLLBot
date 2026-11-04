@@ -23,23 +23,33 @@ class GroupMemoryStore:
         sender_role: str = "",
         source_id: int = 0,
         generation: int | None = None,
+        account_epoch: int | None = None,
+        scope_epoch: int | None = None,
     ) -> int:
         async with self.storage.data_lock:
-            if generation is not None and generation != self.storage.conversation_generation:
-                return 0
-            cursor = await self.storage.db.execute(
-                "INSERT OR IGNORE INTO group_memory_messages "
-                "(self_id,group_id,role,content,user_id,nickname,sender_role,source_id,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                (self_id, group_id, role, content, user_id, nickname[:120], sender_role[:20], source_id, created_at),
-            )
-            await self.storage.db.commit()
-            if cursor.rowcount:
-                return int(cursor.lastrowid)
-            cursor = await self.storage.db.execute(
-                "SELECT id FROM group_memory_messages WHERE self_id=? AND group_id=? AND source_id=? AND role='user'",
-                (self_id, group_id, source_id),
-            )
-            return int((await cursor.fetchone())[0])
+            try:
+                if not self.storage.scope_current(self_id,'group',group_id,scope_epoch):
+                    return 0
+                if not self.storage.account_current(self_id, account_epoch):
+                    return 0
+                if generation is not None and generation != self.storage.conversation_generation:
+                    return 0
+                cursor = await self.storage.db.execute(
+                    "INSERT OR IGNORE INTO group_memory_messages "
+                    "(self_id,group_id,role,content,user_id,nickname,sender_role,source_id,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (self_id, group_id, role, content, user_id, nickname[:120], sender_role[:20], source_id, created_at),
+                )
+                await self.storage.db.commit()
+                if cursor.rowcount:
+                    return int(cursor.lastrowid)
+                cursor = await self.storage.db.execute(
+                    "SELECT id FROM group_memory_messages WHERE self_id=? AND group_id=? AND source_id=? AND role='user'",
+                    (self_id, group_id, source_id),
+                )
+                return int((await cursor.fetchone())[0])
+            except BaseException:
+                await self.storage.db.rollback()
+                raise
 
     async def recent(self, self_id: int, group_id: int, before_id: int, limit: int = 2000) -> list[dict]:
         cursor = await self.storage.db.execute(
@@ -58,35 +68,44 @@ class GroupMemoryStore:
         return [dict(r) for r in await cursor.fetchall()]
 
     async def save_summary(
-        self, self_id: int, group_id: int, rows: list[dict], privacy: str, topics: list[dict]
+        self, self_id: int, group_id: int, rows: list[dict], privacy: str, topics: list[dict],
+        *, generation: int | None = None, account_epoch: int | None = None, scope_epoch: int | None = None
     ) -> None:
         # Every source row must remain present; checking only the last row can resurrect deleted context.
         async with self.storage.data_lock:
-            if not rows:
-                return
-            source_ids = list(dict.fromkeys(row['id'] for row in rows))
-            placeholders = ','.join('?' for _ in source_ids)
-            await self.storage.db.execute(
-                "INSERT OR IGNORE INTO group_memory_summaries "
-                "(self_id,group_id,first_id,last_id,started_at,ended_at,privacy,content) "
-                "SELECT ?,?,?,?,?,?,?,? WHERE "
-                f"(SELECT count(*) FROM group_memory_messages WHERE self_id=? AND group_id=? AND id IN ({placeholders}))=?",
-                (
-                    self_id,
-                    group_id,
-                    rows[0]["id"],
-                    rows[-1]["id"],
-                    rows[0]["created_at"],
-                    rows[-1]["created_at"],
-                    privacy,
-                    json.dumps(topics, ensure_ascii=False),
-                    self_id,
-                    group_id,
-                    *source_ids,
-                    len(source_ids),
-                ),
-            )
-            await self.storage.db.commit()
+            try:
+                if not self.storage.scope_current(self_id,'group',group_id,scope_epoch):
+                    return
+                if not self.storage.account_current(self_id, account_epoch):
+                    return
+                if not rows or (generation is not None and generation != self.storage.conversation_generation):
+                    return
+                source_ids = list(dict.fromkeys(row['id'] for row in rows))
+                placeholders = ','.join('?' for _ in source_ids)
+                await self.storage.db.execute(
+                    "INSERT OR IGNORE INTO group_memory_summaries "
+                    "(self_id,group_id,first_id,last_id,started_at,ended_at,privacy,content) "
+                    "SELECT ?,?,?,?,?,?,?,? WHERE "
+                    f"(SELECT count(*) FROM group_memory_messages WHERE self_id=? AND group_id=? AND id IN ({placeholders}))=?",
+                    (
+                        self_id,
+                        group_id,
+                        rows[0]["id"],
+                        rows[-1]["id"],
+                        rows[0]["created_at"],
+                        rows[-1]["created_at"],
+                        privacy,
+                        json.dumps(topics, ensure_ascii=False),
+                        self_id,
+                        group_id,
+                        *source_ids,
+                        len(source_ids),
+                    ),
+                )
+                await self.storage.db.commit()
+            except BaseException:
+                await self.storage.db.rollback()
+                raise
 
     async def summaries(self, self_id: int, group_id: int, privacy: str, since: float, before_id: int) -> list[dict]:
         cursor = await self.storage.db.execute(
