@@ -88,7 +88,7 @@ sent 仅表示观察到宿主/协议发送调用成功；warning 表示已观察
 
 `GET /api/config` 的 `config` 和 `overrides` 均隐藏模型、管理和连接密钥。
 
-单群 PATCH 支持可选 `policy` 对象，包含 `name`、`auto_group`、`trigger_mode`（`at/prefix/all`）、`trigger_prefix`、`cooldown_seconds`（0–120）、`max_tool_rounds`（1–5）、`allowed_tools`、`provider` 和 `system_extra`。`allowed_tools` 是工具 ID 列表（形如 `插件名__工具名`，例如 `web__get_weather`），可在 `GET /api/plugins` 的每个插件 `ai_tools[].name` 中查看。空字段继承原有配置，空工具列表明确表示禁用所有工具。传 `policy: null` 移除独立策略；省略 `policy` 保持原策略。设置与策略在同一次数据库更新中保存。
+单群 PATCH 支持可选 `policy` 对象，包含 `name`、`auto_group`、`trigger_mode`（`at/prefix/all`）、`trigger_prefix`、`cooldown_seconds`（0–120）、`allowed_tools`、`provider` 和 `system_extra`。`allowed_tools` 是工具 ID 列表（形如 `插件名__工具名`，例如 `web__get_weather`），可在 `GET /api/plugins` 的每个插件 `ai_tools[].name` 中查看。空字段继承原有配置，空工具列表明确表示禁用所有工具。传 `policy: null` 移除独立策略；省略 `policy` 保持原策略。设置与策略在同一次数据库更新中保存。
 
 `policy.auto_reply_probability`（0–100）控制“自动参与”模式下普通消息交给智能体处理的概率，默认 100；被 @ 或唤醒词触发时不应用概率筛选。
 
@@ -413,3 +413,5 @@ admin.enabled=false 只能通过启动配置设置。关闭后后台页面、管
 全局明确 false 为硬限制；群 true 无法绕过，群原值不被删除。全局未明确停用且插件声明默认 false 时，群 true 仍可启用。周期回调仅在实例默认启用或至少一群单独启用时调度，全局 false 阻止新一轮回调；回调仍负责检查具体目标权限，生命周期初始化及管理读取不因此卸载。已进入执行的回调/外部请求不保证中止或撤回。消息与工具在调用前检查同一插件权限。
 
 开关持久化和 plugin_state_updated 字段审计同事务提交，失败整体回滚；请求取消仍发布已提交状态。同值重复提交不增加审计。记录只含插件及字段名，不复制业务内容。
+
+工具调用不限制轮数或单轮工具数量；旧版 `max_tool_rounds` 字段仅保留输入兼容性，不再影响执行。

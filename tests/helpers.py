@@ -84,6 +84,8 @@ class FakeConnection:
         self.forward_messages: list[dict[str, Any]] = []
         self.forward_messages_by_id: dict[str, list[dict[str, Any]]] = {}
         self.forward_error: Exception | None = None
+        self.get_msg_results: dict[int, dict[str, Any]] = {}
+        self.get_msg_error: Exception | None = None
         self._message_id = 1000
         self._closed = False
 
@@ -134,6 +136,13 @@ class FakeConnection:
 
     async def call(self, action: str, params: dict[str, Any] | None = None, **_: Any) -> Any:
         self.calls.append((action, params or {}))
+        if action == "get_msg":
+            if self.get_msg_error is not None:
+                raise self.get_msg_error
+            message_id = int((params or {}).get("message_id") or 0)
+            if message_id in self.get_msg_results:
+                return self.get_msg_results[message_id]
+            return {"message_id": message_id, "message": []}
         return {"message_id": 1}
 
     async def get_group_member_info(self, group_id: int, user_id: int, **_: Any) -> dict[str, Any]:

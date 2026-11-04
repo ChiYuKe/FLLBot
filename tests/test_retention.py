@@ -190,7 +190,32 @@ async def test_automatic_batch_and_failure_roll_back(tmp_path):
         await bot.stop()
 
 
-@pytest.mark.parametrize('patch', [{'scene_id': 10}, {'datasets': ['conversations'], 'self_id': 1}, {'older_than_days': 0}, {'datasets': ['unknown']}])
+@pytest.mark.parametrize('patch', [{'scene_id': 10}, {'datasets': ['usage'], 'self_id': 1}, {'older_than_days': 0}, {'datasets': ['unknown']}])
 def test_invalid_scope(patch):
     with pytest.raises(ValidationError):
         CleanupRequest.model_validate({'datasets': ['messages'], 'older_than_days': 30, **patch})
+
+
+async def test_candidate_cleanup_is_scoped_and_invalidates_inflight(tmp_path):
+    bot = await make_bot(tmp_path)
+    try:
+        epoch = bot.storage.conversation_generation
+        for account in (11, 22):
+            await bot.storage.prepare_delivery(str(account), account, 'group', 123, 'private candidate', ['part'], epoch)
+        spec = {'scene': 'group', 'scene_id': 123, 'self_id': 11,
+                'cutoffs': {'conversations': time.time()+1}}
+        preview = await cleanup.preview(bot.storage, spec)
+        assert preview['counts']['reply_deliveries'] == 1
+        assert preview['counts']['delivery_parts'] == 1
+        await cleanup.execute(bot.storage, spec, expected=preview['signature'])
+        assert await count(bot, 'reply_deliveries') == 2
+        assert await count(bot, 'delivery_parts') == 2
+        cleared = await (await bot.storage.db.execute("SELECT candidate,metadata,bodies_cleared FROM reply_deliveries WHERE self_id=11")).fetchone()
+        assert tuple(cleared) == ('','{}',1)
+        assert (await cleanup.preview(bot.storage,spec))['counts']['reply_deliveries'] == 0
+        assert bot.storage.conversation_generation == epoch
+        assert bot.storage.scope_generation(11,'group',123) == 1
+        assert bot.storage.scope_generation(22,'group',123) == 0
+        assert not await bot.storage.prepare_delivery('old',11,'group',123,'stale',['stale'],epoch,metadata={'scope_epoch':0})
+    finally:
+        await bot.stop()

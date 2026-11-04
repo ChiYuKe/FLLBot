@@ -40,6 +40,9 @@
 | `plugin.watch_interval` | `2.0` | 插件运行 | 启动构造；修改启动配置来源并重建实例 |
 | `plugin.max_concurrency` | `8` | 插件运行 | 启动构造；修改启动配置来源并重建实例 |
 | `plugin.max_pending_events` | `1000` | 插件运行 | 启动构造；修改启动配置来源并重建实例 |
+| `plugin.max_pending_per_conversation` | `32` | 插件运行 | 启动构造；共享准入与会话队列容量，修改启动来源并重建实例 |
+| `plugin.event_deadline_seconds` | `120.0` | 插件运行 | 后续接收事件固定总时限；不修改已有轮次 deadline |
+| `plugin.queue_timeout_seconds` | `30.0` | 插件运行 | 后续接收事件固定排队时限；不修改已有队列项 |
 | `plugin.handler_timeout` | `60.0` | 插件运行 | 后续请求/消息；保存后不追溯已开始操作 |
 | `storage.path` | `"data/fllbot.db"` | 存储维护 | 启动来源确定实际数据库；修改值不迁移数据 |
 | `storage.backup_dir` | `"data/backups"` | 存储维护 | 后续备份操作读取；旧目录备份需另外管理 |
@@ -48,6 +51,8 @@
 | `logging.json_lines` | `true` | 运行日志 | 启动构造；修改启动配置来源并重建实例 |
 | `logging.file` | `"fllbot.log"` | 运行日志 | 启动构造；修改启动配置来源并重建实例 |
 | `logging.ring_size` | `500` | 运行日志 | 启动构造；修改启动配置来源并重建实例 |
+| `logging.capture_message_content` | `false` | 运行日志 | 后续消息诊断记录是否保存正文预览；独立于正式历史和记忆采集 |
+| `logging.message_content_hours` | `24` | 运行日志 | 启动及每分钟清除超过期限的诊断正文；范围 1–168 小时，保留统计行 |
 | `llm.context_window` | `null` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `llm.supports_tools` | `true` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `llm.supports_images` | `true` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
@@ -59,7 +64,7 @@
 | `llm.api_key` | `""` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `llm.model` | `"deepseek-chat"` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `llm.timeout` | `60.0` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
-| `llm.max_tokens` | `800` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
+| `llm.max_tokens` | `4000` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `llm.temperature` | `0.8` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `llm.context_mode` | `"model"` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `llm.max_context_messages` | `16` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
@@ -90,7 +95,7 @@
 | `chat.group_memory` | `true` | 聊天默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `chat.memory_session_gap_minutes` | `30` | 聊天默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `chat.memory_recent_messages` | `200` | 聊天默认 | 后续请求/消息；保存后不追溯已开始操作 |
-| `chat.memory_context_chars` | `24000` | 聊天默认 | 后续请求/消息；保存后不追溯已开始操作 |
+| `chat.memory_context_chars` | `400000` | 聊天默认 | 后续请求/消息；范围 4,000–1,000,000；保存后不追溯已开始操作 |
 | `chat.reply_mode` | `"auto"` | 聊天默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `chat.forward_threshold` | `1200` | 聊天默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `chat.reply_chunk_size` | `0` | 聊天默认 | 后续请求/消息；保存后不追溯已开始操作 |
@@ -156,7 +161,7 @@
 | `group_policy.trigger_prefix` | `null` | 群单独配置 | 保留兼容字段；当前实际唤醒词见 chat.wake_word 与 Bot 默认值 |
 | `group_policy.cooldown_seconds` | `null` | 群单独配置 | 后续消息；同群多个 Bot 共享覆盖 |
 | `group_policy.auto_reply_probability` | `null` | 群单独配置 | 后续消息；同群多个 Bot 共享覆盖 |
-| `group_policy.max_tool_rounds` | `null` | 群单独配置 | 后续消息；同群多个 Bot 共享覆盖 |
+| `group_policy.max_tool_rounds` | `null` | 旧版兼容字段 | 已停用，工具调用不限制轮数 |
 | `group_policy.allowed_tools` | `null` | 群单独配置 | 后续消息；同群多个 Bot 共享覆盖 |
 | `group_policy.provider` | `""` | 群单独配置 | 后续消息；同群多个 Bot 共享覆盖 |
 | `group_policy.system_extra` | `""` | 群单独配置 | 后续消息；同群多个 Bot 共享覆盖 |

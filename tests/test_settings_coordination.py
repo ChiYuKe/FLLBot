@@ -12,6 +12,54 @@ from helpers import make_bot
 AUTH = {"Authorization": "Bearer admin-token"}
 
 
+@pytest.mark.parametrize('operation', ['save', 'config', 'ensure', 'reset'])
+async def test_cancelled_group_commit_still_publishes_live_settings(tmp_path, monkeypatch, operation):
+    bot = await make_bot(tmp_path)
+    original = bot.storage.upsert_group
+    committed, release = asyncio.Event(), asyncio.Event()
+    try:
+        agent = bot.plugins.get('agent')
+        if operation != 'ensure':
+            await bot.permissions.save_group(123, enabled=True, config={})
+        if operation == 'reset':
+            await agent.settings.set('auto_group', True, group_id=123)
+
+        async def delayed(*args, **kwargs):
+            await original(*args, **kwargs)
+            committed.set()
+            await release.wait()
+
+        monkeypatch.setattr(bot.storage, 'upsert_group', delayed)
+        config = {'llm': {'enabled': False}}
+        if operation in {'save', 'reset'}:
+            pending = bot.permissions.save_group(123, enabled=False, config=config, reset_agent=operation == 'reset')
+        elif operation == 'config':
+            pending = bot.permissions.set_group_config(123, config)
+        else:
+            pending = bot.permissions.ensure_group(123)
+        task = asyncio.create_task(pending)
+        await asyncio.wait_for(committed.wait(), 1)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        # Mutating the caller's object cannot alter the committed/runtime snapshot.
+        config['llm']['enabled'] = True
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        durable = (await bot.storage.list_group_states())[123]
+        assert bot.permissions._groups[123] == durable
+        if operation != 'ensure':
+            assert bot.permissions.group_config(123)['llm']['enabled'] is False
+        if operation in {'save', 'reset'}:
+            assert not bot.permissions.group_enabled(123)
+        if operation == 'reset':
+            assert not agent.settings.group_overrides(123)
+    finally:
+        release.set()
+        await bot.stop()
+
+
 async def test_console_and_legacy_group_api_share_revision_guard(tmp_path: Path) -> None:
     bot = await make_bot(tmp_path)
     try:

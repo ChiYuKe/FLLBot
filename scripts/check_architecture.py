@@ -16,8 +16,23 @@ BOUNDARIES = {
     "rules": {"rules"},
     "permission": {"permission"},
     "policy": {"policy"},
-    "llm": {"llm", "config", "onebot", "policy", "tracing"},
-    "plugin": {"plugin", "rules", "onebot", "tracing"},
+    "llm": {"llm", "config", "onebot", "policy", "tracing", "conversation", "delivery_policy"},
+    "plugin": {"plugin", "rules", "onebot", "tracing", "conversation"},
+}
+
+# Keep the extracted services independent of the compatibility facade and ingress.
+MODULE_BOUNDARIES = {
+    'delivery_service': {'delivery_policy','onebot.connection','onebot.segments'},
+    'delivery_policy': set(),
+    'conversation_service': {'conversation','tracing'},
+    'agent_conversation': {'llm.agent_runtime','llm.client'},
+    'builtin_plugins.agent.plugin': {'plugin','policy'},
+    'llm.output': {'delivery_policy'},
+    'llm.model_gateway': {'conversation','tracing','llm.budget','llm.client'},
+    'llm.context_assembly': {'onebot.segments','llm.client','llm.forward','llm.message_format','llm.quote'},
+    'llm.context_builder': set(),
+    'llm.agent_runtime': set(),
+    'llm.reply': {'onebot.segments'},
 }
 
 
@@ -66,13 +81,23 @@ def check(root: Path = ROOT) -> list[str]:
     for path in core.rglob("*.py"):
         relative = path.relative_to(core)
         layer = relative.parts[0] if len(relative.parts) > 1 else path.stem
-        if layer not in BOUNDARIES:
-            continue
         parts = list(relative.with_suffix("").parts)
         if parts[-1] == "__init__":
             parts.pop()
+        module = '.'.join(parts)
+        if layer not in BOUNDARIES and module not in MODULE_BOUNDARIES:
+            continue
+        if module == 'builtin_plugins.agent.plugin':
+            for node in ast.walk(ast.parse(path.read_text(encoding='utf-8-sig'))):
+                if isinstance(node,ast.Attribute) and node.attr in {'storage','db'}:
+                    errors.append(f'{path.relative_to(root)}:{node.lineno}: agent 接入不能直接访问存储')
         for line, target in imports(path, ".".join(["fllbot", *parts])):
-            if target.startswith("fllbot.") and target.split(".")[1] not in BOUNDARIES[layer]:
+            if module in MODULE_BOUNDARIES and target.startswith('fllbot.'):
+                dependency = target.removeprefix('fllbot.')
+                if not any(dependency == prefix or dependency.startswith(prefix+'.')
+                           for prefix in MODULE_BOUNDARIES[module]):
+                    errors.append(f'{path.relative_to(root)}:{line}: {module} 不能依赖 {target}')
+            if layer in BOUNDARIES and target.startswith("fllbot.") and target.split(".")[1] not in BOUNDARIES[layer]:
                 errors.append(f"{path.relative_to(root)}:{line}: {layer} 不能反向依赖 {target}")
     packages = root / "plugins"
     if packages.is_dir():

@@ -6,6 +6,7 @@ import asyncio
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 import uvicorn
 import websockets
@@ -43,11 +44,72 @@ def _text_of(payload: dict) -> str:
     )
 
 
-async def identify_bot(ws) -> None:
+async def identify_bot(ws, self_id: int = 10001) -> None:
     payload = json.loads(await asyncio.wait_for(ws.recv(), timeout=5))
     assert payload["action"] == "get_login_info"
     await ws.send(json.dumps({"status": "ok", "retcode": 0, "echo": payload["echo"],
-                              "data": {"user_id": 10001, "nickname": "木鱼"}}))
+                              "data": {"user_id": self_id, "nickname": "木鱼"}}))
+
+
+@pytest.mark.parametrize('confirmed', [True, False])
+async def test_websocket_agent_roundtrip_links_account_turn_echo_and_receipt(tmp_path, confirmed):
+    bot = build_bot(tmp_path, llm={'enabled': True, 'api_key': 'fake', 'context_window': 8192},
+                    overrides={'chat': {'reply_mode': 'split', 'reply_interval_ms': 0}})
+    server, task, port = await start_server(create_app(bot), tmp_path)
+    requests = []
+
+    def model(request):
+        requests.append(json.loads(request.content))
+        return httpx.Response(200, json={'choices': [{'message': {'content': 'wire answer'}, 'finish_reason': 'stop'}],
+                                        'usage': {'prompt_tokens': 20, 'completion_tokens': 5}})
+
+    bot.chat.client._http = httpx.AsyncClient(transport=httpx.MockTransport(model))
+    try:
+        await bot.permissions.save_group(20002, enabled=True, config={'policy': {
+            'auto_group': True, 'trigger_modes': ['all'], 'cooldown_seconds': 0}})
+        base = f'ws://127.0.0.1:{port}/onebot/v11/ws?access_token=test-token&self_id='
+        async with websockets.connect(base + '10001') as first, websockets.connect(base + '10002') as second:
+            await identify_bot(first, 10001)
+            await identify_bot(second, 10002)
+            for account, ws in [(10001, first), (10002, second)]:
+                payload = group_message(f'WIRE_INPUT_{account}', message_id=77)
+                payload['self_id'] = account
+                await ws.send(json.dumps(payload))
+                if account == 10001:
+                    await ws.send(json.dumps(payload))
+                outbound = json.loads(await asyncio.wait_for(ws.recv(), 5))
+                assert outbound['action'] == 'send_group_msg' and outbound['params']['group_id'] == 20002
+                assert _text_of(outbound) == 'wire answer'
+                # An unrelated echo must not acknowledge the pending protocol action.
+                await ws.send(json.dumps({'status': 'ok', 'retcode': 0, 'echo': 'unknown', 'data': {'message_id': 999}}))
+                data = {'message_id': account * 10} if account == 10001 or confirmed else {}
+                await ws.send(json.dumps({'status': 'ok', 'retcode': 0, 'echo': outbound['echo'], 'data': data}))
+            await asyncio.wait_for(bot.dispatcher._queue.join(), 5)
+            await bot.traces.flush()
+            assert len(requests) == 2
+            events = (await bot.storage.list_message_events())['items']
+            assert len(events) == 2
+            for event in events:
+                account = event['self_id']
+                sent = account == 10001 or confirmed
+                detail = await bot.storage.turn_detail(event['turn_id'])
+                assert detail['status'] == ('delivered' if sent else 'delivery_uncertain')
+                assert (detail['trace_metrics']['first_delivery_ms'] is not None) == sent
+                assert detail['trace_id'] == event['trace_id'] and detail['trace_id']
+                assert len(detail['model_requests']) == 1
+                rows = await (await bot.storage.db.execute(
+                    'SELECT p.status,p.message_id FROM delivery_parts p JOIN reply_deliveries d USING(delivery_id) '
+                    'WHERE d.turn_id=?', (event['turn_id'],))).fetchall()
+                assert [tuple(row) for row in rows] == [('sent', str(account * 10)) if sent else ('uncertain', '')]
+                history = await bot.storage.recent_chat('group', 20002, self_id=account)
+                assert [row.content for row in history if row.role == 'assistant'] == (['wire answer'] if sent else [])
+            for ws in (first, second):
+                with pytest.raises(TimeoutError):
+                    await asyncio.wait_for(ws.recv(), 0.05)
+    finally:
+        server.should_exit = True
+        await asyncio.wait_for(task, 10)
+        await bot.stop()
 
 
 async def test_full_message_roundtrip(tmp_path: Path) -> None:
@@ -75,7 +137,7 @@ async def test_full_message_roundtrip(tmp_path: Path) -> None:
             help_text = _text_of(help_payload)
             assert "可用命令" in help_text
             assert "/echo" in help_text
-            await ws.send(json.dumps({"status": "ok", "retcode": 0, "data": {}, "echo": help_payload["echo"]}))
+            await ws.send(json.dumps({"status": "ok", "retcode": 0, "data": {"message_id": 2}, "echo": help_payload["echo"]}))
 
         assert bot.manager.count() == 0
     finally:

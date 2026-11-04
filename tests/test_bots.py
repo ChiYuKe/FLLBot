@@ -38,7 +38,7 @@ def test_bot_api_validation_identity_and_restart(tmp_path: Path) -> None:
     with TestClient(create_app(restored)) as client:
         account = client.get("/api/console/bots", headers=AUTH).json()["items"][0]
         assert account.pop('revision') == restored.bots.revision(10001)
-        assert account == {"self_id": 10001, "nickname": "木鱼", "online": False, "defaults": values}
+        assert account == {"self_id": 10001, "nickname": "木鱼", "online": False, "enabled": True, "defaults": values}
 
 
 async def test_each_bot_uses_own_nickname_and_defaults(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

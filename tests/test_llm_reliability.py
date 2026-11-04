@@ -476,3 +476,50 @@ def test_model_controls_validate_persist_and_diagnostics_skip(tmp_path):
         result = api.post("/api/llm/diagnose", headers=AUTH, json={})
         assert "private-test-key" not in result.text
         assert [check["status"] for check in result.json()["checks"]] == ["failed", "skipped", "skipped"]
+
+@pytest.mark.parametrize("recover", [True, False])
+async def test_empty_answer_retries_once_and_reports_finish_reason(recover):
+    calls = []
+
+    def handler(req):
+        calls.append(req)
+        return response("ok") if recover and len(calls) == 2 else response(None, finish="length")
+
+    config = LLMConfig(api_key="k", context_window=8192)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = LLMClient(lambda: config, http_client=http)
+        if recover:
+            assert (await client.chat_result(MESSAGES)).text == "ok"
+        else:
+            with pytest.raises(LLMError, match="finish_reason=length"):
+                await client.chat_result(MESSAGES)
+    assert len(calls) == 2
+
+
+async def test_empty_answer_can_fail_over():
+    calls = []
+
+    def handler(req):
+        calls.append(req.url.host)
+        return response(None) if req.url.host == "primary.test" else response("backup")
+
+    config = LLMConfig(
+        api_key="k", context_window=8192, default="primary", fallback_providers=["backup"],
+        providers={"primary": {"base_url": "https://primary.test"},
+                   "backup": {"base_url": "https://backup.test"}},
+    )
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        result = await LLMClient(lambda: config, http_client=http).chat_result(MESSAGES)
+    assert result.text == "backup"
+    assert calls == ["primary.test", "primary.test", "backup.test"]
+
+
+async def test_content_filter_is_not_retried():
+    calls = []
+    config = LLMConfig(api_key="k", context_window=8192)
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(lambda req: calls.append(req) or response(None, finish="content_filter"))
+    ) as http:
+        with pytest.raises(LLMError, match="内容过滤"):
+            await LLMClient(lambda: config, http_client=http).chat_result(MESSAGES)
+    assert len(calls) == 1

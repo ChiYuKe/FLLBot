@@ -28,7 +28,7 @@ async def test_disabled_metadata_is_removed_from_current_and_history(tmp_path: P
         'send_nickname': False, 'send_user_id': False, 'send_role': False, 'send_time': False,
     }})
     try:
-        await bot.storage.add_chat_message('group', 20002, 'user', '历史正文', user_id=40004, nickname='历史昵称', sender_role='admin')
+        await bot.storage.add_chat_message('group', 20002, 'user', '历史正文', user_id=40004, nickname='历史昵称', sender_role='admin', self_id=10001)
         ctx = Context(bot=bot, connection=FakeConnection(), event=parse_event(group_message('当前正文', nickname='当前昵称')))
         messages = await bot.chat.build_messages('group', 20002, '当前正文', ctx=ctx)
         assert [m['content'] for m in messages[1:]] == ['历史正文', '当前正文']
@@ -78,7 +78,7 @@ async def test_wake_only_behavior_uses_chat_options(tmp_path: Path, monkeypatch,
             assert connection.texts() == []
         else:
             assert complete.call_args.args[0][-1]['content'] == expected
-            rows = await bot.storage.recent_chat('group', 20002)
+            rows = await bot.storage.recent_chat('group', 20002, self_id=10001)
             assert rows[0].content == 'bot'
     finally:
         await bot.stop()
@@ -98,7 +98,7 @@ async def test_wake_only_fixed_replies_without_model(tmp_path: Path, monkeypatch
         await bot.dispatcher.dispatch(parse_event(group_message('bot')), connection)
         complete.assert_not_awaited()
         assert connection.texts() in (['我在'], ['怎么啦'])
-        rows = await bot.storage.recent_chat('group', 20002)
+        rows = await bot.storage.recent_chat('group', 20002, self_id=10001)
         assert [row.role for row in rows] == ['user', 'assistant']
         assert rows[0].content == 'bot'
         assert rows[1].content == connection.texts()[0]
@@ -121,6 +121,6 @@ async def test_wake_only_fixed_without_texts_stays_silent(tmp_path: Path, monkey
         await bot.dispatcher.dispatch(parse_event(group_message('bot')), connection)
         complete.assert_not_awaited()
         assert connection.texts() == []
-        assert await bot.storage.recent_chat('group', 20002) == []
+        assert await bot.storage.recent_chat('group', 20002, self_id=10001) == []
     finally:
         await bot.stop()

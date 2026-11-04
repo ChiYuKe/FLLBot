@@ -83,7 +83,7 @@ async def test_respond_saves_history(llm_bot) -> None:
         "content": "测试用户(30003，成员)：早上好",
     }
 
-    rows = await llm_bot.storage.recent_chat("group", 20002)
+    rows = await llm_bot.storage.recent_chat("group", 20002, self_id=10001)
     assert [(row.role, row.content) for row in rows] == [("user", "早上好"), ("assistant", "你好呀")]
     assert (rows[0].user_id, rows[0].nickname, rows[0].sender_role) == (30003, "测试用户", "member")
 
@@ -92,9 +92,9 @@ async def test_second_turn_includes_history(llm_bot) -> None:
     captured: list[dict[str, Any]] = []
     patch_client(llm_bot, make_transport("嗯嗯", captured))
 
-    for text in ("第一句", "第二句"):
+    for message_id, text in enumerate(("第一句", "第二句"), 1):
         conn = FakeConnection()
-        ctx = Context(bot=llm_bot, connection=conn, event=parse_event(group_message(text, at=10001)))  # type: ignore[arg-type]
+        ctx = Context(bot=llm_bot, connection=conn, event=parse_event(group_message(text, at=10001, message_id=message_id)))  # type: ignore[arg-type]
         await llm_bot.chat.respond(ctx, text)
 
     second = captured[1]["messages"]
@@ -109,7 +109,7 @@ async def test_group_history_labels_each_sender(llm_bot) -> None:
     patch_client(llm_bot, make_transport("好", captured))
 
     first = parse_event(group_message("第一句", user_id=30003, nickname="小明", role="admin"))
-    second = parse_event(group_message("第二句", user_id=40004, nickname="小红", role="member"))
+    second = parse_event(group_message("第二句", message_id=2, user_id=40004, nickname="小红", role="member"))
     await llm_bot.chat.respond(Context(bot=llm_bot, connection=FakeConnection(), event=first), "第一句")  # type: ignore[arg-type]
     await llm_bot.chat.respond(Context(bot=llm_bot, connection=FakeConnection(), event=second), "第二句")  # type: ignore[arg-type]
 
@@ -326,3 +326,12 @@ async def test_network_error_still_fails_after_retries(monkeypatch: pytest.Monke
         with pytest.raises(LLMError, match="网络请求失败"):
             await client.chat_result([{"role": "user", "content": "hi"}])
     assert calls == 3
+
+
+async def test_long_current_input_is_not_silently_truncated(llm_bot):
+    captured = []
+    patch_client(llm_bot, make_transport('ok', captured))
+    text = 'x' * 2500
+    ctx = Context(bot=llm_bot, connection=FakeConnection(), event=parse_event(group_message(text, at=10001)))
+    await llm_bot.chat.respond(ctx, text)
+    assert captured[0]['messages'][-1]['content'].endswith(text)

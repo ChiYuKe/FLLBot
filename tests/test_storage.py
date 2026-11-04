@@ -193,3 +193,50 @@ async def test_reminder_scoped_to_scene(storage: Storage) -> None:
     private_rows = await storage.list_reminders("private", 30003)
     assert [item["content"] for item in group_rows] == ["群里的"]
     assert [item["content"] for item in private_rows] == ["私聊的"]
+
+
+async def test_chat_account_and_scene_isolation(storage: Storage) -> None:
+    for account, scene, text in [(0, "group", "legacy"), (11, "group", "first"),
+                                  (22, "group", "second"), (11, "private", "private")]:
+        await storage.add_chat_message(scene, 123, "user", text, self_id=account)
+    for account, scene, expected in [(0, "group", "legacy"), (11, "group", "first"),
+                                      (22, "group", "second"), (11, "private", "private")]:
+        rows = await storage.recent_chat(scene, 123, self_id=account)
+        assert [row.content for row in rows] == [expected]
+
+
+async def test_shared_conversation_lock() -> None:
+    import asyncio
+
+    from fllbot.conversation import ConversationLockPool
+    from fllbot.llm.chat import ChatService
+    service = object.__new__(ChatService)
+    service._conversation_pool = ConversationLockPool()
+    entered = asyncio.Event()
+    async def waiting():
+        async with service.conversation_lock(11,'group',123):
+            entered.set()
+    async with service.conversation_lock(11,'group',123):
+        task = asyncio.create_task(waiting())
+        await asyncio.sleep(0)
+        assert not entered.is_set()
+        async with service.conversation_lock(22,'group',123):
+            pass
+    await task
+    assert entered.is_set()
+    assert not service._conversation_pool.slots
+
+
+async def test_restart_preserves_uncertain_delivery(tmp_path: Path):
+    db = Storage(tmp_path / 'restart.db')
+    await db.connect()
+    await db.prepare_delivery('stable', 11, 'group', 123, 'candidate', ['candidate'], db.conversation_generation)
+    await db.update_delivery('stable', 0, 'sending')
+    await db.close()
+    await db.connect()
+    try:
+        row = await (await db.db.execute("SELECT status FROM delivery_parts")).fetchone()
+        assert row['status'] == 'uncertain'
+        assert not await db.recent_chat('group', 123, self_id=11)
+    finally:
+        await db.close()

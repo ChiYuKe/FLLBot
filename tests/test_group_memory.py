@@ -1,5 +1,6 @@
 """Memory isolation, provenance and deletion use temporary databases only."""
 
+import asyncio
 import json
 import sqlite3
 import time
@@ -126,7 +127,7 @@ async def test_unanswered_background_is_seen_once_and_silent_input_is_kept(memor
     bot = memory_bot
     await bot.dispatcher.dispatch(parse_event(group_message("大家明天去公园", message_id=1)), FakeConnection())
     bot.chat.complete.assert_not_awaited()
-    bot.chat.complete.return_value = SimpleNamespace(text="", tool_calls=[])
+    bot.chat.complete.return_value = SimpleNamespace(text="<NO_REPLY>", tool_calls=[])
     await bot.dispatcher.dispatch(parse_event(group_message("你觉得呢", at=10001, message_id=2)), FakeConnection())
     messages = bot.chat.complete.call_args.args[0]
     assert sum("大家明天去公园" in m["content"] for m in messages) == 1
@@ -170,6 +171,10 @@ async def test_compression_uses_originals_once_and_keeps_provenance(memory_bot):
     ctx = make_context(bot)
     await bot.chat.memory.observe(ctx)
     messages = await bot.chat.build_messages("group", 20002, ctx.text, ctx=ctx)
+    bot.chat.complete.assert_not_awaited()
+    bot.chat.memory.schedule(ctx)
+    await bot.chat.memory._summary_queue.join()
+    messages = await bot.chat.build_messages("group", 20002, ctx.text, ctx=ctx)
     bot.chat.complete.assert_awaited_once()
     summary_input = bot.chat.complete.call_args.args[0][-1]["content"]
     assert "原文0" in summary_input and "原文3" in summary_input and "原文4" not in summary_input
@@ -193,6 +198,8 @@ async def test_recent_history_is_count_based_even_beyond_an_hour(memory_bot):
     assert len(original) == 10
     assert "连续消息5" in original[0]  # 100 minutes old, still within the most recent 10 messages.
     assert "连续消息14" in original[-1]
+    bot.chat.memory.schedule(ctx)
+    await bot.chat.memory._summary_queue.join()
     source = bot.chat.complete.call_args.args[0][-1]["content"]
     assert "连续消息4" in source and "连续消息5" not in source
 
@@ -219,9 +226,13 @@ async def test_failed_summary_keeps_raw_and_privacy_flags_apply(memory_bot):
     await bot.chat.memory.observe(ctx)
     messages = await bot.chat.build_messages("group", 20002, ctx.text, ctx=ctx)
     assert "隐私昵称" not in json.dumps(messages, ensure_ascii=False)
+    bot.chat.memory.schedule(ctx)
+    await bot.chat.memory._summary_queue.join()
     assert "123456" not in bot.chat.complete.call_args.args[0][-1]["content"]
     assert len(await store.recent(10001, 20002, 9999)) == 13
-    assert not await store.summaries(10001, 20002, "0000", 0, 9999)
+    excerpts = await store.summaries(10001, 20002, "0000", 0, 9999)
+    assert excerpts and 'source_excerpt' in excerpts[0]['content']
+    assert '123456' not in excerpts[0]['content'] and '隐私昵称' not in excerpts[0]['content']
     assert (await bot.chat.memory.search(ctx, "内容0"))["messages"]
 
 
@@ -235,6 +246,8 @@ async def test_large_messages_respect_working_and_summary_budgets(memory_bot):
     await bot.chat.memory.observe(ctx)
     messages = await bot.chat.build_messages("group", 20002, ctx.text, ctx=ctx)
     assert sum(len(m["content"]) for m in messages) <= 4000
+    bot.chat.memory.schedule(ctx)
+    await bot.chat.memory._summary_queue.join()
     source = bot.chat.complete.call_args.args[0][-1]["content"]
     assert len(source.encode("utf-8")) <= 8192 - 3248
     assert "中间内容省略" in source
@@ -305,3 +318,103 @@ async def test_history_tool_is_gated_and_returns_the_following_reply(memory_bot)
     assert not any(
         t["function"]["name"] == "agent__search_history" for t in (bot.chat.complete.call_args.kwargs["tools"] or [])
     )
+
+async def test_fenced_summary_is_saved(memory_bot):
+    bot = memory_bot
+    original = bot.chat.complete.return_value.text
+    bot.chat.complete.return_value = SimpleNamespace(text=f"```json\n{original}\n```", tool_calls=[])
+    store = bot.chat.memory.store
+    await store.append(10001, 20002, "user", "话题原文", created_at=time.time() - 100)
+    ctx = make_context(bot)
+    await bot.chat.memory.compress(ctx, 9999)
+    assert len(await store.summaries(10001, 20002, bot.chat.memory.privacy(), 0, 9999)) == 1
+    assert len(await store.recent(10001, 20002, 9999)) == 1
+
+
+@pytest.mark.parametrize('text', ['{"topics":[]}', '{"topics":null}', 'not json',
+    '{"topics":[{"topic":"test","facts":"source","status":[]}]}'])
+async def test_invalid_summary_uses_explicit_excerpts_and_does_not_block_batch(memory_bot,text,caplog):
+    bot = memory_bot
+    store = bot.chat.memory.store
+    await store.append(10001,20002,'user','原始记录不会丢失',created_at=time.time()-100)
+    bot.chat.complete.return_value = SimpleNamespace(text=text,tool_calls=[])
+    context = make_context(bot)
+    await bot.chat.memory.compress(context,9999)
+    summaries = await store.summaries(10001,20002,bot.chat.memory.privacy(),0,9999)
+    topics = json.loads(summaries[0]['content'])
+    assert topics[0]['summary_kind'] == 'source_excerpt'
+    assert topics[0]['source_incomplete']
+    assert '原始记录不会丢失' in topics[0]['facts']
+    assert len(await store.recent(10001,20002,9999)) == 1
+    bot.chat.memory._retry_after.clear()
+    await bot.chat.memory.compress(context,9999)
+    bot.chat.complete.assert_awaited_once()
+    assert not any(record.exc_info for record in caplog.records)
+
+
+async def test_summary_network_failure_backs_off_without_advancing_sources(memory_bot):
+    bot = memory_bot
+    await bot.chat.memory.store.append(10001,20002,'user','待压缩原文',created_at=time.time()-100)
+    bot.chat.complete.side_effect = RuntimeError('network unavailable')
+    context = make_context(bot)
+    for expected in (60,120,240):
+        bot.chat.memory._retry_after.clear()
+        before = time.time()
+        await bot.chat.memory.compress(context,9999)
+        assert bot.chat.memory._retry_after[(10001,20002)] >= before + expected
+        count = bot.chat.complete.await_count
+        await bot.chat.memory.compress(context,9999)
+        assert bot.chat.complete.await_count == count
+    assert len(await bot.chat.memory.store.pending(10001,20002,9999,bot.chat.memory.privacy())) == 1
+
+
+def test_summary_compatible_shapes_and_string_arrays():
+    from fllbot.llm.summary_protocol import parse_summary
+
+    topic = {'topic':'原话','participants':['甲','乙'],'facts':['确有提问','尚未答复'],
+             'conclusions':None,'open_questions':None,'status':'open'}
+    for document in ([topic],{'topics':topic},{'topics':[topic]}):
+        result = parse_summary(json.dumps(document))
+        assert result[0]['participants'] == '甲；乙'
+        assert result[0]['facts'] == '确有提问；尚未答复'
+        assert result[0]['conclusions'] == ''
+
+
+async def test_slow_summary_is_deferred_and_queue_is_bounded(memory_bot, monkeypatch):
+    bot = memory_bot
+    for i in range(14):
+        await bot.chat.memory.store.append(10001, 20002, 'user', str(i), created_at=time.time()-100+i)
+    ctx = make_context(bot)
+    await bot.chat.memory.observe(ctx)
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def slow(*args):
+        entered.set()
+        await release.wait()
+    monkeypatch.setattr(bot.chat.memory, 'compress', slow)
+    await asyncio.wait_for(bot.chat.build_messages('group', 20002, ctx.text, ctx=ctx), 1)
+    assert not entered.is_set()
+    bot.chat.memory.schedule(ctx)
+    await asyncio.wait_for(entered.wait(), 1)
+    bot.chat.memory.schedule(ctx)
+    assert bot.chat.memory._summary_queue.qsize() == 0
+    # Other groups use bounded queue slots, never spawn one task per message.
+    for group in range(30000, 30100):
+        await bot.permissions.save_group(group, enabled=True, config={'policy':{'auto_group':True}})
+        pending = make_context(bot, group_id=group)
+        pending.memory_summary_before = 100
+        bot.chat.memory.schedule(pending)
+    assert bot.chat.memory._summary_queue.qsize() == 64
+    assert bot.chat.memory.summary_dropped == 36
+    release.set()
+    await asyncio.wait_for(bot.chat.memory._summary_queue.join(), 1)
+
+
+async def test_summary_generation_cannot_commit_after_epoch_change(memory_store):
+    storage, store = memory_store
+    source = await store.append(1, 10, 'user', 'source', created_at=100)
+    rows = await store.recent(1, 10, source+1)
+    epoch = storage.conversation_generation
+    await storage.clear_chat('group', 20)
+    await store.save_summary(1, 10, rows, '1111', [{'topic':'stale'}], generation=epoch)
+    assert not await store.summaries(1, 10, '1111', 0, source+1)
+    assert await store.recent(1, 10, source+1)

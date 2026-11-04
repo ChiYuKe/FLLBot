@@ -119,6 +119,10 @@ def test_explicit_group_rules_create_remove_and_restart(tmp_path: Path) -> None:
         client.patch("/api/config", headers=AUTH, json={"permission": {"default_group_enabled": False}})
         assert bot.permissions.group_enabled(123) is False
         assert client.get("/api/console/groups/123", headers=AUTH).json()["has_override"] is False
+        # Adding a form is enough to use it, even after inheriting a legacy disabled default.
+        added = client.post("/api/console/groups/123/rule", headers=AUTH).json()
+        assert added["enabled"] is True and added["effective_enabled"] is True
+        assert client.delete("/api/console/groups/123/rule", headers=AUTH).json()["enabled"] is False
     with TestClient(create_app(build_bot(tmp_path))) as client:
         restored = client.get("/api/console/groups/123", headers=AUTH).json()
         assert restored["has_override"] is False and restored["enabled"] is False

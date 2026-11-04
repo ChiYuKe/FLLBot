@@ -26,7 +26,7 @@ plugins/
 插件目录的直接子文件夹就是安装单元，不再嵌套“分类/插件”目录。文件夹名称与清单 `name` 一致，
 以小写字母开头，只含小写字母、数字和下划线，最长 64 字符，不能是 Windows 保留名。
 复制、安装、更新、移除均以完整目录包为单位，宿主源码不放用户插件实现。
-`fllbot/builtin_plugins/basic/` 与 `agent/` 使用同一包结构，只是跟随 FLLBot 一起发行。
+`fllbot/builtin_plugins/basic/`、`agent/`、`text/` 与 `github/` 使用同一包结构，只是跟随 FLLBot 一起发行。
 
 ## 包头与稳定标识
 

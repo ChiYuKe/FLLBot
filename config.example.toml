@@ -61,6 +61,11 @@ watch_interval = 2.0
 max_concurrency = 8
 # 队列中的待处理事件上限；超出时丢弃新到事件并记录日志。
 max_pending_events = 1000
+# 单会话待处理容量；与全局容量一样需修改启动配置并重建实例。
+max_pending_per_conversation = 32
+# 以下时限用于后续接收事件；已接收事件保留原时限。
+queue_timeout_seconds = 30
+event_deadline_seconds = 120
 # 单个处理器超时秒数。
 handler_timeout = 60.0
 
@@ -75,6 +80,10 @@ json_lines = true
 file = "fllbot.log"
 # 保留在内存里的日志条数，供 /api/logs 查询。
 ring_size = 500
+# 诊断消息默认仅记录元数据；显式启用后最多保留 1000 字正文。
+capture_message_content = false
+# 诊断正文保留小时数（1–168）；启动及每分钟到期擦除，统计元数据保留。
+message_content_hours = 24
 
 [llm]
 enabled = false
@@ -83,7 +92,7 @@ base_url = "https://api.deepseek.com"
 api_key = ""
 model = "deepseek-chat"
 timeout = 60.0
-max_tokens = 800
+max_tokens = 4000
 temperature = 0.8
 # 模型能力：未知时沿用旧版行为；可按服务商说明或管理页诊断结果调整。
 supports_tools = true
@@ -151,7 +160,7 @@ system_extra = ""
 group_memory = true
 memory_session_gap_minutes = 30
 memory_recent_messages = 200
-memory_context_chars = 24000
+memory_context_chars = 400000
 
 [retention]
 # 自动清理默认关闭；0 表示该类不自动清理。保存策略不会立即删除数据。

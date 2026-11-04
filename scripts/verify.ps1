@@ -15,6 +15,8 @@ try {
     Write-Host "==> architecture and plugin packages" -ForegroundColor Cyan
     & $python scripts/check_architecture.py
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+    & $python scripts/check_admin_scope.py
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
     & $python -m fllbot plugin check --root $root --builtin
     if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 

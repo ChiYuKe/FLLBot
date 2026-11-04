@@ -160,7 +160,7 @@ async def test_protocol_send_records_echo_success_and_error_without_payloads() -
         async def send_text(self, text):
             payload = json.loads(text)
             await self.connection._handle_payload({'echo': payload['echo'], 'status': 'failed' if self.failed else 'ok',
-                                                    'retcode': 100 if self.failed else 0, 'wording': 'PRIVATE', 'data': {}})
+                                                    'retcode': 100 if self.failed else 0, 'wording': 'PRIVATE', 'data': {'message_id': 123}})
 
     socket = Socket()
     connection = OneBotConnection(socket, on_event=AsyncMock(), self_id=10001)
@@ -176,6 +176,20 @@ async def test_protocol_send_records_echo_success_and_error_without_payloads() -
     assert [step['status'] for step in result['steps']] == ['passed', 'failed']
     assert all(step['stage'] == 'protocol_send' for step in result['steps'])
     assert 'PRIVATE' not in json.dumps(result)
+
+
+async def test_nonmessage_protocol_success_is_not_counted_as_a_delivered_reply():
+    class Socket:
+        async def send_text(self, text):
+            payload = json.loads(text)
+            await connection._handle_payload({'echo': payload['echo'], 'status': 'ok', 'retcode': 0, 'data': {}})
+
+    connection = OneBotConnection(Socket(), on_event=AsyncMock(), self_id=10001)
+    trace = MessageTrace(parse_event(group_message('PRIVATE')), connection)
+    with activate(trace):
+        await connection.send_like(123, 1)
+    assert not trace.sent
+    assert trace.summary()['metrics']['first_delivery_ms'] is None
 
 
 async def test_duplicate_and_queue_overflow_have_terminal_records(tmp_path: Path) -> None:

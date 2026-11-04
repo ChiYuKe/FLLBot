@@ -8,6 +8,25 @@ from fllbot.onebot.models import parse_event
 from helpers import FakeConnection, group_message, make_bot
 
 
+async def test_agent_history_start_is_scoped_to_account_and_group(tmp_path,monkeypatch):
+    bot = await make_bot(tmp_path,llm={'enabled':True,'api_key':'fake','context_window':8192})
+    try:
+        await bot.permissions.save_group(20002,enabled=True,config={'policy':{
+            'auto_group':True,'trigger_modes':['all'],'cooldown_seconds':0}})
+        complete = AsyncMock(return_value=SimpleNamespace(text='answer',tool_calls=[]))
+        monkeypatch.setattr(bot.chat,'complete',complete)
+        for account in (11,22):
+            payload = group_message('hello')
+            payload['self_id'] = account
+            await bot.dispatcher.dispatch(parse_event(payload),FakeConnection(self_id=account))
+        assert complete.await_count == 2
+        assert await bot.storage.kv_get('agent-consent-start','11:20002') is not None
+        assert await bot.storage.kv_get('agent-consent-start','22:20002') is not None
+        assert await bot.storage.kv_get('agent-consent-start','20002') is None
+    finally:
+        await bot.stop()
+
+
 @pytest.mark.parametrize('variant', ['tool', 'marker', 'no_tools', 'normal_reply'])
 async def test_non_participation_is_internal_and_never_announced(tmp_path, monkeypatch, variant):
     bot = await make_bot(tmp_path, llm={
@@ -147,7 +166,7 @@ async def test_agent_trigger_modes(
             assert complete.call_args.args[0][-1]["content"].startswith(expected_content)
         if mode == "prefix" and text == "木鱼":
             # 内部提示只发给模型，历史里仍记录用户原话。
-            rows = await bot.storage.recent_chat("group", 20002)
+            rows = await bot.storage.recent_chat("group", 20002, self_id=10001)
             assert [row.content for row in rows if row.role == "user"] == ["木鱼"]
     finally:
         await bot.stop()
