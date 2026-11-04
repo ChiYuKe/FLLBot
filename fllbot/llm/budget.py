@@ -7,11 +7,17 @@ import json
 from typing import Any
 
 
+def wire_messages(messages) -> list[dict[str, Any]]:
+    """Host provenance is never sent as an unsupported model protocol field."""
+    return [{key:copy.deepcopy(value) for key,value in message.items() if not key.startswith('_fllbot_')}
+            for message in messages]
+
+
 def request_tokens(
     messages: list[dict[str, Any]], tools: list[dict[str, Any]] | None = None, image_tokens: int = 4096
 ) -> int:
     """UTF-8 字节上界加协议余量；图片使用可配置的预留量。"""
-    entries = copy.deepcopy(messages)
+    entries = wire_messages(messages)
     images = 0
     for message in entries:
         content = message.get("content")
@@ -41,7 +47,8 @@ def fit_messages(
     budget = window - output
     while request_tokens(result, tools, image_tokens) > budget:
         last_user = max((i for i, item in enumerate(result) if item.get("role") == "user"), default=0)
-        removable = [i for i in range(last_user) if result[i].get("role") not in {"system", "developer"}]
+        removable = [i for i in range(last_user) if result[i].get("role") not in {"system", "developer"}
+                     and result[i].get('_fllbot_source',{}).get('kind') != 'summary']
         if removable:
             start = removable[0]
             end = next((i for i in range(start + 1, last_user) if result[i].get("role") == "user"), last_user)
@@ -50,6 +57,17 @@ def fit_messages(
                 for i, item in enumerate(result)
                 if not (start <= i < end and item.get("role") not in {"system", "developer"})
             ]
+            continue
+        summaries = [i for i in range(last_user) if result[i].get('_fllbot_source',{}).get('kind') == 'summary']
+        if summaries:
+            index = summaries[0]
+            summary = result[index]
+            prefix = summary['_fllbot_source'].get('prefix','')
+            body = summary['content'][len(prefix):]
+            if len(body) > 100:
+                summary['content'] = prefix + body[:len(body)//2] + '\n[摘要因上下文预算已缩减]'
+            else:
+                result.pop(index)
             continue
         candidates = [
             item

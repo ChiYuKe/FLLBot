@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
-from .chat import ChatReply, ChatService, split_text
+from .chat import ChatService, split_text
 from .client import LLMClient, LLMError
+from .context_assembly import ContextAssembler
+from .context_builder import ContextBuilder
+from .model_gateway import ChatReply, ModelGateway
 from .personas import DEFAULT_PERSONA_TEXT, PERSONA_VARIABLES, Persona, PersonaStore, render_template
 
 __all__ = [
@@ -11,6 +14,9 @@ __all__ = [
     "PERSONA_VARIABLES",
     "ChatReply",
     "ChatService",
+    "ContextAssembler",
+    "ContextBuilder",
+    "ModelGateway",
     "LLMClient",
     "LLMError",
     "Persona",

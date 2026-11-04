@@ -1,113 +1,167 @@
-"""多轮对话服务：人格、上下文裁剪、限流、分条发送。"""
+"""兼容聊天入口：协调上下文快照、Agent 执行与回复服务。"""
 
 from __future__ import annotations
 
-import asyncio
+import copy
+import hashlib
 import logging
-import time
-from dataclasses import dataclass, field
-from datetime import datetime
+from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
+from ..conversation import ConversationKey, ConversationLockPool
 from ..onebot.models import MessageEvent
-from ..tracing import record, span
-from .budget import request_tokens
-from .client import DEFAULT_CONTEXT_WINDOW, LLMClient, LLMError
+from .client import LLMClient, LLMError
+from .context_assembly import ContextAssembler
+from .context_builder import ContextBuilder
+from .execution_config import ExecutionConfig, current, execution_scope
+from .message_format import group_user_content, speaker_label
+from .model_gateway import ChatReply, ModelGateway
 from .personas import PersonaStore
+from .quote import QuotedMessage
+from .reply import split_text
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..app import FLLBot
     from ..plugin.context import Context
 
-_GROUP_ROLE_LABELS = {"owner": "群主", "admin": "管理员", "member": "成员"}
-
-
-def speaker_label(user_id: int | None, nickname: str | None, sender_role: str | None = None) -> str:
-    """群聊说话人标签：``昵称(QQ号，身份)``；没有可用信息时返回空串。"""
-    name = (nickname or "").strip()
-    uid = int(user_id or 0)
-    if not name and uid:
-        name = f"QQ {uid}"
-    if not name:
-        return ""
-    tags = [str(uid)] if uid else []
-    role_label = _GROUP_ROLE_LABELS.get(str(sender_role or "").strip().lower())
-    if role_label:
-        tags.append(role_label)
-    return f"{name}({'，'.join(tags)})" if tags else name
-
-
-def group_user_content(
-    user_id: int | None,
-    nickname: str | None,
-    sender_role: str | None,
-    content: str,
-) -> str:
-    """给群聊用户消息加上发送者标签，便于模型区分说话人。"""
-    label = speaker_label(user_id, nickname, sender_role)
-    return f"{label}：{content}" if label else content
-
-
-@dataclass
-class ChatReply:
-    """一次模型回复的结果。"""
-
-    text: str
-    persona: str
-    model: str
-    latency_ms: float = 0.0
-    provider: str = ""
-    usage: dict[str, int] = field(default_factory=dict)
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    finish_reason: str = ""
-
-    def summary(self) -> dict[str, Any]:
-        return {
-            "text": self.text,
-            "persona": self.persona,
-            "model": self.model,
-            "provider": self.provider,
-            "usage": dict(self.usage),
-            "latency_ms": round(self.latency_ms, 1),
-            "finish_reason": self.finish_reason,
-            "truncated": self.finish_reason == "length",
-        }
-
 
 class ChatService:
     """面向 QQ 会话的多轮聊天封装。"""
 
-    def __init__(self, bot: FLLBot) -> None:
+    def __init__(
+        self,
+        bot: FLLBot,
+        *,
+        memory: Any = None,
+        gateway: ModelGateway | None = None,
+        assembler: ContextAssembler | None = None,
+        builder: ContextBuilder | None = None,
+    ) -> None:
         self.bot = bot
         self.logger = logging.getLogger("fllbot.llm")
-        self.client = LLMClient(lambda: self.bot.config.llm)
-        self._locks: dict[str, asyncio.Lock] = {}
-        self._quota_locks: dict[int, asyncio.Lock] = {}
-        self.requests = 0
-        self.failures = 0
-        self.last_error: str | None = None
-        self.last_latency_ms: float = 0.0
+        self.client = LLMClient(lambda: self.execution_config.llm)
+        self._conversation_pool = ConversationLockPool()
         from .memory import GroupMemory
-        self.memory = GroupMemory(bot)
+
+        self.memory = memory if memory is not None else GroupMemory(bot)
+        self.gateway = gateway or ModelGateway(
+            configuration=lambda: self.config,
+            client=lambda: self.client,
+            storage=bot.storage,
+            provider_name=self.provider_name,
+            execution_scope=self.execution_scope,
+        )
+        self.context_assembler = assembler or ContextAssembler(
+            configuration=lambda: self.execution_config,
+            personas=lambda: self.personas,
+            persona_name=self.persona_name,
+            provider_name=self.provider_name,
+            policy=self._context_policy,
+            nickname=bot.bots.nickname,
+            client=lambda: self.client,
+            history=bot.storage.recent_chat,
+            memory=self.memory,
+        )
+        self.context_builder = builder or ContextBuilder(
+            self.context_assembler.assemble,
+            lambda: self.execution_config,
+            self.context_assembler.resolve_provider,
+            self.gateway.describe_budget,
+            version=lambda:self.execution_version,
+        )
+
+    def _context_policy(self, scene_id: int) -> dict:
+        from ..policy import policy_overrides
+
+        snapshot = current(self.bot)
+        return snapshot.policy if snapshot else policy_overrides(self.bot, scene_id)
+
+    @property
+    def requests(self):
+        return self.gateway.requests
+
+    @property
+    def failures(self):
+        return self.gateway.failures
+
+    @property
+    def last_error(self):
+        return self.gateway.last_error
+
+    @property
+    def last_latency_ms(self):
+        return self.gateway.last_latency_ms
+
+    def conversation_lock(self, self_id: int, scene: str, scene_id: int):
+        key = ConversationKey("qq", self_id, scene, scene_id)
+        return self._conversation_pool.lease(key)
+
+    @property
+    def execution_config(self) -> Any:
+        snapshot = current(self.bot)
+        return snapshot.config if snapshot else self.bot.config
+
+    @property
+    def execution_version(self) -> str:
+        snapshot = current(self.bot)
+        return snapshot.version if snapshot else hashlib.sha256(self.bot.config.model_dump_json().encode()).hexdigest()
+
+    def turn_agent_settings(self, group_id: int, self_id: int | None = None, *, live: bool = False) -> dict:
+        from ..policy import agent_settings
+        snapshot = current(self.bot)
+        if not live and snapshot and snapshot.scene == 'group' and snapshot.scene_id == group_id:
+            return copy.deepcopy(snapshot.agent)
+        return agent_settings(self.bot,group_id,self_id)
+
+    @contextmanager
+    def execution_scope(self, scene: str, scene_id: int, self_id: int | None = None, config: Any = None):
+        if current(self.bot) is not None:
+            yield
+            return
+        from ..policy import agent_settings, policy_overrides
+
+        snapshot = ExecutionConfig(
+            id(self.bot),
+            (config or self.bot.config).model_copy(deep=True),
+            scene,
+            scene_id,
+            copy.deepcopy(self.bot.permissions.group_config(scene_id)) if scene == "group" else {},
+            copy.deepcopy(policy_overrides(self.bot, scene_id)) if scene == "group" else {},
+            self.bot.bots.defaults(self_id).model_copy(deep=True),
+            copy.deepcopy(self.bot.personas),
+            copy.deepcopy(agent_settings(self.bot,scene_id,self_id)) if scene == 'group' else {},
+        )
+        with execution_scope(snapshot):
+            yield
+
+    def scope_for_turn(self, ctx: Context, config: Any):
+        return self.execution_scope(ctx.event.scene, ctx.event.scene_id, ctx.self_id, config)
+
+    def _group_config(self, scene_id: int) -> dict:
+        snapshot = current(self.bot)
+        if snapshot and snapshot.scene == "group" and snapshot.scene_id == scene_id:
+            return snapshot.group_config
+        return self.bot.permissions.group_config(scene_id)
 
     # -- 查询 ------------------------------------------------------------- #
     @property
     def config(self) -> Any:
-        return self.bot.config.llm
+        return self.execution_config.llm
 
     @property
     def personas(self) -> PersonaStore:
-        return self.bot.personas
+        snapshot = current(self.bot)
+        return snapshot.personas if snapshot else self.bot.personas
 
     @property
     def available(self) -> bool:
-        config = self.config
+        config = self.bot.config.llm
         if not config.enabled:
             return False
         return any(item["configured"] for item in self.client.providers_status())
 
     def scene_enabled(self, scene: str, scene_id: int) -> bool:
-        config = self.config
+        config = self.bot.config.llm
         if not config.enabled:
             return False
         if scene == "private":
@@ -119,21 +173,27 @@ class ChatService:
 
     def persona_name(self, scene: str, scene_id: int, self_id: int | None = None) -> str:
         if scene == "group":
-            override = self.bot.permissions.group_config(scene_id).get("llm")
+            override = self._group_config(scene_id).get("llm")
             if isinstance(override, dict) and override.get("persona"):
                 return str(override["persona"])
-        return self.bot.bots.defaults(self_id).persona or str(self.config.persona)
+        return (current(self.bot).defaults if current(self.bot) else self.bot.bots.defaults(self_id)).persona or str(
+            self.config.persona
+        )
 
-    def provider_name(self, scene: str | None, scene_id: int, task: str | None = None, self_id: int | None = None) -> str:
+    def provider_name(
+        self, scene: str | None, scene_id: int, task: str | None = None, self_id: int | None = None
+    ) -> str:
         if scene == "group":
             from ..policy import policy_overrides
 
-            name = policy_overrides(self.bot, scene_id).get("provider")
+            name = (current(self.bot).policy if current(self.bot) else policy_overrides(self.bot, scene_id)).get(
+                "provider"
+            )
             if name:
                 if name not in self.config.provider_names():
                     raise LLMError("群策略指定的模型服务已不可用，请调整该群策略")
                 return str(name)
-        name = self.bot.bots.defaults(self_id).provider
+        name = (current(self.bot).defaults if current(self.bot) else self.bot.bots.defaults(self_id)).provider
         if name:
             if name not in self.config.provider_names():
                 raise LLMError("Bot 默认模型服务已不可用，请调整机器人设置")
@@ -160,41 +220,37 @@ class ChatService:
         }
 
     async def close(self) -> None:
+        await self.memory.close()
         await self.client.close()
 
     # -- 提示词 ----------------------------------------------------------- #
     def _variables(self, scene: str, scene_id: int, ctx: Context | None) -> dict[str, Any]:
-        now = datetime.now()
-        options = self.bot.config.chat
-        variables: dict[str, Any] = {
-            "bot_name": (getattr(ctx.connection, "nickname", "") or self.bot.bots.nickname(ctx.self_id) or "FLLBot") if ctx else "FLLBot",
-            "scene": scene,
-            "group_id": scene_id if scene == "group" else "",
-            "user_id": ctx.user_id if ctx is not None and options.send_user_id else "",
-            "user_name": (ctx.sender.card or ctx.sender.nickname) if ctx is not None and options.send_nickname else "",
-            "nickname": (ctx.sender.card or ctx.sender.nickname) if ctx is not None and options.send_nickname else "",
-            "time": now.strftime("%H:%M") if options.send_time else "",
-            "date": now.strftime("%Y-%m-%d") if options.send_time else "",
-            "weekday": "一二三四五六日"[now.weekday()] if options.send_time else "",
-        }
-        return variables
+        return self.context_assembler._variables(scene, scene_id, ctx)
 
-    def system_prompt(self, scene: str, scene_id: int, ctx: Context | None = None, persona_name: str | None = None) -> str:
-        config = self.config
-        persona = self.personas.get(persona_name or self.persona_name(scene, scene_id, ctx.self_id if ctx else None))
-        text = persona.render(**self._variables(scene, scene_id, ctx))
-        extra = (config.system_extra or "").strip()
-        if extra:
-            text = f"{text}\n\n{extra}"
-        if scene == "group":
-            from ..policy import policy_overrides
+    def system_prompt(
+        self, scene: str, scene_id: int, ctx: Context | None = None, persona_name: str | None = None
+    ) -> str:
+        return self.context_assembler.system_prompt(scene, scene_id, ctx, persona_name)
 
-            group_extra = policy_overrides(self.bot, scene_id).get("system_extra", "").strip()
-            if group_extra:
-                text = f"{text}\n\n本群补充规则：\n{group_extra}"
-        return text
+    def _context_provider(
+        self, scene: str, scene_id: int, ctx: Context | None, provider: str | None = None
+    ) -> tuple[str, str]:
+        return self.context_assembler.resolve_provider(scene, scene_id, ctx, provider)
 
-    async def build_messages(
+    async def build_messages(self, scene: str, scene_id: int, user_text: str, **options) -> list[dict[str, Any]]:
+        ctx = options.get("ctx")
+        with self.execution_scope(scene, scene_id, ctx.self_id if ctx else None):
+            snapshot = await self.context_builder.build(scene, scene_id, user_text, **options)
+            ctx = options.get("ctx")
+            if ctx is not None:
+                ctx.context_snapshot = snapshot
+                await self.bot.storage.set_turn_context(ctx.turn_id, snapshot.metadata())
+            return snapshot.messages()
+
+    async def _context_budget(self, provider: str, messages: list, tools: list) -> dict:
+        return await self.gateway.describe_budget(provider, messages, tools)
+
+    async def _build_messages(
         self,
         scene: str,
         scene_id: int,
@@ -204,90 +260,48 @@ class ChatService:
         ctx: Context | None = None,
         include_history: bool = True,
         history_since: float | None = None,
+        history_before: float | None = None,
+        provider: str | None = None,
     ) -> list[dict[str, Any]]:
-        config = self.config
-        system = {"role": "system", "content": self.system_prompt(scene, scene_id, ctx, persona_name)}
-        user_content = user_text
-        if scene == "group" and ctx is not None:
-            user_content = self._group_content(ctx.user_id, ctx.nickname, ctx.sender.role, user_text, getattr(ctx.event, "time", 0))
-        user = {"role": "user", "content": user_content}
+        return await self.context_assembler.assemble(
+            scene,
+            scene_id,
+            user_text,
+            persona_name=persona_name,
+            ctx=ctx,
+            include_history=include_history,
+            history_since=history_since,
+            history_before=history_before,
+            provider=provider,
+        )
 
-        if scene == "group" and ctx is not None and ctx.memory_message_id and self.memory.enabled(ctx):
-            if include_history:
-                return self._with_images(await self.memory.build(ctx, system, user), ctx)
-            return self._with_images([system, user], ctx)
+    async def _forward_content(self, ctx: Context, text: str) -> str:
+        return await self.context_assembler._forward_content(ctx, text)
 
-        history: list[dict[str, str]] = []
-        if config.context_mode == "model":
-            # Respect an explicit user setting first, then provider metadata, then
-            # the conservative fallback. Metadata is never inferred from names.
-            selected_provider = self.provider_name(scene, scene_id, "agent" if ctx and ctx.plugin and ctx.plugin.name == "agent" else None, ctx.self_id if ctx else None)
-            window = await self.client.context_window(scene=scene, provider=selected_provider) or DEFAULT_CONTEXT_WINDOW
-            _, provider = self.client.resolve(provider=selected_provider, scene=scene)
-            budget = max(0, window - (provider.max_tokens or config.max_tokens) - len(self._current_images(ctx)) * 2048)
-            if include_history:
-                rows = await self.bot.storage.recent_chat(
-                    scene, scene_id, limit=window, created_after=history_since
-                )
-                history = [self._history_entry(scene, row) for row in rows if row.content]
-            selected: list[dict[str, str]] = []
-            # UTF-8 bytes are a conservative token upper bound, including CJK.
-            used = sum(len(item["content"].encode("utf-8")) + 8 for item in (system, user))
-            for item in reversed(history):
-                size = len(item["content"].encode("utf-8")) + 8
-                if used + size > budget:
-                    break
-                selected.append(item)
-                used += size
-            return self._with_images([system, *reversed(selected), user], ctx)
-        if include_history and config.max_context_messages > 0:
-            rows = await self.bot.storage.recent_chat(
-                scene, scene_id, limit=config.max_context_messages, created_after=history_since
-            )
-            history = [self._history_entry(scene, row) for row in rows if row.content]
+    def _forward_sender(self, sender: dict, node: dict, body: str) -> str:
+        return self.context_assembler._forward_sender(sender, node, body)
 
-        return self._with_images(self._trim(system, history, user, config.max_context_messages, config.max_context_chars), ctx)
+    def _quote_content(self, quoted: QuotedMessage, user_content: str) -> tuple[str, list[str]]:
+        return self.context_assembler._quote_content(quoted, user_content)
 
-    def _group_content(self, user_id: int | None, nickname: str | None, role: str | None, text: str, timestamp: float = 0) -> str:
-        options = self.bot.config.chat
-        name = nickname if options.send_nickname else None
-        if not options.send_user_id and name == str(user_id):
-            name = None
-        content = group_user_content(user_id if options.send_user_id else None, name, role if options.send_role else None, text)
-        if not name and not (options.send_user_id and user_id) and options.send_role and role in _GROUP_ROLE_LABELS:
-            content = _GROUP_ROLE_LABELS[role] + '：' + text
-        if options.send_time and timestamp:
-            content = '[' + datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S') + '] ' + content
-        return content
+    def _group_content(
+        self, user_id: int | None, nickname: str | None, role: str | None, text: str, timestamp: float = 0
+    ) -> str:
+        return self.context_assembler._group_content(user_id, nickname, role, text, timestamp)
 
     def _current_images(self, ctx: Context | None) -> list[str]:
-        if not self.bot.config.chat.allow_images or ctx is None:
-            return []
-        result = []
-        for segment in ctx.message:
-            if segment.type != "image":
-                continue
-            url = str(segment.data.get("url") or segment.data.get("file") or "")
-            if url.startswith(("https://", "http://", "data:image/")) and url not in result:
-                result.append(url)
-            if len(result) == 4:
-                break
-        return result
+        return self.context_assembler._current_images(ctx)
 
-    def _with_images(self, messages: list[dict[str, Any]], ctx: Context | None) -> list[dict[str, Any]]:
-        images = self._current_images(ctx)
-        if images:
-            messages[-1] = {**messages[-1], "content": [{"type": "text", "text": messages[-1]["content"]}, *[
-                {"type": "image_url", "image_url": {"url": url}} for url in images
-            ]]}
-        return messages
+    def _turn_images(self, ctx: Context | None, images: list[str] | None = None) -> list[str]:
+        return self.context_assembler._turn_images(ctx, images)
+
+    def _with_images(
+        self, messages: list[dict[str, Any]], ctx: Context | None, images: list[str] | None = None
+    ) -> list[dict[str, Any]]:
+        return self.context_assembler._with_images(messages, ctx, images)
 
     def _history_entry(self, scene: str, record: Any) -> dict[str, str]:
-        """把存储的历史还原成模型消息；群聊用户消息带上发送者标签。"""
-        content = record.content
-        if scene == "group" and record.role == "user":
-            content = self._group_content(record.user_id, record.nickname, record.sender_role, content, getattr(record, "created_at", 0))
-        return {"role": record.role, "content": content}
+        return self.context_assembler._history_entry(scene, record)
 
     @staticmethod
     def _trim(
@@ -297,73 +311,15 @@ class ChatService:
         max_messages: int,
         max_chars: int,
     ) -> list[dict[str, str]]:
-        selected: list[dict[str, str]] = []
-        total = len(system["content"]) + len(user["content"])
-        for item in reversed(history):
-            if len(selected) >= max_messages:
-                break
-            length = len(item["content"])
-            if total + length > max_chars and selected:
-                break
-            selected.append(item)
-            total += length
-        selected.reverse()
-        return [system, *selected, user]
+        return ContextAssembler._trim(system, history, user, max_messages, max_chars)
 
     # -- 调用 ------------------------------------------------------------- #
     async def complete(
-        self, messages: list[dict[str, Any]], *, max_tokens: int | None = None,
-        provider: str | None = None, scene: str | None = None, scene_id: int = 0,
-        task: str | None = None, tools: list[dict[str, Any]] | None = None,
-        self_id: int | None = None, allow_fallback: bool = True,
-    ) -> ChatReply:
-        with span('model', provider or 'route'):
-            return await self._complete_with_quota(messages, max_tokens=max_tokens, provider=provider, scene=scene,
-                                                   scene_id=scene_id, task=task, tools=tools, self_id=self_id,
-                                                   allow_fallback=allow_fallback)
-
-    async def _complete_with_quota(
-        self, messages: list[dict[str, Any]], *, max_tokens: int | None = None,
-        provider: str | None = None, scene: str | None = None, scene_id: int = 0,
-        task: str | None = None, tools: list[dict[str, Any]] | None = None,
-        self_id: int | None = None, allow_fallback: bool = True,
-    ) -> ChatReply:
-        options = dict(max_tokens=max_tokens, provider=provider, scene=scene, scene_id=scene_id,
-                       task=task, tools=tools, self_id=self_id, allow_fallback=allow_fallback)
-        if scene != "group" or not (self.config.group_daily_token_limit or self.config.group_daily_cost_limit):
-            return await self._complete(messages, **options)
-        # Check and record within the same group lock, including concurrent admin/summary calls.
-        async with self._quota_locks.setdefault(scene_id, asyncio.Lock()):
-            name = provider or self.provider_name(scene, scene_id, task, self_id)
-            _, resolved = self.client.resolve(provider=name)
-            prepared = await self.client.prepare_messages(messages, provider=name, tools=tools, max_tokens=max_tokens)
-            midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-            usage = await self.bot.storage.group_llm_usage(scene_id, midnight)
-            candidates = [resolved]
-            if allow_fallback:
-                candidates += [self.config.resolve(item)[1] for item in self.config.fallback_providers
-                               if item in self.config.provider_names()]
-            reservations = [
-                (request_tokens(prepared, tools, item.image_token_budget),
-                 max_tokens if max_tokens is not None else item.max_tokens or 800, item)
-                for item in candidates
-            ]
-            if self.config.group_daily_token_limit and usage["tokens"] + max(p + o for p, o, _ in reservations) > self.config.group_daily_token_limit:
-                raise LLMError("本群今日 Token 额度不足，已暂停本次模型调用")
-            estimated_cost = max((p * item.input_price + o * item.output_price) / 1_000_000
-                                 for p, o, item in reservations)
-            if self.config.group_daily_cost_limit:
-                if any(item.input_price <= 0 or item.output_price <= 0 for item in candidates):
-                    raise LLMError("费用额度已启用，请为使用的模型及备用服务填写正数输入、输出单价")
-                if usage["cost"] + estimated_cost > self.config.group_daily_cost_limit:
-                    raise LLMError("本群今日费用额度不足，已暂停本次模型调用")
-            return await self._complete(prepared, **options)
-
-    async def _complete(
         self,
         messages: list[dict[str, Any]],
         *,
         max_tokens: int | None = None,
+        unbounded_output: bool = False,
         provider: str | None = None,
         scene: str | None = None,
         scene_id: int = 0,
@@ -372,66 +328,75 @@ class ChatService:
         self_id: int | None = None,
         allow_fallback: bool = True,
     ) -> ChatReply:
-        started = time.perf_counter()
-        self.requests += 1
-        name = provider or self.provider_name(scene, scene_id, task, self_id)
-        record('model', 'provider_selected', component=name)
-        try:
-            result = await self.client.chat_result(
-                messages,
-                max_tokens=max_tokens,
-                provider=name,
-                scene=scene,
-                task=task,
-                tools=tools,
-                allow_fallback=allow_fallback,
-            )
-        except LLMError as exc:
-            self.failures += 1
-            self.last_error = str(exc)
-            self.logger.warning("模型调用失败: %s", exc)
-            await self._record_usage(
-                scene or "",
-                scene_id,
-                name,
-                "",
-                {},
-                (time.perf_counter() - started) * 1000,
-                ok=False,
-                error=str(exc),
-            )
-            raise
-        latency = (time.perf_counter() - started) * 1000
-        record('model', 'response_received', component=result.provider)
-        self.last_latency_ms = latency
-        self.last_error = None
-        await self._record_usage(scene or "", scene_id, result.provider, result.model, result.usage, latency, ok=True)
-        text = result.text
-        tool_calls = result.tool_calls
-        if result.finish_reason == "length":
-            # Incomplete JSON must never reach a tool with external side effects.
-            tool_calls = []
-            text = (text + "\n\n[回复已达到长度上限，可发送“继续”接着回答。]" if not result.tool_calls
-                    else "工具调用参数未生成完整，本次未执行工具，请缩短请求或提高回复长度上限。")
-        return ChatReply(
-            text=text,
-            persona="",
-            model=result.model,
-            latency_ms=latency,
-            provider=result.provider,
-            usage=result.usage,
-            tool_calls=tool_calls,
-            finish_reason=result.finish_reason,
+        return await self.gateway.complete(
+            messages,
+            max_tokens=max_tokens,
+            unbounded_output=unbounded_output,
+            provider=provider,
+            scene=scene,
+            scene_id=scene_id,
+            task=task,
+            tools=tools,
+            self_id=self_id,
+            allow_fallback=allow_fallback,
+        )
+
+    async def _complete_with_quota(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
+        unbounded_output: bool = False,
+        provider: str | None = None,
+        scene: str | None = None,
+        scene_id: int = 0,
+        task: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        self_id: int | None = None,
+        allow_fallback: bool = True,
+    ) -> ChatReply:
+        return await self.gateway._complete_with_quota(
+            messages,
+            max_tokens=max_tokens,
+            unbounded_output=unbounded_output,
+            provider=provider,
+            scene=scene,
+            scene_id=scene_id,
+            task=task,
+            tools=tools,
+            self_id=self_id,
+            allow_fallback=allow_fallback,
+        )
+
+    async def _complete(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        max_tokens: int | None = None,
+        unbounded_output: bool = False,
+        provider: str | None = None,
+        scene: str | None = None,
+        scene_id: int = 0,
+        task: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        self_id: int | None = None,
+        allow_fallback: bool = True,
+    ) -> ChatReply:
+        return await self.gateway._complete(
+            messages,
+            max_tokens=max_tokens,
+            unbounded_output=unbounded_output,
+            provider=provider,
+            scene=scene,
+            scene_id=scene_id,
+            task=task,
+            tools=tools,
+            self_id=self_id,
+            allow_fallback=allow_fallback,
         )
 
     def _cost(self, provider: str, usage: dict[str, int]) -> float:
-        try:
-            _, config = self.config.resolve(provider)
-        except KeyError:  # pragma: no cover - resolve 已兜底
-            return 0.0
-        prompt = int(usage.get("prompt_tokens", 0))
-        completion = int(usage.get("completion_tokens", 0))
-        return (prompt * config.input_price + completion * config.output_price) / 1_000_000
+        return self.gateway._cost(provider, usage)
 
     async def _record_usage(
         self,
@@ -445,28 +410,7 @@ class ChatService:
         ok: bool,
         error: str = "",
     ) -> None:
-        try:
-            if not model:
-                try:
-                    provider, resolved = self.config.resolve(provider or None)
-                    model = resolved.model
-                except KeyError:
-                    pass
-            await self.bot.storage.record_llm_usage(
-                scene=scene,
-                scene_id=scene_id,
-                provider=provider,
-                model=model,
-                prompt_tokens=int(usage.get("prompt_tokens", 0)),
-                completion_tokens=int(usage.get("completion_tokens", 0)),
-                latency_ms=latency_ms,
-                cost=self._cost(provider, usage) if ok else 0.0,
-                ok=ok,
-                error=error,
-                usage_estimated=bool(usage.get("estimated", 0)),
-            )
-        except Exception:  # pragma: no cover - 统计失败不影响对话
-            self.logger.exception("记录 LLM 用量失败")
+        return await self.gateway._record_usage(scene, scene_id, provider, model, usage, latency_ms, ok=ok, error=error)
 
     async def test(self, prompt: str, *, persona_name: str | None = None, provider: str | None = None) -> ChatReply:
         """管理端自测：不带历史，直接用默认人格回答。"""
@@ -479,6 +423,74 @@ class ChatService:
         reply = await self.complete(messages, provider=provider, scene="test", task="chat")
         reply.persona = persona_name or config.persona
         return reply
+
+    async def generate(
+        self,
+        scene: str,
+        scene_id: int,
+        text: str,
+        *,
+        ctx: Context | None = None,
+        persona_name: str | None = None,
+        provider: str | None = None,
+        include_history: bool = True,
+    ) -> tuple[ChatReply, int]:
+        with self.execution_scope(scene, scene_id, ctx.self_id if ctx else None):
+            messages = await self.build_messages(
+                scene,
+                scene_id,
+                text,
+                ctx=ctx,
+                persona_name=persona_name,
+                include_history=include_history,
+                provider=provider,
+            )
+            result = await self.bot.agent_runtime.run(
+                messages, provider=provider, scene=scene, scene_id=scene_id, ctx=ctx
+            )
+            if result.response is None:
+                raise LLMError("上下文已失效")
+            return result.response, len(messages)
+
+    async def preview(
+        self,
+        scene: str,
+        scene_id: int,
+        text: str,
+        *,
+        persona_name: str | None = None,
+        provider: str | None = None,
+        include_history: bool = True,
+        save: bool = False,
+        self_id: int = 0,
+    ) -> dict:
+        if self_id and save:
+            raise ValueError("真实账号调试为只读模式，不能写入 QQ 会话历史")
+        if self_id and str(self_id) not in self.bot.bots.items and self.bot.manager.by_self_id(self_id) is None:
+            raise ValueError("账号不存在，请选择已连接过的账号")
+        ctx = self.bot.debug_context(scene, scene_id, self_id)
+        ctx.turn_input = text
+        async with self.bot.conversations.turn(ctx) as accepted:
+            if not accepted:
+                raise ValueError("调试轮次已失效，请重新测试")
+            reply, count = await self.generate(
+                scene,
+                scene_id,
+                text,
+                ctx=ctx,
+                persona_name=persona_name,
+                provider=provider,
+                include_history=include_history,
+            )
+            if save:
+                async with self.bot.storage.data_lock:
+                    if not ctx.data_current:
+                        raise ValueError("会话数据已清理，本次测试结果未保存，请重新测试")
+                    await self.bot.storage.add_chat_message(scene, scene_id, "user", text, generation=ctx.data_epoch)
+                    await self.bot.storage.add_chat_message(
+                        scene, scene_id, "assistant", reply.text, generation=ctx.data_epoch
+                    )
+            return {**reply.summary(), "messages": count, "turn_id": ctx.turn_id}
 
     # -- QQ 对话 ---------------------------------------------------------- #
     async def respond(self, ctx: Context, text: str, *, persona_name: str | None = None) -> ChatReply | None:
@@ -497,8 +509,6 @@ class ChatService:
         content = (text or "").strip()
         if not content:
             return None
-        if len(content) > 2000:
-            content = content[:2000]
 
         cooldown = float(config.cooldown_seconds or 0)
         if cooldown > 0 and not self.bot.permissions.cooldown_ok(("llm", "chat", ctx.user_id), cooldown):
@@ -506,73 +516,32 @@ class ChatService:
             return None
 
         persona = persona_name or self.persona_name(scene, scene_id, ctx.self_id)
-        lock = self._locks.setdefault(f"{scene}:{scene_id}", asyncio.Lock())
-        async with lock:
+        ctx.turn_input = content
+        async with self.bot.conversations.turn(ctx) as accepted:
+            if not accepted:
+                return None
             try:
-                messages = await self.build_messages(scene, scene_id, content, persona_name=persona, ctx=ctx)
-                reply = await self.complete(messages, scene=scene, scene_id=scene_id, self_id=ctx.self_id)
+                reply, _ = await self.generate(scene, scene_id, content, persona_name=persona, ctx=ctx)
             except LLMError:
+                ctx.turn_reason = "model_failed"
                 return None
 
             reply.persona = persona
             if not ctx.data_current:
-                ctx.trace_event('trigger', 'context_cleared', 'skipped')
+                ctx.trace_event("trigger", "context_cleared", "skipped")
                 return None
             try:
-                await self.bot.storage.add_chat_message(
-                    scene,
-                    scene_id,
-                    "user",
-                    content,
-                    user_id=ctx.user_id,
-                    nickname=ctx.nickname,
-                    sender_role=ctx.sender.role,
-                    generation=ctx.data_epoch,
-                )
-                await self.bot.storage.add_chat_message(scene, scene_id, "assistant", reply.text, generation=ctx.data_epoch)
+                await self.bot.conversations.project_input(ctx,ctx.context_input or content)
             except Exception:  # pragma: no cover - 存历史失败不影响回复
                 self.logger.exception("保存聊天历史失败")
 
             from .output import send_chat_reply
+
             await send_chat_reply(ctx, reply.text)
             return reply
 
-    async def clear(self, scene: str, scene_id: int) -> int:
-        return await self.bot.storage.clear_chat(scene, scene_id)
-
-
-def split_text(text: str, size: int) -> list[str]:
-    """按长度切分长回复，尽量在标点处断开。"""
-    text = (text or "").strip()
-    if not text:
-        return []
-    if size <= 0 or len(text) <= size:
-        return [text]
-
-    chunks: list[str] = []
-    remaining = text
-    while len(remaining) > size:
-        window = remaining[:size]
-        cut = max(
-            window.rfind("\n"),
-            window.rfind("。"),
-            window.rfind("！"),
-            window.rfind("？"),
-            window.rfind("；"),
-            window.rfind("，"),
-            window.rfind(" "),
-        )
-        if cut < size // 2:
-            cut = size
-        else:
-            cut += 1
-        chunk = remaining[:cut].strip()
-        if chunk:
-            chunks.append(chunk)
-        remaining = remaining[cut:].lstrip()
-    if remaining.strip():
-        chunks.append(remaining.strip())
-    return chunks
+    async def clear(self, scene: str, scene_id: int, self_id: int = 0) -> int:
+        return await self.bot.storage.clear_chat(scene, scene_id, self_id=self_id)
 
 
 __all__ = ["ChatReply", "ChatService", "group_user_content", "speaker_label", "split_text"]
