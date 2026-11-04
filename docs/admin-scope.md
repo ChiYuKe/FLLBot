@@ -41,9 +41,9 @@
 | `plugin.max_concurrency` | `8` | 插件运行 | 启动构造；修改启动配置来源并重建实例 |
 | `plugin.max_pending_events` | `1000` | 插件运行 | 启动构造；修改启动配置来源并重建实例 |
 | `plugin.max_pending_per_conversation` | `32` | 插件运行 | 启动构造；共享准入与会话队列容量，修改启动来源并重建实例 |
-| `plugin.event_deadline_seconds` | `120.0` | 插件运行 | 后续接收事件固定总时限；不修改已有轮次 deadline |
+| `plugin.event_deadline_seconds` | `360.0` | 插件运行 | 后续接收事件固定总时限；不修改已有轮次 deadline |
 | `plugin.queue_timeout_seconds` | `30.0` | 插件运行 | 后续接收事件固定排队时限；不修改已有队列项 |
-| `plugin.handler_timeout` | `60.0` | 插件运行 | 后续请求/消息；保存后不追溯已开始操作 |
+| `plugin.handler_timeout` | `360.0` | 插件运行 | 后续请求/消息；保存后不追溯已开始操作 |
 | `storage.path` | `"data/fllbot.db"` | 存储维护 | 启动来源确定实际数据库；修改值不迁移数据 |
 | `storage.backup_dir` | `"data/backups"` | 存储维护 | 后续备份操作读取；旧目录备份需另外管理 |
 | `logging.level` | `"INFO"` | 运行日志 | 后续请求/消息；保存后不追溯已开始操作 |

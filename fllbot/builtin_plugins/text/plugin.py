@@ -34,7 +34,7 @@ def schema(**properties: dict) -> dict:
                 "type": "string",
                 "minLength": 1,
                 "maxLength": MAX_CHARS,
-                "description": "要处理的完整文本，最多 20000 字符",
+                "description": f"要处理的完整文本，最多 {MAX_CHARS} 字符",
             },
             **properties,
         },
@@ -129,7 +129,7 @@ image_parameters["properties"]["format"]["default"] = "markdown"
     effect="side_effecting",
     title="文本转图片",
     timeout=60,
-    description="将文本排版为 PNG 并发送到当前会话；自动换行分页（最多12页）。"
+    description="将文本排版为 PNG 并发送到当前会话；自动换行分页（最多20页）。"
     "是否调用由你结合用户意图和内容判断，不要因为文本含有 Markdown 符号就自动转图。"
     "先在内部完成并整理完整答复，再对整段内容调用本工具一次；绝不要按段落/章节分次渲染，也不要把草稿、引用的原问题或代码片段单独做图。"
     "工具发送图片后，最终聊天回复只留一句简短提示或补充，不要再复制一遍图片中的长文。"

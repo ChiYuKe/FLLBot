@@ -73,7 +73,9 @@ async def test_read_repository_returns_readme_tree_and_images(monkeypatch):
 
 
 async def test_github_errors_are_specific():
-    from fllbot.builtin_plugins.github.service import _get
+    # 内置插件可能被加载器重新执行，模块对象会被替换；同时取错误类型与函数，
+    # 避免和其他用例持有的旧模块引用混用。
+    from fllbot.builtin_plugins.github import service
 
     class Client:
         def __init__(self, response):
@@ -88,12 +90,12 @@ async def test_github_errors_are_specific():
         (httpx.Response(403), "拒绝"),
     ):
         response.request = httpx.Request("GET", "https://api.github.com/repos/owner/repo")
-        with pytest.raises(GitHubError, match=expected):
-            await _get(Client(response), "https://api.github.com/repos/owner/repo", "")
+        with pytest.raises(service.GitHubError, match=expected):
+            await service._get(Client(response), "https://api.github.com/repos/owner/repo", "")
 
 
 def test_builtin_manifest_and_agent_tool():
     from fllbot.builtin_plugins.github import plugin
 
     assert not plugin.handlers
-    assert [tool.name for tool in plugin.ai_tools] == ["read_repository"]
+    assert [tool.name for tool in plugin.ai_tools] == ["read_repository", "read_sources"]

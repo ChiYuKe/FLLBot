@@ -31,7 +31,7 @@ MODULE_BOUNDARIES = {
     'llm.model_gateway': {'conversation','tracing','llm.budget','llm.client'},
     'llm.context_assembly': {'onebot.segments','llm.client','llm.forward','llm.message_format','llm.quote'},
     'llm.context_builder': set(),
-    'llm.agent_runtime': set(),
+    'llm.agent_runtime': {'llm.tool_protocol'},
     'llm.reply': {'onebot.segments'},
 }
 

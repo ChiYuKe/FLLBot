@@ -424,7 +424,10 @@ class LLMClient:
         raw_tool_calls = message.get("tool_calls") or []
         if not isinstance(raw_tool_calls, list):
             raise LLMError("返回内容 message.tool_calls 格式错误")
-        if not tools and (raw_tool_calls or contains_dsml(text)):
+        finish_reason = choices[0].get("finish_reason") or "unknown"
+        # A length-truncated call is reported to the model layer as an incomplete call,
+        # not as an unsolicited tool request, so the turn can still answer with a notice.
+        if not tools and (raw_tool_calls or contains_dsml(text)) and finish_reason != "length":
             raise ToolsUnavailableError("模型在无可用工具的收尾阶段仍请求调用工具，本次未执行")
         if text:
             try:

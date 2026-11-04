@@ -10,7 +10,7 @@ import pytest
 from PIL import Image
 
 from fllbot.builtin_plugins.text import plugin
-from fllbot.builtin_plugins.text.service import process, render
+from fllbot.builtin_plugins.text.service import MAX_CHARS, process, render
 from helpers import build_bot
 
 
@@ -35,7 +35,7 @@ def test_processing_preserves_content_and_rejects_invalid_input():
     with pytest.raises(ValueError):
         process("codec", "???", mode="base64_decode")
     with pytest.raises(ValueError):
-        process("statistics", "x" * 20001)
+        process("statistics", "x" * (MAX_CHARS + 1))
     with pytest.raises(ValueError):
         process("replace", "a" * 20000, old="a", new="aa")
 
@@ -48,8 +48,8 @@ def test_images_paginate_and_reject_overflow():
             assert image.format == "PNG"
             assert image.width == 900 and image.height <= 1800
             assert image.getextrema()[0][0] < 100
-    with pytest.raises(ValueError, match="12 页"):
-        render("行\n" * 500)
+    with pytest.raises(ValueError, match="20 页"):
+        render("行\n" * 1000)
     with pytest.raises(ValueError, match="中文字体"):
         render("测试", font_path="/nonexistent-font.ttf")
 
@@ -73,7 +73,7 @@ async def test_render_uses_guarded_delivery(monkeypatch):
     monkeypatch.setattr(module, "send_media_reply", sender)
     ctx = SimpleNamespace(settings={})
     result = await module.render_image(ctx, "你好，世界！")
-    assert result == {"sent": True, "pages": 1}
+    assert result == {"sent": True, "images": 1, "pages_in_image": 1}
     args, kwargs = sender.call_args
     assert args[0] is ctx and args[2] == "你好，世界！"
     assert kwargs == {"require_ai": True}
@@ -82,7 +82,7 @@ async def test_render_uses_guarded_delivery(monkeypatch):
     assert "error" in await module.render_image(ctx, "")
     sender.assert_not_called()
     sender.return_value = False
-    assert await module.render_image(ctx, "已失效") == {"sent": False, "pages": 0}
+    assert await module.render_image(ctx, "已失效") == {"sent": False, "images": 0, "pages_in_image": 0}
 
 
 def test_markdown_renders_styles_without_loading_resources(monkeypatch):
@@ -121,7 +121,7 @@ def test_markdown_pagination_and_limits():
         pages = render(text, format="markdown")
         assert len(pages) > 1
         assert all(Image.open(io.BytesIO(page)).height <= 1800 for page in pages)
-    with pytest.raises(ValueError, match="12 页"):
+    with pytest.raises(ValueError, match="20 页"):
         render("段落\n\n" * 500, format="markdown")
     with pytest.raises(ValueError, match="列"):
         render("|" + "列|" * 13 + "\n|" + "---|" * 13, format="markdown")

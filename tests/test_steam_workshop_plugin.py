@@ -286,7 +286,7 @@ async def test_package_registers_command_and_tool(tmp_path: Path) -> None:
     try:
         loaded = bot.plugins.get("steam_workshop")
         assert loaded is not None
-        assert [tool.name for tool in loaded.ai_tools] == ["read_item"]
+        assert [tool.name for tool in loaded.ai_tools] == ["read_item", "find_comments"]
         assert loaded.ai_tools[0].qualified_name == "steam_workshop__read_item"
         assert any(spec.usage and "工坊" in spec.usage for spec in bot.dispatcher.command_handlers())
         assert loaded.readme.startswith("# steam_workshop")
@@ -294,7 +294,7 @@ async def test_package_registers_command_and_tool(tmp_path: Path) -> None:
         await bot.stop()
 
 
-async def test_auto_summary_handles_natural_language(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_link_messages_are_answered_through_the_agent_tool(tmp_path: Path) -> None:
     plugin_dir = tmp_path / "plugins"
     plugin_dir.mkdir()
     shutil.copytree(
@@ -306,21 +306,14 @@ async def test_auto_summary_handles_natural_language(tmp_path: Path, monkeypatch
     try:
         loaded = bot.plugins.get("steam_workshop")
         assert loaded is not None
-
-        async def fake_load(value: str, **kwargs: Any) -> dict[str, Any]:
-            assert value == ITEM_ID
-            return sample_item()
-
-        monkeypatch.setitem(loaded.ai_tools[0].callback.__globals__, "load_item", fake_load)
+        # 链接由智能体判断后调用工具读取；插件只注册 /工坊 命令，不再响应普通消息。
+        assert loaded.handlers and all(spec.usage for spec in loaded.handlers)
         connection = FakeConnection()
         event = group_message(
             "帮我看看里面的内容 https://steamcommunity.com/sharedfiles/filedetails/?id=3775625682"
         )
         await bot.dispatcher.dispatch(parse_event(event), connection)
-
-        text = connection.last_text()
-        assert "LocalCanvas-本地画框" in text
-        assert "订阅 158" in text
+        assert connection.texts() == []
     finally:
         await bot.stop()
 

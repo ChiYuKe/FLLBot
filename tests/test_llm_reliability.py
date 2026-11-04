@@ -348,7 +348,7 @@ async def test_failover_after_tool_does_not_execute_tool_twice(tmp_path, monkeyp
         await bot.stop()
 
 
-async def test_agent_limits_tools_per_round_and_rejects_tools_after_last_round(tmp_path, monkeypatch):
+async def test_agent_executes_every_requested_tool_and_keeps_tools_available(tmp_path, monkeypatch):
     bot = await make_bot(tmp_path, llm={"enabled": True, "api_key": "k", "context_window": 16000})
     captured, executed = [], []
     try:
@@ -356,7 +356,6 @@ async def test_agent_limits_tools_per_round_and_rejects_tools_after_last_round(t
             {
                 "auto_group": True,
                 "cooldown_seconds": 0,
-                "max_tool_rounds": 1,
                 "allowed_tools": ["basic__check_online"],
             }
         )
@@ -371,29 +370,31 @@ async def test_agent_limits_tools_per_round_and_rejects_tools_after_last_round(t
 
         def handler(req):
             captured.append(json.loads(req.content))
-            return response(
-                "",
-                calls=[
-                    {
-                        "id": str(i),
-                        "type": "function",
-                        "function": {
-                            "name": "basic__check_online",
-                            "arguments": "{}",
-                        },
-                    }
-                    for i in range(5)
-                ],
-            )
+            if len(captured) == 1:
+                return response(
+                    "",
+                    calls=[
+                        {
+                            "id": str(i),
+                            "type": "function",
+                            "function": {
+                                "name": "basic__check_online",
+                                "arguments": "{}",
+                            },
+                        }
+                        for i in range(5)
+                    ],
+                )
+            return response("检查完成")
 
         bot.chat.client._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
         conn = FakeConnection()
         await bot.dispatcher.dispatch(parse_event(group_message("check", at=10001)), conn)
-        assert executed == ["basic__check_online"] * 3
-        assert len(captured) == 2 and "tools" not in captured[-1]
+        assert executed == ["basic__check_online"] * 5
+        assert len(captured) == 2 and captured[-1]["tools"]
         results = [item for item in captured[-1]["messages"] if item["role"] == "tool"]
-        assert len(results) == 5 and "最多执行" in results[-1]["content"]
-        assert "暂时没能完成" in conn.texts()[0]
+        assert len(results) == 5
+        assert conn.texts() == ["检查完成"]
     finally:
         await bot.stop()
 
