@@ -35,6 +35,23 @@ class ActionError(RuntimeError):
 EventCallback = Callable[["OneBotConnection", dict[str, Any]], Awaitable[None]]
 
 
+class InvalidDeliveryReceipt(RuntimeError):
+    """A send returned without a message ID; it may still have reached QQ."""
+
+
+def confirmed_message_id(receipt: Any) -> str:
+    value = receipt.get('message_id') if isinstance(receipt, dict) else None
+    if isinstance(value, (int, str)) and not isinstance(value, bool):
+        result = str(value).strip()
+        if result and result != '0':
+            return result
+    raise InvalidDeliveryReceipt('发送响应缺少有效 message_id，送达状态不确定')
+
+
+MESSAGE_SEND_ACTIONS = frozenset({'send_msg', 'send_group_msg', 'send_private_msg',
+                                  'send_group_forward_msg', 'send_private_forward_msg'})
+
+
 class OneBotConnection:
     """一条来自 NapCat 的反向 WS 连接。"""
 
@@ -128,7 +145,7 @@ class OneBotConnection:
 
     async def call(self, action: str, params: dict[str, Any] | None = None, *, timeout: float | None = None) -> Any:
         """调用 OneBot API 并等待同 echo 的响应，返回 ``data`` 字段。"""
-        with span('protocol_send', action) if action.startswith('send_') else nullcontext():
+        with span('protocol_send', action) if action in MESSAGE_SEND_ACTIONS else nullcontext():
             if self._closed:
                 raise ActionError(action, message="连接已关闭")
 
@@ -157,6 +174,12 @@ class OneBotConnection:
                     message=str(response.get("msg") or response.get("wording") or ""),
                 )
             data = response.get("data")
+            if action in MESSAGE_SEND_ACTIONS:
+                try:
+                    confirmed_message_id(data)
+                except InvalidDeliveryReceipt:
+                    self.errors += 1
+                    raise
             return data if data is not None else response
 
     async def read_loop(self) -> None:
@@ -169,7 +192,7 @@ class OneBotConnection:
             except RuntimeError:  # 连接已被关闭
                 break
             except Exception as exc:  # pragma: no cover - 异常断开
-                self.logger.debug("接收循环异常结束: %s", exc)
+                self.logger.debug("接收循环异常结束: %s", type(exc).__name__)
                 break
 
             self.touch()
@@ -178,14 +201,14 @@ class OneBotConnection:
             try:
                 payload = json.loads(raw)
             except json.JSONDecodeError:
-                self.logger.warning("收到非法 JSON（前 200 字符）: %s", raw[:200])
+                self.logger.warning("收到非法 JSON（%s 字符）", len(raw))
                 continue
             if not isinstance(payload, dict):
                 continue
             try:
                 await self._handle_payload(payload)
-            except Exception:  # pragma: no cover - 单条事件不应拖垮连接
-                self.logger.exception("处理上报数据失败")
+            except Exception as exc:  # 单条事件不应拖垮连接，也不记录可能包含正文的异常
+                self.logger.error("处理上报数据失败: %s", type(exc).__name__)
 
     async def _handle_payload(self, payload: dict[str, Any]) -> None:
         echo = payload.get("echo")
@@ -197,7 +220,7 @@ class OneBotConnection:
             # 迟到或未知的响应，忽略即可。
 
         if "post_type" not in payload:
-            self.logger.debug("忽略非事件数据: %s", str(payload)[:200])
+            self.logger.debug("忽略非事件数据")
             return
 
         self.events_received += 1
@@ -473,4 +496,4 @@ class OneBotConnection:
         return await self.call("upload_group_file", params)
 
 
-__all__ = ["ActionError", "EventCallback", "OneBotConnection"]
+__all__ = ["ActionError", "EventCallback", "InvalidDeliveryReceipt", "OneBotConnection", "confirmed_message_id"]

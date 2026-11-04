@@ -104,8 +104,7 @@ class PermissionManager:
                     "enabled": bool(self.bot.config.permission.default_group_enabled),
                     "config": {},
                 }
-                await self.bot.storage.upsert_group(gid, enabled=state["enabled"], config={})
-                self._groups[gid] = state
+                await self._store_group(gid, enabled=state["enabled"], config={})
                 return state
 
     async def set_group_enabled(self, group_id: int, enabled: bool) -> None:
@@ -120,8 +119,7 @@ class PermissionManager:
         async with self.bot.storage.settings_lock:
             gid = int(group_id)
             await self.ensure_group(gid)
-            await self.bot.storage.upsert_group(gid, enabled=None, config=config)
-            self._groups.setdefault(gid, {})["config"] = dict(config)
+            await self._store_group(gid, enabled=None, config=config)
 
     async def save_group(self, group_id: int, *, enabled: bool, config: dict[str, Any], reset_agent: bool = False) -> None:
         """将一组单群设置作为一次数据库更新保存。"""
@@ -129,11 +127,28 @@ class PermissionManager:
             gid = int(group_id)
             async with self._group_lock:
                 agent = self.bot.plugins.get("agent") if reset_agent else None
-                await self.bot.storage.upsert_group(gid, enabled=enabled, config=config,
-                                                    clear_settings_scope=agent.settings.scope if agent else None)
-                if agent:
-                    agent.settings.forget_group(gid)
-                self._groups[gid] = {"enabled": enabled, "config": dict(config)}
+                await self._store_group(gid, enabled=enabled, config=config, agent=agent)
+
+    async def _store_group(self, gid: int, *, enabled: bool | None, config: dict[str, Any], agent: Any = None) -> None:
+        """Caller holds settings_lock until persisted settings are also visible to live authorization."""
+        config = deepcopy(config)
+        transaction = asyncio.create_task(self.bot.storage.upsert_group(
+            gid, enabled=enabled, config=config, clear_settings_scope=agent.settings.scope if agent else None))
+        cancelled = False
+        while True:
+            try:
+                await asyncio.shield(transaction)
+                break
+            except asyncio.CancelledError:
+                if transaction.cancelled():
+                    raise
+                cancelled = True
+        if agent:
+            agent.settings.forget_group(gid)
+        self._groups[gid] = {'enabled': self._groups.get(gid, {}).get('enabled', True) if enabled is None else enabled,
+                             'config': config}
+        if cancelled:
+            raise asyncio.CancelledError
 
     def list_groups(self) -> list[dict[str, Any]]:
         result = []

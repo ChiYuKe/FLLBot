@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import math
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -33,6 +34,17 @@ class AIToolSpec:
     plugin_name: str = ""
     # 面向管理端展示的中文名称，决定工具叫什么的是插件，而不是模型看到的 name。
     title: str = ""
+    effect: Literal["read_only", "idempotent", "side_effecting"] = "side_effecting"
+    timeout: float = 30.0
+    max_output_chars: int = 8000
+
+    def __post_init__(self) -> None:
+        if self.effect not in {"read_only", "idempotent", "side_effecting"}:
+            raise ValueError("AI 工具 effect 无效")
+        if isinstance(self.timeout, bool) or not isinstance(self.timeout, (int, float)) or not math.isfinite(self.timeout) or self.timeout <= 0:
+            raise ValueError("AI 工具 timeout 必须是有限正数")
+        if isinstance(self.max_output_chars, bool) or not isinstance(self.max_output_chars, int) or self.max_output_chars < 64:
+            raise ValueError("AI 工具 max_output_chars 必须是至少 64 的整数")
 
     @property
     def qualified_name(self) -> str:
@@ -303,6 +315,9 @@ class Plugin:
                     "title": spec.display_title,
                     "description": spec.description,
                     "permission": spec.permission,
+                    "effect": spec.effect,
+                    "timeout": spec.timeout,
+                    "max_output_chars": spec.max_output_chars,
                 }
                 for spec in self._ai_tools
             ],
@@ -328,6 +343,9 @@ class Plugin:
         title: str = "",
         parameters: dict[str, Any] | None = None,
         permission: str | None = None,
+        effect: Literal["read_only", "idempotent", "side_effecting"] = "side_effecting",
+        timeout: float = 30.0,
+        max_output_chars: int = 8000,
     ) -> Callable[[AIToolCallback], AIToolCallback]:
         """显式注册一个 AI 可调用工具；未声明的插件能力不会暴露给模型。
 
@@ -354,6 +372,7 @@ class Plugin:
                     callback=func,
                     permission=permission,
                     plugin_name=self.name,
+                    effect=effect, timeout=timeout, max_output_chars=max_output_chars,
                     title=title.strip(),
                 )
             )

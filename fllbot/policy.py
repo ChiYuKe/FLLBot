@@ -23,7 +23,7 @@ class GroupPolicy(BaseModel):
     trigger_prefix: str | None = Field(default=None, max_length=80)
     cooldown_seconds: int | None = Field(default=None, ge=0, le=120)
     auto_reply_probability: int | None = Field(default=None, ge=0, le=100)
-    max_tool_rounds: int | None = Field(default=None, ge=1, le=5)
+    max_tool_rounds: int | None = Field(default=None, ge=0)
     allowed_tools: list[str] | None = Field(default=None, max_length=256)
     provider: str = Field(default="", max_length=80)
     system_extra: str = Field(default="", max_length=4000)
@@ -42,6 +42,9 @@ def tool_index(bot: FLLBot) -> dict[str, dict[str, Any]]:
                 "plugin": plugin.name,
                 "description": spec.description,
                 "permission": spec.permission,
+                "effect": spec.effect,
+                "timeout": spec.timeout,
+                "max_output_chars": spec.max_output_chars,
             }
     return result
 
@@ -121,7 +124,7 @@ def agent_settings(bot: FLLBot, group_id: int, self_id: int | None = None) -> di
     plugin = bot.plugins.get("agent")
     values = plugin.settings.values() if plugin else {
         "auto_group": False, "trigger_mode": "all", "trigger_prefix": "ai",
-        "cooldown_seconds": 5, "auto_reply_probability": 100, "max_tool_rounds": 3, "allowed_tools": [],
+        "cooldown_seconds": 5, "auto_reply_probability": 100, "max_tool_rounds": 0, "allowed_tools": [],
     }
     defaults = bot.bots.defaults(self_id)
     if defaults.reply_mode != "inherit":

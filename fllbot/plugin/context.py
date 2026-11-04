@@ -5,11 +5,14 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import uuid
 from collections.abc import Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from ..conversation import ReceiveSnapshot, current_receive
+from ..onebot.connection import confirmed_message_id
 from ..onebot.models import Event, MessageEvent, Sender
 from ..onebot.segments import (
     MessageSegment,
@@ -42,18 +45,72 @@ class Context:
     argv: list[str] = field(default_factory=list)
     # 供插件主动中断后续处理器
     stopped: bool = False
+    cancellation_reason: str = ""
+    execution_cancelled: bool = False
+    execution_parent: Any = field(default=None, repr=False)
+    execution_guard: Any = field(default=None, repr=False)
+    entrypoint: str = "qq"
+    turn_id: str = field(default="", init=False)
+    trigger_decision: Any = field(default=None, repr=False)
+    reply_settings: Any = field(default=None, repr=False)
+    reply_default_chunk_size: int = 0
+    context_snapshot: Any = field(default=None, repr=False)
+    turn_input: str | None = None
+    context_input: str | None = None
+    forward_loaded: bool = False
+    forward_text: str = ''
+    forward_metadata: dict = field(default_factory=dict,repr=False)
+    input_projected: bool = False
+    turn_reason: str = ""
+    turn_silent_reason: str = ""
+    tool_call_id: str = ""
+    tool_execution_id: str = ""
+    memory_summary_before: int = 0
     memory_message_id: int = 0
+    lifecycle_epoch: int = field(default=0, init=False)
     data_epoch: int = field(default=0, init=False)
+    received: ReceiveSnapshot = field(init=False)
     # regex 规则命中的 Match 对象
     regex_match: re.Match[str] | None = None
+    # 被引用消息的解析结果：由 ChatService 在构建请求时填充，同一事件只读取一次。
+    quoted_message: Any = field(default=None, repr=False)
+    quoted_loaded: bool = field(default=False, repr=False)
     _text_cache: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
-        self.data_epoch = getattr(getattr(self.bot, 'storage', None), 'conversation_generation', 0)
+        if isinstance(self.event, MessageEvent) and self.event.message_id:
+            identity = f'qq:{self.self_id}:{self.event.scene}:{self.event.scene_id}:{self.event.message_id}'
+            self.turn_id = uuid.uuid5(uuid.NAMESPACE_URL, identity).hex
+        else:
+            self.turn_id = uuid.uuid4().hex
+        self.lifecycle_epoch = getattr(self.bot,'lifecycle_epoch',0)
+        generation = getattr(getattr(self.bot, 'storage', None), 'conversation_generation', 0)
+        self.received = current_receive() or ReceiveSnapshot.capture(generation, getattr(getattr(self.bot, "config", None), "plugin", None),
+            self.bot.bots.epoch(self.self_id) if hasattr(self.bot, "bots") else 0,
+            scope_generation=self.bot.storage.scope_generation(self.self_id,self.event.scene,self.event.scene_id)
+            if hasattr(self.bot,'storage') and isinstance(self.event,MessageEvent) else 0)
+        if self.received.turn_id:
+            self.turn_id = self.received.turn_id
+        self.data_epoch = self.received.data_epoch
+        chat = getattr(self.bot,'chat',None)
+        if self.received.memory_allowed is None and chat is not None and isinstance(self.event,MessageEvent):
+            self.received = replace(self.received,memory_allowed=chat.memory.eligible(self))
 
     @property
     def data_current(self) -> bool:
-        return self.data_epoch == getattr(getattr(self.bot, 'storage', None), 'conversation_generation', 0)
+        accounts = getattr(self.bot, 'bots', None)
+        account_current = accounts is None or (accounts.enabled(self.self_id) and accounts.epoch(self.self_id) == self.received.account_epoch)
+        storage = getattr(self.bot,'storage',None)
+        scope_current = storage is None or not isinstance(self.event,MessageEvent) or storage.scope_current(
+            self.self_id,self.event.scene,self.event.scene_id,self.received.scope_generation)
+        return (not self.execution_cancelled
+                and (self.entrypoint != 'qq' or int(getattr(self.connection,'self_id',0) or 0) == self.self_id)
+                and (self.execution_parent is None or self.execution_parent.data_current)
+                and (self.execution_guard is None or self.execution_guard())
+                and not getattr(self.bot,'stopping',False)
+                and self.lifecycle_epoch == getattr(self.bot,'lifecycle_epoch',0)
+                and not self.cancellation_reason and account_current and scope_current
+                and self.data_epoch == getattr(getattr(self.bot, 'storage', None), 'conversation_generation', 0))
 
     # -- 基础属性 --------------------------------------------------------- #
     @property
@@ -90,6 +147,18 @@ class Context:
     @property
     def message_id(self) -> int:
         return int(getattr(self.event, "message_id", 0) or 0)
+
+    @property
+    def reply_id(self) -> int:
+        """当前消息引用的原消息 ID；没有引用或编号无效时为 0。"""
+        for segment in self.message:
+            if segment.type != "reply":
+                continue
+            try:
+                return int(str(segment.get("id") or "").strip() or 0)
+            except (TypeError, ValueError):
+                return 0
+        return 0
 
     @property
     def sender(self) -> Sender:
@@ -186,14 +255,17 @@ class Context:
         with span('send'):
             segments = as_segments(message)
             if group_id is not None:
-                return await self.connection.send_group_msg(int(group_id), segments)
-            if user_id is not None:
-                return await self.connection.send_private_msg(int(user_id), segments)
-            if self.is_group and self.group_id is not None:
-                return await self.connection.send_group_msg(int(self.group_id), segments)
-            if self.is_private and self.user_id:
-                return await self.connection.send_private_msg(self.user_id, segments)
-            raise ValueError("无法推断发送目标：既不是群聊也不是私聊")
+                receipt = await self.connection.send_group_msg(int(group_id), segments)
+            elif user_id is not None:
+                receipt = await self.connection.send_private_msg(int(user_id), segments)
+            elif self.is_group and self.group_id is not None:
+                receipt = await self.connection.send_group_msg(int(self.group_id), segments)
+            elif self.is_private and self.user_id:
+                receipt = await self.connection.send_private_msg(self.user_id, segments)
+            else:
+                raise ValueError("无法推断发送目标：既不是群聊也不是私聊")
+            confirmed_message_id(receipt)
+            return receipt
 
     async def reply(
         self,

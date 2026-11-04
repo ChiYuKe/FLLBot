@@ -35,6 +35,8 @@ class MessageTrace:
         self.handled = False
         self.skipped = False
         self.closed = False
+        self.metrics = {'queue_wait_ms':None,'first_model_response_ms':None,'first_delivery_ms':None,
+                        'model_retries':0,'model_fallbacks':0}
 
     def add(self, stage: str, code: str, status: str = 'passed', component: str = '') -> dict[str, Any]:
         step = {'stage': stage if isinstance(stage, str) and stage in STAGES else 'handler',
@@ -50,6 +52,16 @@ class MessageTrace:
         return step
 
     def observe(self, step: dict[str, Any]) -> None:
+        if step['stage'] == 'dispatch' and step['status'] == 'running' and self.metrics['queue_wait_ms'] is None:
+            self.metrics['queue_wait_ms'] = step['elapsed_ms']
+        if step['stage'] == 'model' and step['code'] == 'response_received' and self.metrics['first_model_response_ms'] is None:
+            self.metrics['first_model_response_ms'] = step['elapsed_ms']
+        if step['stage'] in {'send','protocol_send'} and step['status'] == 'passed' and self.metrics['first_delivery_ms'] is None:
+            self.metrics['first_delivery_ms'] = round(step['elapsed_ms']+step.get('duration_ms',0),2)
+        if step['stage'] == 'model' and step['code'] == 'retry_scheduled':
+            self.metrics['model_retries'] += 1
+        if step['stage'] == 'model' and step['code'] == 'fallback_selected':
+            self.metrics['model_fallbacks'] += 1
         self.failed |= step['status'] == 'failed'
         self.cancelled |= step['stage'] == 'dispatch' and step['status'] == 'cancelled'
         self.sent |= step['stage'] in {'send', 'protocol_send'} and step['status'] == 'passed'
@@ -64,7 +76,8 @@ class MessageTrace:
         return {'trace_id': self.trace_id, 'self_id': self.self_id, 'scene': self.scene, 'scene_id': self.scene_id,
                 'message_id': self.message_id, 'started_at': self.started_at,
                 'duration_ms': round((time.perf_counter() - self._started) * 1000, 2),
-                'outcome': outcome, 'truncated': self.truncated, 'steps': [dict(step) for step in self.steps]}
+                'outcome': outcome, 'truncated': self.truncated, 'steps': [dict(step) for step in self.steps],
+                'metrics':dict(self.metrics)}
 
 
 @contextmanager
@@ -118,12 +131,17 @@ class TraceRecorder:
         self.dropped = 0
         self.write_failures = 0
         self.writing = False
+        self.closed = False
 
     def start(self) -> None:
+        self.closed = False
         if self.task is None or self.task.done():
             self.task = asyncio.create_task(self._write(), name='fllbot-diagnostic-writer')
 
     def submit(self, trace: MessageTrace, outcome: str | None = None) -> None:
+        if self.closed:
+            self.dropped += 1
+            return
         try:
             self.queue.put_nowait(trace.summary(outcome))
         except asyncio.QueueFull:
@@ -146,6 +164,7 @@ class TraceRecorder:
         await self.queue.join()
 
     async def close(self) -> None:
+        self.closed = True
         if self.task is None:
             return
         try:

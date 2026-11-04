@@ -240,6 +240,14 @@ def readable_text(segments: Iterable[MessageSegment]) -> str:
     return "".join(parts)
 
 
+def image_url(segment: MessageSegment) -> str:
+    """图片段里可直接交给模型的地址；不是 HTTP(S) / data URL 时返回空串。"""
+    if segment.type != "image":
+        return ""
+    url = str(segment.data.get("url") or segment.data.get("file") or "")
+    return url if url.startswith(("https://", "http://", "data:image/")) else ""
+
+
 def contains_at(segments: Iterable[MessageSegment], qq: int | str) -> bool:
     wanted = str(qq)
     return any(segment.type == "at" and str(segment.get("qq")) == wanted for segment in segments)
@@ -272,6 +280,7 @@ __all__ = [
     "MessageSegment",
     "as_segments",
     "contains_at",
+    "image_url",
     "normalize_message",
     "parse_cq",
     "plain_text",

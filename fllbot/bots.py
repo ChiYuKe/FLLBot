@@ -31,41 +31,55 @@ class BotProfiles:
 
     async def load(self) -> None:
         self.items = await self.bot.storage.kv_all("bot-profiles")
+        self.bot.storage.account_versions = {int(key):(int(value.get('account_epoch',0)),value.get('enabled',True) is not False)
+                                             for key,value in self.items.items()}
 
     def get(self, self_id: int | None) -> dict[str, Any]:
         return copy.deepcopy(self.items.get(str(self_id), {}))
 
     def revision(self, self_id: int) -> str:
-        data = [self_id, self.defaults(self_id).model_dump()]
+        data = [self_id, self.defaults(self_id).model_dump(), self.enabled(self_id), self.epoch(self_id)]
         return hashlib.sha256(json.dumps(data, sort_keys=True).encode()).hexdigest()
+
+    def enabled(self, self_id: int) -> bool:
+        return self.items.get(str(self_id), {}).get('enabled', True) is not False
+
+    def epoch(self, self_id: int) -> int:
+        return int(self.items.get(str(self_id), {}).get('account_epoch', 0))
 
     async def update(self, self_id: int, **fields: Any) -> None:
         async with self.bot.storage.settings_lock:
-            async with self.lock:
-                previous = self.get(self_id)
-                fields = copy.deepcopy(fields)
-                if 'defaults' in fields:
-                    fields['defaults'] = BotDefaults.model_validate(fields['defaults']).model_dump()
-                value = {**previous, **fields}
-                if value == previous:
-                    return
-                changed = [key for key in fields if key != 'defaults' and previous.get(key) != value[key]]
-                if 'defaults' in fields:
-                    before = self.defaults(self_id).model_dump()
-                    changed += ['defaults.'+key for key, item in fields['defaults'].items() if before[key] != item]
-                transaction = asyncio.create_task(self.bot.storage.save_bot_profile(self_id, value, changed))
-                cancelled = False
-                while True:
-                    try:
-                        await asyncio.shield(transaction)
-                        break
-                    except asyncio.CancelledError:
-                        if transaction.cancelled():
-                            raise
-                        cancelled = True
-                self.items[str(self_id)] = value
-                if cancelled:
-                    raise asyncio.CancelledError
+            async with self.bot.storage.data_lock:
+                async with self.lock:
+                    previous = self.get(self_id)
+                    fields = copy.deepcopy(fields)
+                    if 'enabled' in fields and bool(fields['enabled']) != self.enabled(self_id):
+                        fields['account_epoch'] = self.epoch(self_id) + 1
+                    if 'defaults' in fields:
+                        fields['defaults'] = BotDefaults.model_validate(fields['defaults']).model_dump()
+                    value = {**previous, **fields}
+                    if value == previous:
+                        return
+                    changed = [key for key in fields if key != 'defaults' and previous.get(key) != value[key]]
+                    if 'defaults' in fields:
+                        before = self.defaults(self_id).model_dump()
+                        changed += ['defaults.'+key for key, item in fields['defaults'].items() if before[key] != item]
+                    transaction = asyncio.create_task(self.bot.storage.save_bot_profile(self_id, value, changed))
+                    cancelled = False
+                    while True:
+                        try:
+                            await asyncio.shield(transaction)
+                            break
+                        except asyncio.CancelledError:
+                            if transaction.cancelled():
+                                raise
+                            cancelled = True
+                    self.items[str(self_id)] = value
+                    self.bot.storage.account_versions[self_id] = (self.epoch(self_id),self.enabled(self_id))
+                    if fields.get('enabled') is False:
+                        self.bot.conversations.cancel_account(self_id)
+                    if cancelled:
+                        raise asyncio.CancelledError
 
     def nickname(self, self_id: int) -> str:
         if not self_id:
@@ -98,6 +112,7 @@ class BotProfiles:
         return [{
             "self_id": int(key), "nickname": self.nickname(int(key)),
             "online": bool(key in live and live[key].online),
+            "enabled": self.enabled(int(key)),
             "defaults": self.defaults(int(key)).model_dump(),
             "revision": self.revision(int(key)),
         } for key in sorted(ids, key=int)]

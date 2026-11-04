@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field, ValidationError
 
 from .. import __version__
 from ..config import StartupConfigError
+from ..conversation import CapacityExceeded, ServiceClosing
 from ..llm.client import DEFAULT_CONTEXT_WINDOW, LLMError
 from ..logging_setup import get_ring
 from ..maintenance import BackupBusyError
@@ -45,6 +46,7 @@ class LLMTestRequest(BaseModel):
 
 
 class LLMChatRequest(BaseModel):
+    self_id: int = Field(default=0, ge=0)
     message: str
     scene: str = "private"
     scene_id: int = 0
@@ -554,30 +556,18 @@ def create_api_router(bot: FLLBot) -> APIRouter:
         if not bot.chat.available:
             raise HTTPException(400, "尚未启用 LLM 或未配置 API Key")
         scene = payload.scene if payload.scene in {"group", "private"} else "private"
-        generation = bot.storage.conversation_generation
-        messages = await bot.chat.build_messages(
-            scene,
-            payload.scene_id,
-            payload.message,
-            persona_name=payload.persona,
-            include_history=payload.include_history,
-        )
         try:
-            reply = await bot.chat.complete(
-                messages,
-                provider=payload.provider,
-                scene=scene,
-                scene_id=payload.scene_id,
-            )
+            return await bot.chat.preview(scene, payload.scene_id, payload.message,
+                                          persona_name=payload.persona, provider=payload.provider,
+                                          include_history=payload.include_history, save=payload.save, self_id=payload.self_id)
+        except ServiceClosing as exc:
+            raise HTTPException(503, '服务正在关闭') from exc
+        except CapacityExceeded as exc:
+            raise HTTPException(429, '会话队列已满，请稍后再试') from exc
         except LLMError as exc:
             raise HTTPException(502, str(exc)) from exc
-        if payload.save:
-            async with bot.storage.data_lock:
-                if generation != bot.storage.conversation_generation:
-                    raise HTTPException(409, '会话数据已清理，本次测试结果未保存，请重新测试')
-                await bot.storage.add_chat_message(scene, payload.scene_id, "user", payload.message, generation=generation)
-                await bot.storage.add_chat_message(scene, payload.scene_id, "assistant", reply.text, generation=generation)
-        return {**reply.summary(), "messages": len(messages)}
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
 
     @protected.get("/llm/providers", summary="模型提供方状态")
     async def llm_providers() -> list[dict[str, Any]]:
@@ -631,9 +621,20 @@ def create_api_router(bot: FLLBot) -> APIRouter:
         scene: str,
         scene_id: int,
         limit: int = Query(default=50, ge=1, le=500),
+        self_id: int = Query(default=0, ge=0),
     ) -> dict[str, Any]:
-        rows = await bot.storage.recent_chat(scene, scene_id, limit=limit)
+        rows = await bot.storage.recent_chat(scene, scene_id, limit=limit, self_id=self_id)
+        source = 'chat'
+        if scene == 'group' and self_id:
+            from types import SimpleNamespace
+            memory = await bot.storage.memory.recent(self_id,scene_id,2**63-1,limit=limit)
+            if memory:
+                rows = [SimpleNamespace(**row) for row in memory]
+                source = 'memory'
+
         return {
+            "self_id": self_id,
+            "source": source,
             "scene": scene,
             "scene_id": scene_id,
             "messages": [
@@ -649,10 +650,10 @@ def create_api_router(bot: FLLBot) -> APIRouter:
         }
 
     @protected.delete("/chat/{scene}/{scene_id}", summary="清空会话历史", dependencies=[Depends(settings_write)])
-    async def clear_chat(scene: str, scene_id: int) -> dict[str, Any]:
+    async def clear_chat(scene: str, scene_id: int, self_id: int = Query(default=0, ge=0)) -> dict[str, Any]:
         if scene not in {"group", "private"} or scene_id <= 0:
             raise HTTPException(400, "会话场景或编号无效")
-        removed = await bot.storage.clear_chat(scene, scene_id)
+        removed = await bot.storage.clear_chat(scene, scene_id, self_id=self_id)
         return {"ok": True, "removed": removed}
 
     # -- 通用 OneBot 调用 ------------------------------------------------- #

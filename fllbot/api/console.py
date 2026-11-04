@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from ..bots import BotDefaults
 from ..config import ChatConfig, RetentionConfig
+from ..conversation import CapacityExceeded, ServiceClosing
 from ..maintenance import BackupBusyError
 from ..onboarding import setup_guide
 from ..policy import GroupPolicy, effective_policy
@@ -24,6 +25,11 @@ from .auth import build_admin_dependency, build_settings_dependency
 
 if TYPE_CHECKING:
     from ..app import FLLBot
+
+
+class AccountState(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    enabled: bool
 
 
 class GroupSettings(BaseModel):
@@ -133,6 +139,58 @@ def create_console_router(bot: FLLBot) -> APIRouter:
             assert_revision(group_id, if_match)
             yield
 
+    @router.get('/message-events', summary='接收和排队事实（不含正文）')
+    async def message_events(self_id: int | None = None, scene_id: int | None = None,
+                             before: int | None = Query(default=None, gt=0),
+                             limit: int = Query(default=50, ge=1, le=200)) -> dict:
+        return await bot.storage.list_message_events(self_id=self_id,scene_id=scene_id,before=before,limit=limit)
+
+    @router.get('/trigger-decisions', summary='触发决策原因（不含正文）')
+    async def trigger_decisions(self_id: int | None = None, scene_id: int | None = None,
+                                 before: int | None = Query(default=None, gt=0),
+                                 limit: int = Query(default=50, ge=1, le=200)) -> dict:
+        return await bot.storage.list_trigger_decisions(self_id=self_id,scene_id=scene_id,before=before,limit=limit)
+
+    @router.get('/turns', summary='查询聊天轮次状态（仅元数据）')
+    async def list_chat_turns(self_id: int | None = None, scene: Literal['group','private'] | None = None,
+                              scene_id: int | None = None, status: str | None = Query(default=None, max_length=40),
+                              before: int | None = Query(default=None, gt=0),
+                              limit: int = Query(default=50, ge=1, le=200)) -> dict:
+        return await bot.storage.list_turns(self_id=self_id, scene=scene, scene_id=scene_id,
+                                            status=status, before=before, limit=limit)
+
+    @router.get('/turns/{turn_id}', summary='轮次的工具和分段回执（不返回正文）')
+    async def chat_turn_detail(turn_id: str = Path(pattern=r'^[a-f0-9]{32}$')) -> dict:
+        detail = await bot.storage.turn_detail(turn_id)
+        if detail is None:
+            raise HTTPException(404, '轮次不存在')
+        return {**detail, 'can_cancel':bot.conversations.can_cancel(turn_id),
+                'can_retry':await bot.storage.recovery_plan(turn_id) is not None}
+
+    @router.post('/turns/{turn_id}/recover-delivery', summary='仅恢复明确未发送的分段')
+    async def recover_chat_delivery(turn_id: str = Path(pattern=r'^[a-f0-9]{32}$')) -> dict:
+        try:
+            bot.capacity.ensure_open()
+            await bot.storage.record_management_change('delivery_recovery_requested', [f'turn:{turn_id}'])
+            return await bot.deliveries.recover(turn_id)
+        except ServiceClosing as exc:
+            raise HTTPException(503, '服务正在关闭') from exc
+        except CapacityExceeded as exc:
+            raise HTTPException(429, '会话队列已满，请稍后再试') from exc
+        except ValueError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        except Exception as exc:
+            raise HTTPException(502, '分段恢复未完成，请读取轮次状态') from exc
+
+    @router.post('/turns/{turn_id}/cancel', summary='取消进行中的轮次，不撤回已执行动作')
+    async def cancel_chat_turn(turn_id: str = Path(pattern=r'^[a-f0-9]{32}$')) -> dict:
+        if await bot.storage.turn_detail(turn_id) is None:
+            raise HTTPException(404, '轮次不存在')
+        await bot.storage.record_management_change('turn_cancel_requested', [f'turn:{turn_id}'])
+        if not bot.conversations.cancel(turn_id):
+            raise HTTPException(409, '轮次已结束或不在当前进程运行，不能重新执行')
+        return {'accepted':True, 'turn_id':turn_id}
+
     @router.get("/chat", summary="Agent 聊天信息与唤醒参数")
     async def chat_settings(response: Response) -> dict[str, Any]:
         response.headers['ETag'] = bot.config_revision()
@@ -215,6 +273,16 @@ def create_console_router(bot: FLLBot) -> APIRouter:
         revision = bot.bots.revision(self_id)
         response.headers['ETag'] = revision
         return {"ok": True, "defaults": payload.model_dump(), 'revision': revision}
+
+    @router.put('/bots/{self_id}/state', summary='启用或停用账号聊天业务', dependencies=[Depends(settings_write)])
+    async def account_state(payload: AccountState, self_id: int = Path(gt=0),
+                             if_match: str | None = Header(default=None)) -> dict:
+        if str(self_id) not in bot.bots.items and bot.manager.by_self_id(self_id) is None:
+            raise HTTPException(404, '账号不存在')
+        if if_match is not None and if_match != bot.bots.revision(self_id):
+            raise HTTPException(409, '账号设置已变化，请重新读取')
+        await bot.bots.update(self_id, enabled=payload.enabled)
+        return {'self_id':self_id, 'enabled':bot.bots.enabled(self_id), 'revision':bot.bots.revision(self_id)}
 
     @router.get("/readiness", summary="机器人就绪检查")
     async def readiness() -> dict[str, Any]:
@@ -495,8 +563,8 @@ def create_console_router(bot: FLLBot) -> APIRouter:
     async def add_group_rule(group_id: int = Path(gt=0), self_id: int | None = Query(default=None, gt=0)) -> dict[str, Any]:
         config = bot.permissions.group_config(group_id)
         config["_console_rule"] = True
-        detail = group_detail(group_id)
-        await bot.permissions.save_group(group_id, enabled=detail["enabled"], config=config)
+        config.pop("_inherit_enabled", None)
+        await bot.permissions.save_group(group_id, enabled=True, config=config)
         return {"ok": True, **group_detail(group_id, self_id)}
 
     @router.delete("/groups/{group_id}/rule", summary="移除单群配置，恢复默认行为", dependencies=[Depends(group_write)])

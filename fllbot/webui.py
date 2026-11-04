@@ -15,7 +15,7 @@ def render_index() -> str:
     ))
     script = (_UI / "app.js").read_text(encoding="utf-8")
     features = "\n".join((_UI / name).read_text(encoding="utf-8") for name in (
-        "console.js", "navigation.js", "policy.js", "chat-settings.js", "group-table.js", "traces.js", "maintenance.js", "retention.js", "tasks.js", "resource-replace.js", "accounts.js", "startup-config.js", "admin-layout.js",
+        "console.js", "navigation.js", "policy.js", "chat-settings.js", "group-table.js", "traces.js", "turns.js", "maintenance.js", "retention.js", "tasks.js", "resource-replace.js", "accounts.js", "startup-config.js", "admin-layout.js",
     ))
     script = script.replace("/* CONSOLE_FEATURES */", features)
     script += "\n" + (_UI / "desktop-theme.js").read_text(encoding="utf-8")

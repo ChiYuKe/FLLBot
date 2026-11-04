@@ -19,12 +19,22 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 
 from . import __version__
+from .agent_conversation import AgentConversationService
 from .bots import BotProfiles
 from .config import AppConfig, ConfigStore, mask_secrets, resolve_path, split_startup_overrides
+from .conversation import ConversationCapacity
+from .conversation_service import ConversationService
+from .delivery_service import DeliveryService
 from .dispatcher import Dispatcher
 from .events import DedupCache, EventHub
+from .llm.agent_runtime import AgentRuntime
 from .llm.chat import ChatService
+from .llm.context_assembly import ContextAssembler
+from .llm.context_builder import ContextBuilder
+from .llm.memory import GroupMemory
+from .llm.model_gateway import ModelGateway
 from .llm.personas import PersonaStore
+from .llm.reply import ReplyService
 from .logging_setup import configure_logging
 from .maintenance import BackupManager
 from .onebot.connection import OneBotConnection
@@ -37,7 +47,9 @@ from .resources import ResourceReplacementManager
 from .retention import CleanupManager
 from .services import ServiceMonitor
 from .storage import Storage
+from .tool_executor import ToolExecutor
 from .tracing import MessageTrace, TraceRecorder
+from .trigger_policy import TriggerPolicy
 from .webui import render_index
 
 
@@ -62,17 +74,48 @@ class FLLBot:
         self.bots = BotProfiles(self)
         self._dedupe = DedupCache(size=1024, ttl=180.0)
         self.permissions = PermissionManager(self)
+        self.tool_executor = ToolExecutor(self.storage, self.permissions)
+        self.capacity = ConversationCapacity(lambda: self.config.plugin)
         self.dispatcher = Dispatcher(self)
         self.personas = PersonaStore(
             [self.root / "personas"],
             default_name=config.llm.persona,
         )
-        self.chat = ChatService(self)
+        self.replies = ReplyService()
+        self.chat_memory = GroupMemory(self)
+        self.model_gateway = ModelGateway(configuration=lambda: self.chat.config,
+            client=lambda: self.chat.client,storage=self.storage,
+            provider_name=lambda *args: self.chat.provider_name(*args),
+            execution_scope=lambda *args: self.chat.execution_scope(*args))
+        self.context_assembler = ContextAssembler(configuration=lambda: self.chat.execution_config,
+            personas=lambda: self.chat.personas,persona_name=lambda *args: self.chat.persona_name(*args),
+            provider_name=lambda *args: self.chat.provider_name(*args),policy=lambda group: self.chat._context_policy(group),
+            nickname=self.bots.nickname,client=lambda: self.chat.client,
+            history=self.storage.recent_chat,memory=self.chat_memory)
+        self.context_builder = ContextBuilder(self.context_assembler.assemble,lambda: self.chat.execution_config,
+            self.context_assembler.resolve_provider,self.model_gateway.describe_budget,version=lambda:self.chat.execution_version)
+        self.chat = ChatService(self,memory=self.chat_memory,gateway=self.model_gateway,
+                                assembler=self.context_assembler,builder=self.context_builder)
+        from .policy import agent_settings
+        self.trigger_policy = TriggerPolicy(lambda group, account: agent_settings(self, group, account),
+            self.permissions, lambda: self.chat.available, self.chat.scene_enabled,
+            lambda ctx: self.bots.wake_word(ctx.self_id, getattr(ctx.connection, 'nickname', '')))
+        self.agent_runtime = AgentRuntime(lambda *args, **kwargs: self.chat.complete(*args, **kwargs))
+        self.conversations = ConversationService(self.storage, self.chat.conversation_lock, lambda: self.config,
+            self.chat.memory.schedule,self.chat.scope_for_turn,self.capacity,version=lambda config:self.chat.execution_version)
         self.manager = ConnectionManager(
             self.on_raw_event,
             heartbeat_timeout=config.server.heartbeat_timeout,
             logger=self.logger.getChild("onebot"),
         )
+        self.deliveries = DeliveryService(self.storage, self._recovery_context, self.chat.conversation_lock,
+            self.chat.memory.reply, self.conversations.track_delivery, self.capacity,
+            self.conversations.serial, self.conversations.track_task,replies=self.replies,
+            project_input=self.conversations.project_input)
+        self.agent_conversations = AgentConversationService(triggers=self.trigger_policy,storage=self.storage,
+            conversations=self.conversations,build_messages=lambda *args,**kwargs:self.chat.build_messages(*args,**kwargs),
+            runtime=self.agent_runtime,send=self.deliveries.send_text,
+            settings=lambda ctx:self.chat.turn_agent_settings(ctx.group_id,ctx.self_id))
         self.plugins = PluginLoader(
             self,
             [resolve_path(self.root, item) for item in config.plugin.dirs],
@@ -84,6 +127,9 @@ class FLLBot:
         self.admin_token: str = ""
         self.started_at: float = 0.0
         self.started: bool = False
+        self.stopping = False
+        self.lifecycle_epoch = 0
+        self._stop_task: asyncio.Task | None = None
         self._start_lock = asyncio.Lock()
 
     # -- 配置 ------------------------------------------------------------- #
@@ -128,6 +174,8 @@ class FLLBot:
         async with self._start_lock:
             if self.started:
                 return
+            if self._stop_task is not None and not self._stop_task.done():
+                raise RuntimeError('服务尚未完成关闭')
             config = self.config
             configure_logging(
                 level=config.logging.level,
@@ -154,11 +202,17 @@ class FLLBot:
                 await self.storage.close()
                 raise
 
+            await self.storage.expire_message_content(self.config.logging.message_content_hours)
             if self.config.admin.enabled:
                 self._ensure_admin_token()
             self.personas.load()
             await self.permissions.load()
             await self.bots.load()
+            self.capacity.open()
+            self.conversations.open()
+            self.tool_executor.reopen()
+            self.chat.memory.reopen()
+            self.stopping = False
             await self.plugins.load_all()
             await migrate_tool_permissions(self)
             self.manager.heartbeat_timeout = float(self.config.server.heartbeat_timeout or 0)
@@ -180,11 +234,24 @@ class FLLBot:
             )
 
     async def stop(self) -> None:
+        if self._stop_task is None or self._stop_task.done():
+            if not self.started:
+                return
+            self._stop_task = asyncio.create_task(self._stop(),name='fllbot-shutdown')
+        await asyncio.shield(self._stop_task)
+
+    async def _stop(self) -> None:
         if not self.started:
             return
         self.logger.info("正在关闭 FLLBot …")
         self.started = False
+        self.stopping = True
+        self.lifecycle_epoch += 1
+        self.capacity.close()
         self.dispatcher.stop_accepting()
+        await self.conversations.close()
+        await self.tool_executor.close()
+        await self.chat.memory.close()
         try:
             await self.cleanup.close()
         except Exception:
@@ -229,15 +296,24 @@ class FLLBot:
 
     # -- 事件入口 --------------------------------------------------------- #
     async def on_raw_event(self, connection: OneBotConnection, payload: dict[str, Any]) -> None:
+        if self.stopping:
+            return
         try:
             event = parse_event(payload)
-        except Exception:
-            self.logger.exception("事件解析失败")
+        except Exception as exc:
+            self.logger.warning("事件解析失败（%s）",type(exc).__name__)
             return
 
+        if isinstance(event, MessageEvent) and not event.self_id:
+            event.self_id = int(connection.self_id or 0)
         trace = MessageTrace(event, connection) if isinstance(event, MessageEvent) else None
         if trace:
             trace.add('receive', 'received')
+        if event.self_id and connection.self_id and int(event.self_id) != int(connection.self_id):
+            if trace:
+                trace.add('access','account_mismatch','skipped')
+                self.traces.submit(trace)
+            return
         dedupe_key = _dedupe_key(event)
         if dedupe_key and self._dedupe.seen(dedupe_key):
             if trace:
@@ -260,13 +336,13 @@ class FLLBot:
                     scene=event.scene,
                     scene_id=event.scene_id,
                     user_id=event.user_id,
-                    content=event.readable,
+                    content=event.readable if self.config.logging.capture_message_content else '',
                 )
             except Exception:
                 self.logger.debug("记录消息失败", exc_info=True)
 
         self.hub.publish({"type": "event", **event.to_summary()})
-        self.dispatcher.emit(event, connection, trace=trace)
+        await self.dispatcher.enqueue(event, connection, trace=trace)
 
     # -- 观测 ------------------------------------------------------------- #
     async def status(self) -> dict[str, Any]:
@@ -282,6 +358,7 @@ class FLLBot:
             "plugins": self.plugin_summaries(),
             "failed_plugins": dict(self.plugins.failed),
             "dispatcher": self.dispatcher.summary(),
+            "tool_executor": self.tool_executor.status(),
             "storage": await self.storage.summary(),
             "llm": self.chat.status(),
             "personas": self.personas.names(),
@@ -312,6 +389,44 @@ class FLLBot:
     def safe_config(self) -> dict[str, Any]:
         return mask_secrets(self.config)
 
+    def debug_context(self, scene: str, scene_id: int, self_id: int = 0):
+        from types import SimpleNamespace
+
+        from .onebot.models import MessageEvent
+        from .plugin.context import Context
+        # No protocol methods are available to this read-only entry point.
+        connection = SimpleNamespace(self_id=self_id,nickname=self.bots.nickname(self_id) or 'FLLBot',_closed=True)
+        event = MessageEvent(self_id=self_id,message_type=scene,group_id=scene_id if scene=='group' else None,
+                             user_id=scene_id if scene=='private' else 0)
+        return Context(self,connection,event,entrypoint='admin_debug')
+
+    async def _recovery_context(self, plan):
+        from types import SimpleNamespace
+
+        from .onebot.models import MessageEvent, Sender
+        from .plugin.context import Context
+        metadata = plan['metadata']
+        connection = self.manager.by_self_id(plan['self_id'])
+        if (connection is None or self.bots.epoch(plan['self_id']) != metadata.get('account_epoch')
+                or not self.storage.scope_current(plan['self_id'],plan['scene'],plan['scene_id'],metadata.get('scope_epoch'))):
+            return None
+        owner = self.plugins.get(metadata['plugin']) if metadata.get('plugin') else None
+        if metadata.get('plugin') and owner is None:
+            return None
+        sender = Sender(user_id=metadata['user_id'])
+        if plan['scene'] == 'group' and metadata.get('permission'):
+            info = await connection.get_group_member_info(plan['scene_id'], metadata['user_id'])
+            sender = Sender.model_validate(info)
+        event = MessageEvent(self_id=plan['self_id'],message_type=plan['scene'],
+                             group_id=plan['scene_id'] if plan['scene']=='group' else None,
+                             user_id=metadata['user_id'],sender=sender)
+        ctx = Context(self,connection,event,plugin=owner)
+        ctx.handler = SimpleNamespace(permission=metadata.get('permission'))
+        ctx.turn_id = plan['turn_id']
+        ctx.data_epoch = plan['generation']
+        ctx.memory_message_id = metadata.get('memory_message_id', 0)
+        return ctx
+
     # -- 内部 ------------------------------------------------------------- #
     def _ensure_admin_token(self) -> None:
         config = self.config.admin
@@ -331,7 +446,7 @@ class FLLBot:
             self.logger.exception("管理令牌文件读写失败，改用内存临时令牌")
             token = token or secrets.token_urlsafe(24)
         self.admin_token = token
-        self.logger.warning("管理 API 令牌：%s（文件：%s）", token, path)
+        self.logger.info("管理 API 令牌已就绪（文件：%s）", path)
 
 
 def create_app(bot: FLLBot) -> FastAPI:
@@ -396,7 +511,12 @@ def _iso(timestamp: float) -> str:
 def _dedupe_key(event: Any) -> str | None:
     """同一条消息 / 通知在重连后被重放时用于去重。"""
     if isinstance(event, MessageEvent) and event.message_id:
-        return f"message:{event.self_id}:{event.message_id}"
+        return f"message:{event.self_id}:{event.scene}:{event.scene_id}:{event.message_id}"
+    if isinstance(event, MessageEvent):
+        fingerprint = [event.self_id,event.scene,event.scene_id,event.user_id,event.time,
+                       [segment.to_dict() for segment in event.message]]
+        digest = hashlib.sha256(json.dumps(fingerprint,sort_keys=True,ensure_ascii=False).encode()).hexdigest()
+        return 'ephemeral_message:'+digest
     if isinstance(event, NoticeEvent) and event.notice_type:
         return (
             f"notice:{event.self_id}:{event.notice_type}:{event.sub_type}:"
