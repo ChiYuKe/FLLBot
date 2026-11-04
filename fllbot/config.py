@@ -24,7 +24,7 @@ ENV_DELIMITER = "__"
 STARTUP_FIELDS = frozenset({
     'server.host', 'server.port', 'server.cors_origins', 'admin.enabled', 'admin.token_file',
     'plugin.dirs', 'plugin.builtin', 'plugin.hot_reload', 'plugin.watch_interval',
-    'plugin.max_concurrency', 'plugin.max_pending_events', 'storage.path',
+    'plugin.max_concurrency', 'plugin.max_pending_events', 'plugin.max_pending_per_conversation', 'storage.path',
     'logging.dir', 'logging.file', 'logging.json_lines', 'logging.ring_size',
 })
 
@@ -103,7 +103,10 @@ class PluginConfig(BaseModel):
     watch_interval: float = 2.0
     max_concurrency: int = 8
     max_pending_events: int = Field(default=1000, ge=1, le=100_000)
-    handler_timeout: float = 60.0
+    max_pending_per_conversation: int = Field(default=32, ge=1, le=10000)
+    event_deadline_seconds: float = Field(default=360.0, gt=0, le=3600)
+    queue_timeout_seconds: float = Field(default=30.0, gt=0, le=3600)
+    handler_timeout: float = 360.0
 
 
 class StorageConfig(BaseModel):
@@ -121,6 +124,8 @@ class LoggingConfig(BaseModel):
     json_lines: bool = True
     file: str = "fllbot.log"
     ring_size: int = 500
+    capture_message_content: bool = False
+    message_content_hours: int = Field(default=24,ge=1,le=168)
 
 
 class ModelCapabilities(BaseModel):
@@ -159,7 +164,7 @@ class LLMConfig(ModelCapabilities):
     api_key: str = ""
     model: str = "deepseek-chat"
     timeout: float = 60.0
-    max_tokens: int = Field(default=800, ge=1, le=1_000_000)
+    max_tokens: int = Field(default=4000, ge=1, le=1_000_000)
     temperature: float = 0.8
     context_mode: Literal["model", "custom"] = "model"
     max_context_messages: int = 16
@@ -245,7 +250,7 @@ class ChatConfig(BaseModel):
     group_memory: bool = True
     memory_session_gap_minutes: int = Field(default=30, ge=5, le=1440)
     memory_recent_messages: int = Field(default=200, ge=10, le=1000)
-    memory_context_chars: int = Field(default=24000, ge=4000, le=200000)
+    memory_context_chars: int = Field(default=400000, ge=4000, le=1_000_000)
     reply_mode: Literal["auto", "forward", "split"] = "auto"
     forward_threshold: int = Field(default=1200, ge=200, le=20000)
     reply_chunk_size: int = Field(default=0, ge=0, le=5000)
