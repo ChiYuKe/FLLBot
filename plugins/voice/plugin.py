@@ -13,14 +13,21 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextvars
+import copy
 import hashlib
 import json
 import logging
+import os
 import re
+import subprocess
+import time
+from functools import partial
 from pathlib import Path
 
 import httpx
 
+from fllbot.llm.output import delivery_allowed, send_media_reply
 from fllbot.onebot.segments import MessageSegment
 from fllbot.plugin import Context, Plugin
 
@@ -40,6 +47,10 @@ TIMEOUT = 180.0
 DEFAULT_ALPHA = 0.9
 INDEXTTS_SERVER = "http://127.0.0.1:7861"
 QWEN_SERVER = "http://127.0.0.1:7862"
+_QWEN_PROCESS: asyncio.subprocess.Process | None = None
+_QWEN_LOCK = asyncio.Lock()
+_QWEN_IDLE_TASK: asyncio.Task | None = None
+_QWEN_LAST_USE = 0.0
 INDEXTTS_FX = "warm"
 
 QWEN_VOICES = (
@@ -48,6 +59,8 @@ QWEN_VOICES = (
 )
 
 plugin.setting("enabled", type="bool", label="启用语音", default=True, group_scoped=True)
+plugin.setting("service_enabled", type="bool", label="语音服务总开关", default=True,
+               description="全局控制所有群的语音；关闭后停止本插件启动的 Qwen 服务，并禁止自动重新启动。仅配置中的管理员 QQ 可通过智能体修改。")
 plugin.setting(
     "backend",
     type="select",
@@ -85,6 +98,82 @@ async def _service_health(server: str) -> dict[str, str]:
         return {'state': 'error', 'code': 'invalid_response'}
 
 
+async def _stop_owned_qwen() -> None:
+    global _QWEN_PROCESS
+    process, _QWEN_PROCESS = _QWEN_PROCESS, None
+    if process is not None and process.returncode is None:
+        process.terminate()
+        try:
+            await asyncio.wait_for(process.wait(), timeout=10)
+        except TimeoutError:
+            process.kill()
+            await process.wait()
+        log.info("已停止 FLLBot 按需启动的 Qwen TTS 服务")
+
+
+async def _qwen_idle_reaper(minutes: int) -> None:
+    global _QWEN_IDLE_TASK
+    try:
+        while True:
+            deadline = _QWEN_LAST_USE + max(1, minutes) * 60
+            await asyncio.sleep(max(0, deadline - time.monotonic()))
+            async with _QWEN_LOCK:
+                if time.monotonic() >= _QWEN_LAST_USE + max(1, minutes) * 60:
+                    await _stop_owned_qwen()
+                    return
+    except asyncio.CancelledError:
+        raise
+    finally:
+        if _QWEN_IDLE_TASK is asyncio.current_task():
+            _QWEN_IDLE_TASK = None
+
+
+async def _ensure_qwen_started(settings: dict) -> None:
+    """Check Qwen on demand; only stop the process this plugin itself launched."""
+    global _QWEN_PROCESS, _QWEN_IDLE_TASK, _QWEN_LAST_USE
+    minutes = int(settings.get("qwen_idle_minutes", 60) or 60)
+    async with _QWEN_LOCK:
+        if not plugin.settings.get("service_enabled", True):
+            raise RuntimeError("语音服务已被管理员关闭")
+        health = await _service_health(QWEN_SERVER)
+        if health.get("state") not in ("ready", "idle", "loading"):
+            if _QWEN_PROCESS is None or _QWEN_PROCESS.returncode is not None:
+                root = Path(__file__).resolve().parents[2]
+                service_dir = root / "services" / "qwen-tts"
+                python = service_dir / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+                server = service_dir / "server.py"
+                if not python.is_file() or not server.is_file():
+                    raise RuntimeError(f"Qwen TTS 未运行，且未找到服务环境：{service_dir}")
+                kwargs = {"cwd": str(service_dir), "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+                if os.name == "nt":
+                    kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                _QWEN_PROCESS = await asyncio.create_subprocess_exec(
+                    str(python), str(server), **kwargs,
+                )
+                log.info("Qwen TTS 未运行，已按需启动（PID %s）", _QWEN_PROCESS.pid)
+                deadline = time.monotonic() + 300
+                while time.monotonic() < deadline:
+                    if not plugin.settings.get("service_enabled", True):
+                        await _stop_owned_qwen()
+                        raise RuntimeError("语音服务已被管理员关闭")
+                    if _QWEN_PROCESS.returncode is not None:
+                        _QWEN_PROCESS = None
+                        raise RuntimeError("Qwen TTS 启动失败，请检查服务依赖和模型文件")
+                    health = await _service_health(QWEN_SERVER)
+                    if health.get("state") in ("ready", "idle", "loading"):
+                        break
+                    await asyncio.sleep(2)
+                else:
+                    await _stop_owned_qwen()
+                    raise RuntimeError("等待 Qwen TTS 启动超时（300 秒）")
+            else:
+                raise RuntimeError("Qwen TTS 正在启动，请稍后重试")
+        _QWEN_LAST_USE = time.monotonic()
+        if _QWEN_IDLE_TASK is not None:
+            _QWEN_IDLE_TASK.cancel()
+        _QWEN_IDLE_TASK = asyncio.create_task(_qwen_idle_reaper(minutes), name="qwen-tts-idle-stop")
+
+
 @plugin.service_check('qwen', 'Qwen 语音服务', selected_when=('backend', 'qwen'))
 async def check_qwen() -> dict[str, str]:
     return await _service_health(QWEN_SERVER)
@@ -109,6 +198,10 @@ plugin.setting(
     default="dongxuelian-soft",
     description="仅 indextts 后端使用，对应 services/tts/voices 里的文件名",
     group_scoped=True,
+)
+plugin.setting(
+    "qwen_idle_minutes", type="int", label="Qwen 空闲停止时间（分钟）", default=60,
+    min=1, max=1440, description="语音服务由 FLLBot 启动后，空闲达到此时长将自动停止。",
 )
 plugin.setting("with_text", type="bool", label="同时发送文字", default=True, group_scoped=True)
 plugin.setting(
@@ -241,6 +334,7 @@ async def _request_tts(
     speed: float | None = None,
     settings: dict | None = None,
 ) -> Path:
+    _require_current(ctx)
     settings = settings or _snapshot(ctx)
     if not settings.get("use_emotion", True):
         emotion = str(settings.get("emotion") or "natural")
@@ -264,6 +358,7 @@ async def _request_tts(
             "fx": INDEXTTS_FX,
         }
     else:
+        await _ensure_qwen_started(settings)
         url = QWEN_SERVER + "/tts"
         voice = settings.get("qwen_voice")
         payload = {
@@ -277,13 +372,14 @@ async def _request_tts(
 
     async with httpx.AsyncClient(timeout=TIMEOUT) as client:
         log.info(
-            "TTS 请求：backend=%s voice=%s emotion=%s emotion_text=%s speed=%s text=%r",
-            backend, voice, payload.get("emotion"), emotion_text, speed, text[:40],
+            "TTS 请求：backend=%s voice=%s emotion=%s speed=%s text_chars=%s",
+            backend, voice, payload.get("emotion"), speed, len(text),
         )
         response = await client.post(url, json=payload)
         response.raise_for_status()
         audio = response.content
 
+    _require_current(ctx)
     digest = hashlib.sha256(
         (text + backend + str(voice) + str(payload.get("emotion")) + str(emotion_text)).encode("utf-8")
     ).hexdigest()[:24]
@@ -292,26 +388,100 @@ async def _request_tts(
     return path
 
 
-_SETTING_KEYS = ("enabled", "backend", "qwen_voice", "tts_voice", "with_text", "use_emotion", "emotion")
+_SETTING_KEYS = ("enabled", "backend", "qwen_voice", "tts_voice", "qwen_idle_minutes", "with_text", "use_emotion", "emotion")
 # 语音任务串行队列：全局 FIFO，保证不同请求之间也不会交错、乱序
 _QUEUE: asyncio.Queue | None = None
+_WORKER: asyncio.Task | None = None
+
+
+def _require_current(ctx: Context) -> None:
+    if (not delivery_allowed(ctx,require_ai=bool(ctx.tool_execution_id))
+            or not plugin.settings.get('service_enabled', True)
+            or not ctx.bot.permissions.plugin_enabled(plugin.name,ctx.group_id if ctx.is_group else None)
+            or not plugin.settings.get('enabled',group_id=ctx.group_id if ctx.is_group else None)):
+        raise RuntimeError('voice_context_expired')
+
+
+async def _report_error(ctx: Context, text: str) -> None:
+    await send_media_reply(ctx,[MessageSegment.text(text)],text,require_ai=bool(ctx.tool_execution_id))
+
+
+async def _run_job(ctx: Context, *arguments):
+    with ctx.bot.conversations.track_task(ctx):
+        return await _send(ctx,*arguments)
+
+
+def _cancel_job(task, future):
+    if future.cancelled():
+        task.cancel()
 
 
 def _snapshot(ctx: Context) -> dict:
     """在处理器返回前把配置固化下来，后台任务不再依赖 ctx.plugin。"""
-    return {key: ctx.settings.get(key) for key in _SETTING_KEYS}
+    settings = {key: ctx.settings.get(key) for key in _SETTING_KEYS}
+    settings['enabled'] = bool(settings['enabled'] and plugin.settings.get('service_enabled', True))
+    return settings
 
 
 async def _worker() -> None:
     assert _QUEUE is not None
     while True:
-        ctx, text, emotion, emotion_text, emo_alpha, speed, settings, segments = await _QUEUE.get()
+        ctx, text, emotion, emotion_text, emo_alpha, speed, settings, segments, execution_context, completion = await _QUEUE.get()
+        cancel_job = None
         try:
-            await _send(ctx, text, emotion, emotion_text, emo_alpha, speed, settings, segments)
-        except Exception:  # noqa: BLE001
+            if completion.cancelled():
+                continue
+            try:
+                _require_current(ctx)
+            except RuntimeError:
+                completion.cancel()
+                continue
+            task = asyncio.create_task(_run_job(ctx,text,emotion,emotion_text,emo_alpha,speed,settings,segments),
+                                       name='fllbot-voice-delivery',context=execution_context)
+            cancel_job = partial(_cancel_job,task)
+            completion.add_done_callback(cancel_job)
+            result = await task
+            if not completion.done():
+                completion.set_result(result)
+        except asyncio.CancelledError:
+            completion.cancel()
+            if asyncio.current_task().cancelling():
+                raise
+        except Exception as exc:  # noqa: BLE001
+            if not completion.done():
+                completion.set_exception(exc)
             log.exception("语音任务执行失败")
         finally:
+            if cancel_job is not None:
+                completion.remove_done_callback(cancel_job)
             _QUEUE.task_done()
+
+
+async def _close_queue() -> None:
+    global _QUEUE, _WORKER, _QWEN_IDLE_TASK
+    if _WORKER is not None:
+        _WORKER.cancel()
+        await asyncio.gather(_WORKER,return_exceptions=True)
+        _WORKER = None
+    if _QWEN_IDLE_TASK is not None:
+        _QWEN_IDLE_TASK.cancel()
+        await asyncio.gather(_QWEN_IDLE_TASK, return_exceptions=True)
+        _QWEN_IDLE_TASK = None
+    await _stop_owned_qwen()
+    if _QUEUE is not None:
+        while not _QUEUE.empty():
+            job = _QUEUE.get_nowait()
+            job[-1].cancel()
+            _QUEUE.task_done()
+        _QUEUE = None
+
+
+plugin.on_cleanup(_close_queue)
+
+
+@plugin.on_shutdown()
+async def shutdown_voice(bot) -> None:
+    await _close_queue()
 
 
 def _enqueue(
@@ -323,15 +493,23 @@ def _enqueue(
     speed: float | None = None,
     settings: dict | None = None,
     segments: list[str] | None = None,
-) -> None:
+) -> asyncio.Future:
     """把语音任务排进单消费者队列，按提交顺序逐条发送。"""
-    global _QUEUE
+    _require_current(ctx)
+    global _QUEUE, _WORKER
     if _QUEUE is None:
-        _QUEUE = asyncio.Queue()
-        asyncio.create_task(_worker())
+        _QUEUE = asyncio.Queue(maxsize=32)
+        _WORKER = asyncio.create_task(_worker(),name='fllbot-voice-queue',context=contextvars.Context())
+    if _QUEUE.full():
+        raise asyncio.QueueFull
+    completion = asyncio.get_running_loop().create_future()
+    # Command jobs have no waiter; consume errors while retaining them for tool awaiters.
+    completion.add_done_callback(lambda future: None if future.cancelled() else future.exception())
     _QUEUE.put_nowait(
-        (ctx, text, emotion, emotion_text, emo_alpha, speed, settings or _snapshot(ctx), segments)
+        (copy.copy(ctx), text, emotion, emotion_text, emo_alpha, speed, settings or _snapshot(ctx), segments,
+         contextvars.copy_context(), completion)
     )
+    return completion
 
 
 def _payload_common(settings: dict, emotion: str | None, emotion_text: str | None,
@@ -360,6 +538,8 @@ async def _request_tts_batch(
     settings: dict,
 ) -> list[bytes] | None:
     """一次请求合成多段，服务端批量解码；不支持时返回 None 走逐条。"""
+    _require_current(ctx)
+    await _ensure_qwen_started(settings)
     common = _payload_common(settings, emotion, emotion_text, emo_alpha, speed)
     voice = settings.get("qwen_voice")
     items = [{"text": text, "voice": voice, **common} for text in texts]
@@ -375,6 +555,7 @@ async def _request_tts_batch(
 
 
 def _save_audio(ctx: Context, audio: bytes, text: str, settings: dict) -> Path:
+    _require_current(ctx)
     digest = hashlib.sha256(
         (text + str(settings.get("qwen_voice")) + str(settings.get("backend"))).encode("utf-8")
     ).hexdigest()[:24]
@@ -410,15 +591,16 @@ async def _send(
     settings: dict | None = None,
     segments: list[str] | None = None,
 ) -> None:
+    _require_current(ctx)
     settings = settings or _snapshot(ctx)
     if not settings.get("enabled"):
-        await ctx.reply("语音功能未启用")
+        await _report_error(ctx,"语音功能未启用")
         return
 
     clean = _clean(text)
     if not clean and not segments:
-        await ctx.reply("要念什么？用法：/say 想说的话（可加 [开心] 前缀）")
-        return
+        await _report_error(ctx,"要念什么？用法：/say 想说的话（可加 [开心] 前缀）")
+        raise ValueError('empty_voice_text')
 
     speed_value = float(speed or 1.0)
     estimated = estimate_seconds(clean, speed_value)
@@ -462,13 +644,15 @@ async def _send(
             segments.append(MessageSegment.text(chunk))
         segments.append(MessageSegment.record(path.as_uri()))
         log.info("发送第 %s/%s 段（%s 字）", index + 1, len(chunks), len(chunk))
-        await ctx.reply(segments)
+        if not await send_media_reply(ctx,segments,chunk,require_ai=bool(ctx.tool_execution_id)):
+            raise RuntimeError('voice_context_expired')
         first_sent = True
         await asyncio.sleep(0.4)
 
     # Qwen 支持批量：按批合成，每批完成立即发，首条不用等全文
     if backend == "qwen" and len(chunks) > 1:
         for group in plan:
+            _require_current(ctx)
             texts = [chunks[i] for i in group]
             audios: list[bytes] | None = None
             if len(texts) > 1:
@@ -484,30 +668,32 @@ async def _send(
                     await deliver(index, audio)
                 continue
             for index in group:
+                _require_current(ctx)
                 try:
                     path = await _request_tts(
                         ctx, chunks[index], emotion, emotion_text, emo_alpha, speed, settings
                     )
                 except Exception:  # noqa: BLE001
                     log.exception("语音生成失败")
-                    return
+                    raise
                 await deliver(index, path.read_bytes())
         return
 
     for index in range(len(chunks)):
+        _require_current(ctx)
         try:
             path = await _request_tts(ctx, chunks[index], emotion, emotion_text, emo_alpha, speed, settings)
         except httpx.HTTPStatusError as exc:
             detail = exc.response.text[:200]
-            log.warning("TTS 服务返回错误：%s %s", exc.response.status_code, detail)
+            log.warning("TTS 服务返回错误：%s", exc.response.status_code)
             if index == 0:
-                await ctx.reply(f"语音生成失败（{exc.response.status_code}）：{detail}")
-            return
+                await _report_error(ctx,f"语音生成失败（{exc.response.status_code}）：{detail}")
+            raise
         except Exception as exc:  # noqa: BLE001
             log.exception("语音生成失败")
             if index == 0:
-                await ctx.reply(f"语音生成失败：{type(exc).__name__} {exc}")
-            return
+                await _report_error(ctx,f"语音生成失败：{type(exc).__name__} {exc}")
+            raise
         await deliver(index, path.read_bytes())
 
 
@@ -520,8 +706,11 @@ async def say(ctx: Context) -> None:
         return
     emotion, body = _parse_emotion(text)
     settings = _snapshot(ctx)
-    log.info("收到 /say，转入后台生成：%s", (body or text)[:40])
-    _enqueue(ctx, body or text, emotion, settings=settings)
+    log.info("收到 /say，排队生成：%s 字", len(body or text))
+    try:
+        _enqueue(ctx, body or text, emotion, settings=settings)
+    except asyncio.QueueFull:
+        await ctx.reply('语音任务排队已满，请稍后再试。')
 
 
 def _backend(ctx: Context) -> tuple[str, str]:
@@ -578,6 +767,8 @@ async def health(ctx: Context) -> None:
 
 @plugin.on_ai_tool(
     "speak",
+    effect="side_effecting",
+    timeout=360.0,
     title="语音朗读",
     description=(
         "把一段文字用语音念出来并发送到当前会话。用户要求“用语音说/念出来/发条语音”时调用。"
@@ -632,16 +823,50 @@ async def speak(
     settings = _snapshot(ctx)
     resolved = emotion or str(settings.get("emotion") or "natural")
     log.info(
-        "工具调用 voice__speak，转入后台生成：%s%s",
-        text[:40],
+        "工具调用 voice__speak，排队等待生成和发送：%s 字%s",
+        len(text),
         f"（模型分段 {len(segments)} 段）" if segments else "",
     )
-    _enqueue(ctx, text, emotion, emotion_text, emo_alpha, speed, settings=settings, segments=segments)
+    await _enqueue(ctx, text, emotion, emotion_text, emo_alpha, speed, settings=settings, segments=segments)
     return {
         "ok": True,
         "silent": True,
-        "queued": True,
+        "completed": True,
         "spoken": text,
         "segments": len(segments or []),
         "emotion": emotion_text or resolved,
     }
+
+
+@plugin.on_ai_tool(
+    "set_service_enabled",
+    permission="superuser",
+    effect="idempotent",
+    timeout=30,
+    title="启停语音服务（管理员）",
+    description=(
+        "管理员要求关闭/开启 TTS、语音服务时调用。只能由 bot.superusers 中配置的管理员 QQ 发起，群主/群管理员身份不能代替。"
+        "enabled=false 持久关闭全局语音总开关，阻止待发送语音和自动启动，并停止 FLLBot 自己启动的 Qwen 进程。"
+        "enabled=true 恢复按需语音能力，模型在下次朗读时启动；不是立即加载模型。"
+        "若是外部启动的 TTS 进程，工具只关闭 FLLBot 的调用与发送，不会终止外部进程；必须据返回值说明实际结果。"
+    ),
+    parameters={"type":"object", "properties":{"enabled":{"type":"boolean"}},
+                "required":["enabled"], "additionalProperties":False},
+)
+async def set_service_enabled(ctx: Context, enabled: bool) -> dict:
+    # Check live configured QQ identities again, including direct callback calls.
+    if not ctx.bot.permissions.is_superuser(ctx.user_id):
+        return {"error":"permission_denied", "message":"仅配置中的管理员 QQ 可以启停语音服务"}
+    if not ctx.data_current:
+        return {"error":"context_expired"}
+    if not isinstance(enabled, bool):
+        return {"error":"invalid_enabled"}
+    await plugin.settings.set("service_enabled", enabled)
+    owned_stopped = False
+    if not enabled:
+        async with _QWEN_LOCK:
+            owned_stopped = _QWEN_PROCESS is not None and _QWEN_PROCESS.returncode is None
+            await _stop_owned_qwen()
+    return {"enabled":enabled, "owned_process_stopped":owned_stopped,
+            "message":"已恢复语音能力，下次朗读时按需启动" if enabled else
+                "已关闭所有群的语音能力；本插件启动的 Qwen 已停止，外部启动的服务进程不受影响"}

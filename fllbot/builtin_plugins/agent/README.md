@@ -38,3 +38,5 @@
 ## 插件包维护
 
 元信息以 [plugin.toml](plugin.toml) 为准，开发约定见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)，更新记录见 [CHANGELOG.md](CHANGELOG.md)。
+
+工具调用持续到智能体完成任务，不设置轮数或单轮数量限制；旧版 max_tool_rounds 设置不再生效。取消任务、会话失效及单个工具超时仍会中止相应操作。

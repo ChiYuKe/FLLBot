@@ -1,0 +1,7 @@
+schema_version = 1
+api_version = 1
+name = "steam_workshop"
+version = "0.1.0"
+description = "Steam 创意工坊助手：读取工坊物品/合集详情，自动总结页面信息"
+author = ""
+category = "plugin"

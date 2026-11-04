@@ -1,0 +1,7 @@
+schema_version = 1
+api_version = 1
+name = "github"
+version = "0.1.0"
+description = "GitHub 仓库助手：读取公开仓库介绍、README、文件清单和指定文本文件"
+author = ""
+category = "plugin"

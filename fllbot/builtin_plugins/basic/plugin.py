@@ -74,6 +74,7 @@ async def list_plugins(ctx: Context) -> None:
 
 @plugin.on_ai_tool(
     "check_online",
+    effect="read_only",
     title="运行状态",
     description="检查 FLLBot 当前是否正在运行。",
     parameters={"type": "object", "properties": {}, "additionalProperties": False},
