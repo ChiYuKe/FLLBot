@@ -8,9 +8,12 @@ import inspect
 import json
 import time
 import uuid
+from dataclasses import replace
 from typing import Any
 
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, ValidationError
+
+from .plugin.agent import ToolContent, ToolEvent, ToolRejection
 
 
 def parse_arguments(raw: Any, spec: Any) -> dict:
@@ -109,6 +112,60 @@ class ToolExecutor:
         if not task.cancelled():
             task.exception()  # Consume late errors without persisting a stale result.
 
+    def _hooks(self, ctx: Any, name: str) -> tuple:
+        selected = []
+        for owner in sorted(ctx.bot.plugins.loaded(), key=lambda plugin: plugin.name):
+            if not self.permissions.plugin_enabled(owner.name, ctx.group_id):
+                continue
+            for hook in sorted(getattr(owner, 'tool_hooks', ()), key=lambda item: item.name):
+                targets = {tool if '__' in tool else f'{owner.name}__{tool}' for tool in hook.tools}
+                if not targets or name in targets:
+                    selected.append((owner, hook))
+        return tuple(selected)
+
+    async def _stage(self, ctx: Any, hooks: tuple, stage: str, event: ToolEvent) -> ToolEvent:
+        for owner, hook in hooks:
+            if not ctx.data_current:
+                return event
+            if hook.stage != stage:
+                continue
+            # Unloading or disabling an extension revokes it immediately.
+            if (not any(plugin is owner for plugin in ctx.bot.plugins.loaded())
+                    or not self.permissions.plugin_enabled(owner.name, ctx.group_id)):
+                continue
+            try:
+                if self.closing or len(self._callbacks) >= self.max_callbacks:
+                    raise RuntimeError('tool_executor_busy')
+                budget = min(hook.timeout, ctx.received.monotonic_deadline - time.monotonic())
+                if budget <= 0:
+                    raise TimeoutError('tool_deadline_exceeded')
+                hook_ctx = copy.copy(ctx)
+                task = asyncio.create_task(hook.callback(event), name=f'fllbot-hook-{owner.name}-{hook.name}')
+                self._callbacks[task] = hook_ctx
+                task.add_done_callback(self._settled)
+                try:
+                    done, _ = await asyncio.wait({task}, timeout=budget)
+                    if not done:
+                        raise TimeoutError('tool_hook_timeout')
+                    value = task.result()
+                finally:
+                    hook_ctx.execution_cancelled = True
+                    if not task.done():
+                        task.cancel()
+                if stage == 'before' and isinstance(value, ToolRejection):
+                    return replace(event, status='rejected', content=str(value.reason)[:1000])
+                if stage == 'after' and isinstance(value, ToolContent) and isinstance(value.content, str):
+                    event = replace(event, content=value.content)
+                elif value is not None:
+                    raise TypeError('invalid_tool_hook_result')
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                ctx.trace_event('tool_hook', 'hook_failed', 'failed', f'{owner.name}__{hook.name}')
+                if stage != 'completed':
+                    raise
+        return event
+
     async def execute(self, ctx: Any, name: str, raw: Any, registry: dict,
                       refresh: Any = None) -> tuple[str, bool]:
         task = asyncio.current_task()
@@ -120,9 +177,12 @@ class ToolExecutor:
 
     async def _execute(self, ctx: Any, name: str, raw: Any, registry: dict,
                       refresh: Any = None) -> tuple[str, bool]:
-        def failure(code: str) -> tuple[str, bool]:
+        def failure(code: str, details: dict | None = None) -> tuple[str, bool]:
             ctx.trace_event('tool', code, 'failed', name)
-            return json.dumps({'error': code}, ensure_ascii=False), False
+            payload = {'error': code}
+            if details is not None:
+                payload['details'] = details
+            return encode_result(payload, 2000), False
 
         if self.closing:
             return failure('service_stopping')
@@ -157,8 +217,33 @@ class ToolExecutor:
             return failure('tool_permission_denied')
         try:
             arguments = parse_arguments(raw, spec)
+        except ValidationError as exc:
+            # Exclude instance/message: they can contain private argument values.
+            return failure('invalid_arguments', {
+                'path': list(exc.absolute_path), 'constraint': exc.validator,
+                'expected': exc.validator_value,
+            })
+        except json.JSONDecodeError as exc:
+            return failure('invalid_arguments', {
+                'constraint': 'json', 'line': exc.lineno, 'column': exc.colno,
+                'hint': '请提供合法的 JSON 对象',
+            })
+        except ValueError:
+            return failure('invalid_arguments', {'constraint': 'object', 'hint': '工具参数必须是 JSON 对象'})
         except Exception:
             return failure('invalid_arguments')
+        arguments = copy.deepcopy(arguments)
+        hooks = self._hooks(ctx, name)
+        event = ToolEvent(name, ctx.turn_id, ctx.tool_call_id,
+                          arguments=json.dumps(arguments, ensure_ascii=False, sort_keys=True))
+        try:
+            event = await self._stage(ctx, hooks, 'before', event)
+        except Exception:
+            return failure('tool_hook_failed')
+        if event.status == 'rejected':
+            return failure('tool_rejected', {'reason': event.content})
+        if not allowed():
+            return failure('tool_permission_denied')
         execution_id = uuid.uuid4().hex
         scene = 'group' if ctx.is_group else 'private'
         call_id = ctx.tool_call_id or uuid.uuid4().hex
@@ -174,6 +259,7 @@ class ToolExecutor:
             if record['status'] == 'succeeded' and record['content'] is not None:
                 return record['content'], bool(record['silent'])
             return failure('tool_' + record['status'])
+        event = replace(event, execution_id=execution_id, call_id=call_id)
         # Persist before any callback; permission may change while committing.
         if not allowed():
             await self.storage.finish_tool(execution_id, 'cancelled')
@@ -208,7 +294,9 @@ class ToolExecutor:
             await self.storage.finish_tool(execution_id, status, type(exc).__name__)
             if isinstance(exc, asyncio.CancelledError):
                 raise
-            return failure('tool_' + status)
+            output, quiet = failure('tool_' + status)
+            await self._stage(ctx, hooks, 'completed', replace(event, status=status, content=output))
+            return output, quiet
         finally:
             ctx.plugin = previous
             ctx.tool_execution_id = ''
@@ -216,8 +304,18 @@ class ToolExecutor:
             ctx.stop()
         # Callback success is a fact even if formatting/model continuation later fails.
         await self.storage.finish_tool(execution_id, 'succeeded')
-        output = encode_result(result, spec.max_output_chars)
         silent = bool(isinstance(result, dict) and result.get('silent'))
+        try:
+            output = encode_result(result, spec.max_output_chars)
+            transformed = await self._stage(ctx, hooks, 'after', replace(
+                event, status='succeeded', content=output, silent=silent))
+            output = transformed.content
+            if len(output) > spec.max_output_chars:
+                output = encode_result({'content': output}, spec.max_output_chars)
+        except Exception:
+            # The action remains succeeded; formatting failures must never cause replay.
+            output = encode_result({'error': 'tool_result_processing_failed'}, spec.max_output_chars)
         await self.storage.finish_tool(execution_id, 'succeeded', output=output, silent=silent,
                                        generation=ctx.data_epoch, account_epoch=ctx.received.account_epoch, scope_epoch=ctx.received.scope_generation)
+        await self._stage(ctx, hooks, 'completed', replace(event, status='succeeded', content=output, silent=silent))
         return output, silent

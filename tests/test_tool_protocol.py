@@ -91,3 +91,24 @@ async def test_client_normalizes_native_content_without_duplicate_calls(structur
     assert result.text == "" and len(result.tool_calls) == 1
     if structured:
         assert result.tool_calls[0]["id"] == "native-id"
+
+
+@pytest.mark.parametrize('calls', [
+    {}, '', 0, [123], [{'function': 'invalid'}],
+    [{'id': 'same', 'function': {'name': 'read'}}, {'id': 'same', 'function': {'name': 'read'}}],
+])
+async def test_client_rejects_malformed_native_batches(calls):
+    import httpx
+
+    from fllbot.config import LLMConfig
+    from fllbot.llm.client import LLMClient, LLMError
+
+    def handler(request):
+        return httpx.Response(200, json={'choices': [{'message': {
+            'content': 'candidate', 'tool_calls': calls}, 'finish_reason': 'tool_calls'}]})
+
+    config = LLMConfig(api_key='test', base_url='https://model.test', model='test')
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = LLMClient(lambda: config, http_client=http)
+        with pytest.raises(LLMError):
+            await client.chat_result([{'role': 'user', 'content': 'test'}], tools=TOOLS)

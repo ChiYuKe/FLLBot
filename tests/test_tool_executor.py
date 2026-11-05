@@ -112,8 +112,12 @@ async def test_read_only_timeout_is_failed_not_uncertain(tmp_path):
         await bot.stop()
 
 
-@pytest.mark.parametrize('arguments', ['{', '{"count":true}', '{"count":-1}', '{"count":1,"extra":0}', '{}'])
-async def test_invalid_schema_never_executes(tmp_path, arguments):
+@pytest.mark.parametrize(('arguments', 'constraint'), [
+    ('{', 'json'), ('{"count":true}', 'type'), ('{"count":-1}', 'minimum'),
+    ('{"count":1,"extra":0}', 'additionalProperties'), ('{}', 'required'),
+    ('{"count":"PRIVATE_ARGUMENT"}', 'type'), ('[]', 'object'),
+])
+async def test_invalid_schema_never_executes(tmp_path, arguments, constraint):
     bot = await make_bot(tmp_path, builtin=False)
     try:
         owner = SimpleNamespace(name='example')
@@ -124,6 +128,13 @@ async def test_invalid_schema_never_executes(tmp_path, arguments):
         ctx = Context(bot, FakeConnection(), parse_event(group_message('hello')))
         output, silent = await bot.tool_executor.execute(ctx, spec.qualified_name, arguments, {spec.qualified_name:(owner,spec)})
         assert json.loads(output)['error'] == 'invalid_arguments'
+        details = json.loads(output)['details']
+        assert details['constraint'] == constraint
+        if constraint in ('type', 'minimum'):
+            assert details['path'] == ['count']
+        if constraint == 'required':
+            assert details['expected'] == ['count']
+        assert 'PRIVATE_ARGUMENT' not in output
         callback.assert_not_awaited()
         assert not silent
     finally:

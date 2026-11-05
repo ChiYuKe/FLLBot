@@ -21,6 +21,43 @@ class ToolProtocolError(ValueError):
     """A native envelope cannot safely be treated as text or executed."""
 
 
+def normalize_tool_calls(raw: Any) -> list[dict[str, Any]]:
+    """Validate the entire batch before callbacks and share IDs with the transcript."""
+    if not isinstance(raw, list):
+        raise ToolProtocolError("工具调用必须是列表")
+    ids: set[str] = set()
+    for call in raw:
+        if not isinstance(call, dict):
+            raise ToolProtocolError("工具调用必须是对象")
+        call_id = call.get('id')
+        if call_id is not None:
+            if not isinstance(call_id, str) or not call_id.strip() or call_id in ids:
+                raise ToolProtocolError("工具调用 ID 必须是非空且在批次内唯一的字符串")
+            ids.add(call_id)
+    calls = []
+    for call in raw:
+        function = call.get('function')
+        if call.get('type', 'function') != 'function' or not isinstance(function, dict):
+            raise ToolProtocolError("工具调用 function 结构无效")
+        name = function.get('name')
+        if not isinstance(name, str) or not name.strip():
+            raise ToolProtocolError("工具调用缺少有效名称")
+        arguments = function.get('arguments', '{}')
+        if isinstance(arguments, dict):
+            arguments = json.dumps(arguments, ensure_ascii=False)
+        if not isinstance(arguments, str):
+            raise ToolProtocolError("工具参数必须是 JSON 字符串或对象")
+        call_id = call.get('id')
+        if call_id is None:
+            call_id = 'call_' + uuid.uuid4().hex
+            while call_id in ids:
+                call_id = 'call_' + uuid.uuid4().hex
+            ids.add(call_id)
+        calls.append({'id': call_id, 'type': 'function',
+                      'function': {'name': name, 'arguments': arguments}})
+    return calls
+
+
 def contains_dsml(text: str) -> bool:
     return bool(_MARKER.search(text))
 
