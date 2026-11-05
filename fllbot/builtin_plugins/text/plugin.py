@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import io
-
-from PIL import Image
 
 from fllbot.llm.output import send_media_reply
 from fllbot.onebot.segments import MessageSegment
 from fllbot.plugin import Context, Plugin
+from fllbot.rendering.text_image import join_pages as _join_pages
 
 from .service import MAX_CHARS, process, render
 
 plugin = Plugin.from_manifest(__file__)
+plugin.agent_instruction(
+    'image_delivery', tools=['render_image'],
+    text='用户要求图片时，先完成并整理答复，再对完整内容调用 render_image 一次；'
+         '不要把草稿或逐段内容分次渲染。图片发送后不再重复图片中的长文。'
+         '摘要默认控制在一页，用户明确要求详细分析时保留必要章节和细节。',
+)
 plugin.setting(
     "font_path",
     type="string",
@@ -22,7 +26,7 @@ plugin.setting(
     default="",
     description="留空自动查找系统中文字体；也可填写 TTF/OTF/TTC 文件的绝对路径。",
 )
-plugin.setting("font_size", type="int", label="图片字号", default=16, min=16, max=48)
+plugin.setting("font_size", type="int", label="图片字号", default=24, min=16, max=48)
 plugin.setting("image_width", type="int", label="图片宽度", default=900, min=400, max=1600)
 
 
@@ -150,7 +154,7 @@ async def render_image(ctx: Context, text: str, format: str = "markdown") -> dic
             render,
             text,
             font_path=str(settings.get("font_path") or ""),
-            font_size=int(settings.get("font_size", 28)),
+            font_size=int(settings.get("font_size", 24)),
             width=int(settings.get("image_width", 900)),
             format=format,
         )
@@ -165,30 +169,3 @@ async def render_image(ctx: Context, text: str, format: str = "markdown") -> dic
     segments = [MessageSegment.image("base64://" + base64.b64encode(image_data).decode("ascii"))]
     sent = await send_media_reply(ctx, segments, text, require_ai=True)
     return {"sent": sent, "images": 1 if sent else 0, "pages_in_image": len(pages) if sent else 0}
-
-
-def _join_pages(pages: list[bytes]) -> bytes:
-    if not pages:
-        raise ValueError("没有可发送的图片页面")
-    images = [Image.open(io.BytesIO(page)).convert("RGB") for page in pages]
-    try:
-        width = max(image.width for image in images)
-        heights = [image.height for image in images]
-        seam = 1
-        canvas = Image.new("RGB", (width, sum(heights) - 27 * (len(images) - 1)), "#eef1f6")
-        y = 0
-        for index, image in enumerate(images):
-            top = 0 if index == 0 else 14
-            bottom = image.height if index == len(images) - 1 else image.height - 14
-            crop = image.crop((0, top, image.width, bottom))
-            canvas.paste(crop, (0, y))
-            y += crop.height
-            if index < len(images) - 1:
-                canvas.paste(Image.new("RGB", (width, seam), "#dfe4ec"), (0, y))
-                y += seam
-        output = io.BytesIO()
-        canvas.save(output, format="PNG", optimize=True)
-        return output.getvalue()
-    finally:
-        for image in images:
-            image.close()

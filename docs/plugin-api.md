@@ -461,3 +461,41 @@ await ctx.connection.send_group_forward_msg(ctx.group_id, [node.to_dict()])
 PermissionManager.plugin_enabled 将全局明确 false 作为优先硬限制，群覆盖不能绕过；全局无显式停用时，声明默认 false 的插件可由群单独开启。周期回调由宿主根据 plugin_loop_enabled 调度：实例默认启用或至少一个群单独启用才运行，全局 false 阻止新的周期回调。面向具体会话的任务仍需在执行前检查该群/私聊权限及连接，不得换账号代发。
 
 停用不会卸载代码、删除数据或阻止生命周期初始化及管理读取；已开始的回调不会被强制取消，插件需在长操作后的实际发送前再次检查权限。此契约约束宿主入口，不能将任意插件自行创建的任务或低层外部调用描述为受宿主完整隔离。
+## Agent 提示词片段与工具生命周期
+
+插件可以通过声明式片段补充 Agent 策略，而不修改宿主的核心规则：
+
+```python
+plugin.agent_instruction(
+    "repository_policy", tools=["read_repository"],
+    text="分析仓库时先读取真实资料，不臆测未读取的内容。",
+)
+```
+
+`tools` 是本插件的工具短名称，至少一个；所有关联工具都进入当前请求的权限白名单时才注入片段。片段名称在插件内唯一。宿主按插件名、片段名排序，组装核心规则后再追加片段；请求快照保留正文及 `插件名__片段名` 来源。插件停用、卸载或工具权限不满足后，后续请求不再包含该片段。已有请求快照保持不变，执行时仍复核实时权限。片段由受信任插件提供，不能授予工具权限。
+
+工具钩子使用异步回调，只收到不可变的 `ToolEvent`，不会获得可修改的 Context 或连接：
+
+```python
+from fllbot.plugin import ToolContent, ToolRejection
+
+@plugin.on_tool("before", name="check_policy", tools=["send"])
+async def check_policy(event):
+    # event.arguments 是 JSON 字符串；按需读取，避免在日志中泄露内容。
+    if should_reject(event):
+        return ToolRejection("不符合当前操作策略")
+
+@plugin.on_tool("after", name="format_result", tools=["send"])
+async def format_result(event):
+    return ToolContent(event.content + "\n操作已处理。")
+
+@plugin.on_tool("completed", name="observe", tools=["send"])
+async def observe(event):
+    plugin.logger.info("tool=%s status=%s", event.tool, event.status)
+```
+
+`before` 只能返回 `None` 或 `ToolRejection`，异常或超时阻止本次操作；参数校验先于钩子，钩子之后和执行登记之后都会复核权限。`after` 只处理已成功的执行，可返回 `None` 或 `ToolContent`，不能改变持久化的执行状态或静默标记。处理失败会返回结果处理错误，实际成功状态仍然保留，因此不会重做已完成的动作。
+
+`completed` 在已登记执行的成功、失败或不确定结果保存后通知，只能返回 `None`；观察器异常记录到 trace，不覆盖结果。取消会向外传播，取消期间不保证完成通知。参数错误、策略拒绝、权限拒绝和缓存命中不产生新的完成通知；重复请求仍会经过执行前策略，但不会再次运行工具或结果处理。
+
+钩子按插件名、钩子名排序；`tools` 可用本插件短名称或完整的 `插件名__工具名`，省略表示观察所有工具。仅启用且仍加载的插件参与；尚未启动的钩子在所属插件卸载或停用后跳过。每个钩子默认超时 1 秒，可设为 `(0, 5]` 秒，并受整轮截止时间约束。超时任务取消后仍占用执行容量直到退出；插件回调必须配合取消，不应从钩子直接发起外部动作。

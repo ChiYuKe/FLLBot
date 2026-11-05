@@ -16,6 +16,7 @@ from ..rules import (
     startswith,
     to_me,
 )
+from .agent import ToolContent, ToolEvent, ToolRejection
 from .base import AIToolSpec, HandlerKind, HandlerSpec, LoopSpec, Plugin, ServiceCheckSpec, TaskSourceSpec
 from .context import Context
 from .settings import MASK, PluginSettings, SettingField, SettingsView
@@ -24,6 +25,9 @@ __all__ = [
     "MASK",
     "AIToolSpec",
     "Context",
+    "ToolContent",
+    "ToolEvent",
+    "ToolRejection",
     "HandlerKind",
     "HandlerSpec",
     "LoopSpec",

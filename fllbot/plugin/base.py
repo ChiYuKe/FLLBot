@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 from ..rules import Rule, evaluate
 from ..rules import command as command_rule
+from .agent import AgentInstruction, ToolHook, validate_name
 from .settings import PluginSettings, SettingField
 
 HandlerKind = Literal["message", "notice", "request", "meta_event", "startup", "shutdown"]
@@ -165,6 +166,8 @@ class Plugin:
         self._handlers: list[HandlerSpec] = []
         self._loops: list[LoopSpec] = []
         self._ai_tools: list[AIToolSpec] = []
+        self._agent_instructions: list[AgentInstruction] = []
+        self._tool_hooks: list[ToolHook] = []
         self.service_checks: list[ServiceCheckSpec] = []
         self.task_sources: list[TaskSourceSpec] = []
         self._settings = PluginSettings(lambda: self.name)
@@ -176,6 +179,48 @@ class Plugin:
         self.readme: str = ""
         self.logger = logging.getLogger(f"fllbot.plugin.{self.name or 'unnamed'}")
         self._cleanups: list[Callable[[], Any]] = []
+
+    @property
+    def agent_instructions(self) -> tuple[AgentInstruction, ...]:
+        return tuple(self._agent_instructions)
+
+    @property
+    def tool_hooks(self) -> tuple[ToolHook, ...]:
+        return tuple(self._tool_hooks)
+
+    def agent_instruction(self, name: str, *, tools: list[str], text: str) -> None:
+        validate_name(name)
+        if not isinstance(tools, (list, tuple)) or not tools or not isinstance(text, str) or not text.strip():
+            raise ValueError('提示词片段必须关联工具并提供正文')
+        for tool in tools:
+            validate_name(tool)
+        if any(item.name == name for item in self._agent_instructions):
+            raise ValueError('提示词片段名称重复')
+        self._agent_instructions.append(AgentInstruction(name, tuple(tools), text))
+
+    def on_tool(self, stage: str, *, name: str, tools: list[str] | None = None,
+                timeout: float = 1.0) -> Callable:
+        validate_name(name)
+        if stage not in {'before', 'after', 'completed'}:
+            raise ValueError('未知工具生命周期阶段')
+        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or not 0 < timeout <= 5:
+            raise ValueError('工具钩子超时必须在 0 到 5 秒之间')
+        if any(item.name == name for item in self._tool_hooks):
+            raise ValueError('工具钩子名称重复')
+        if tools is not None and (not isinstance(tools, (list, tuple)) or not tools):
+            raise ValueError('工具钩子筛选必须是非空工具名称列表，省略表示所有工具')
+        targets = tuple(tools or ())
+        for target in targets:
+            if not isinstance(target, str) or not re.fullmatch(r'[a-z][a-z0-9_-]{0,129}', target):
+                raise ValueError('无效的工具钩子筛选名称')
+        def register(callback: Callable) -> Callable:
+            if not inspect.iscoroutinefunction(callback):
+                raise ValueError('工具钩子必须是异步函数')
+            if any(item.name == name for item in self._tool_hooks):
+                raise ValueError('工具钩子名称重复')
+            self._tool_hooks.append(ToolHook(name, stage, targets, callback, timeout))
+            return callback
+        return register
 
     def task_source(self, name: str, title: str) -> Callable:
         """Expose list/runs/action operations to the authenticated task console."""
