@@ -1,0 +1,7 @@
+schema_version = 1
+api_version = 1
+name = "files"
+version = "0.1.0"
+description = "读取当前消息或引用消息中的 QQ 文本与代码文件附件"
+author = ""
+category = "plugin"

@@ -28,7 +28,7 @@
 - **LLM 子系统**：OpenAI 兼容接口、上下文与人格管理，可供管理 API 和自定义插件使用
 - **管理 API**：状态/连接/插件/群/配置/日志/统计/人格/插件配置、通用 OneBot 调用、KV 读写、SSE 实时事件流
 - **可靠性**：有界事件队列与溢出统计、分阶段关闭与任务排空、SQLite 在线备份和校验后恢复
-- **开箱内置插件**：`basic`（包含 `ping`、`echo`、`help`、`plugins` 命令）、`agent`（群级自然语言智能体）、`text`（智能体文本与图片排版工具）和 `github`（读取公开仓库 README、文件清单与指定文本文件；需在后台授权）
+- **开箱内置插件**：`basic`（包含 `ping`、`echo`、`help`、`plugins` 命令）、`agent`（群级自然语言智能体）、`text`（智能体文本与图片排版工具）、`github`（公开仓库读取）、`files`（QQ 文本与代码附件读取）和 `oni_knowledge`（本地缺氧源码检索与读取；工具需在后台授权）
 
 ## 快速开始（Windows）
 
@@ -270,7 +270,7 @@ fllbot/
 ├── storage/            # SQLite + 迁移 + 仓储
 ├── llm/                # 客户端、人格、多轮对话
 ├── api/                # 管理 REST + SSE
-├── builtin_plugins/    # basic、agent、text 与 github
+├── builtin_plugins/    # basic、agent、text、github、files 与 oni_knowledge
 plugins/                # 用户插件（运行时加载，已 gitignore 之外）
 personas/               # 用户人格（全部由你创建，程序不内置人格）
 tools/                  # fake_napcat.py、smoke_test.py

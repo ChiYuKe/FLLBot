@@ -1,0 +1,7 @@
+schema_version = 1
+api_version = 1
+name = "oni_knowledge"
+version = "0.1.0"
+description = "缺氧源码知识库：检索本地类型/成员索引，按行读取实际 C# 源码"
+author = ""
+category = "plugin"
