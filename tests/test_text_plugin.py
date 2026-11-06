@@ -54,6 +54,73 @@ def test_images_paginate_and_reject_overflow():
         render("测试", font_path="/nonexistent-font.ttf")
 
 
+def test_long_image_preserves_all_rows_at_page_boundaries():
+    module = importlib.import_module("fllbot.builtin_plugins.text.plugin")
+    pages = []
+    for height, color in ((30, "red"), (37, "blue")):
+        buffer = io.BytesIO()
+        Image.new("RGB", (100, height), color).save(buffer, format="PNG")
+        pages.append(buffer.getvalue())
+    with Image.open(io.BytesIO(module._join_pages(pages))) as result:
+        assert result.size == (100, 67)
+        assert result.getpixel((50, 29)) == (255, 0, 0)
+        assert result.getpixel((50, 30)) == (0, 0, 255)
+        assert result.getpixel((50, 66)) == (0, 0, 255)
+
+
+def test_english_identifiers_wrap_as_words():
+    from fllbot.builtin_plugins.text.markdown_render import Run, wrap
+    from fllbot.builtin_plugins.text.service import load_font
+
+    font = load_font("", 24)
+    lines = wrap([Run("short Implementation details")], font, int(font.getlength("Implementation") + 8))
+    assert any("Implementation" in ''.join(glyph[0] for glyph in line) for line in lines)
+
+
+def test_code_panel_has_syntax_colors_and_preserves_lines():
+    from fllbot.builtin_plugins.text.code_render import code_rows
+    from fllbot.builtin_plugins.text.service import load_font
+
+    rows = list(code_rows('if (count > 10) {\n    return "中文";\n}', 'csharp', load_font('',24), 780))
+    assert len(rows) == 5  # Language header, three original lines, bottom padding.
+    colors = {color for row in rows for _,color in row.getcolors(row.width*row.height)}
+    assert (203,166,247) in colors  # Keywords.
+    assert (242,181,145) in colors  # Numbers.
+    assert (182,216,140) in colors  # Strings, including CJK.
+    assert all(row.width == 780 for row in rows)
+
+
+def test_unknown_code_language_and_long_lines_are_safe():
+    from fllbot.builtin_plugins.text.code_render import code_rows
+    from fllbot.builtin_plugins.text.service import load_font
+
+    rows = list(code_rows('    identifier_' * 30 + '\nend', 'not-a-real-language', load_font('',24), 400))
+    assert len(rows) > 5 and all(row.width == 400 for row in rows)
+
+
+def test_repeated_code_glyphs_have_identical_pixel_shape_and_baseline():
+    from PIL import ImageChops
+
+    from fllbot.builtin_plugins.text.code_render import code_rows
+    from fllbot.builtin_plugins.text.service import load_font
+
+    row = list(code_rows('x x x x x x x x', 'text', load_font('',24), 780))[1]
+    ink = ImageChops.difference(row, Image.new('RGB', row.size, '#182230'))
+    intervals = []
+    start = None
+    for x in range(65, row.width):
+        filled = ink.crop((x,0,x+1,row.height)).getbbox() is not None
+        if filled and start is None:
+            start = x
+        if not filled and start is not None:
+            intervals.append((start,x))
+            start = None
+    # Ignore the first glyph if a platform's gutter starts slightly before x=65.
+    glyphs = [ink.crop((left,0,right,row.height)) for left,right in intervals][-7:]
+    assert len(glyphs) == 7
+    assert all(glyph.size == glyphs[0].size and glyph.tobytes() == glyphs[0].tobytes() for glyph in glyphs)
+
+
 async def test_registration_and_loading(tmp_path):
     assert not plugin.handlers
     assert len(plugin.ai_tools) == 6
