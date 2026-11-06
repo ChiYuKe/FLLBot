@@ -177,7 +177,7 @@ function openGroupDetails(groupId) {
   document.getElementById('managed-group').value = String(groupId);
   document.getElementById('group-editor-title').textContent = (group && group.group_name || '群聊') + ' · 详细设置';
   document.getElementById('group-editor-modal').classList.add('open');
-  document.getElementById('dashboard').inert = true; document.querySelector('.sidebar').inert = true;
+  document.getElementById('dashboard').inert = true; document.querySelector('.console-shell, .sidebar').inert = true;
   document.body.classList.add('group-dialog-open');
   document.getElementById('group-editor-close').focus(); loadManagedGroup();
 }
@@ -186,7 +186,7 @@ function closeGroupDetails() {
   ++managedRequestId;
   if (activeSelectControl) activeSelectControl.close(false);
   document.getElementById('group-editor-modal').classList.remove('open');
-  document.getElementById('dashboard').inert = false; document.querySelector('.sidebar').inert = false;
+  document.getElementById('dashboard').inert = false; document.querySelector('.console-shell, .sidebar').inert = false;
   document.body.classList.remove('group-dialog-open'); markSaved('groups');
   if (groupDetailFocus && groupDetailFocus.isConnected) groupDetailFocus.focus();
 }

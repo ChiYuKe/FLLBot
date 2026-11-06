@@ -11,7 +11,7 @@ def render_index() -> str:
     """组装页面；管理数据由带令牌的 API 请求提供。"""
     html = (_UI / "index.html").read_text(encoding="utf-8")
     styles = "\n".join((_UI / name).read_text(encoding="utf-8") for name in (
-        "console.css", "controls.css", "desktop.css", "scrollbars.css", "admin-layout.css",
+        "console.css", "controls.css", "desktop.css", "scrollbars.css", "admin-layout.css", "workbench.css",
     ))
     script = (_UI / "app.js").read_text(encoding="utf-8")
     features = "\n".join((_UI / name).read_text(encoding="utf-8") for name in (

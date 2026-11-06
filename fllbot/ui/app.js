@@ -623,28 +623,39 @@
 
   function renderToolPicker(node, selected, disabled, onToggle) {
     var tools = toolCatalog();
-    node.textContent = '';
-    tools.forEach(function (tool) {
-      var check = h('input', { type: 'checkbox' });
-      check.checked = selected.indexOf(tool.id) >= 0;
-      check.disabled = Boolean(disabled);
-      check.addEventListener('change', function () { onToggle(tool.id, check.checked); });
-      node.appendChild(h('label', { class: 'tool-choice', title: tool.description || '', 'data-tool': tool.id },
-        check,
-        h('span', {},
-          h('strong', { text: tool.title }),
-          !tool.pluginEnabled ? h('small', { text: '工具未启用' }) : null
-        )
-      ));
-    });
-    selected.filter(function (id) {
-      return !tools.some(function (tool) { return tool.id === id; });
-    }).forEach(function (id) {
-      node.appendChild(h('p', { class: 'settings-note', text: id + '：工具未加载或已移除，已保留原设置。' }));
-    });
-    if (!tools.length) {
-      node.appendChild(h('p', { class: 'settings-note', text: '暂无可用工具；启用提供 Agent 工具的插件后会显示可选项。' }));
+    var state=node.toolPickerState || (node.toolPickerState={query:'',plugin:'',onlySelected:false,page:1});
+    var values=new Set(selected);
+    node.textContent='';node.classList.add('paged-tool-picker');
+    var search=h('input',{type:'search',placeholder:'搜索工具名称或说明','aria-label':'搜索可选工具'});search.value=state.query;
+    var pluginSelect=h('select',{'aria-label':'筛选工具来源插件'},h('option',{value:'',text:'全部插件'}));
+    Array.from(new Set(tools.map(function(t){return t.plugin;}))).sort().forEach(function(name){pluginSelect.appendChild(h('option',{value:name,text:name}));});pluginSelect.value=state.plugin;
+    var only=h('input',{type:'checkbox','aria-label':'只看已勾选工具'});only.checked=state.onlySelected;
+    var summary=h('span',{class:'settings-note'}),rows=h('div',{class:'picker-tool-rows'}),pageNote=h('span',{class:'settings-note'});
+    var prev=h('button',{type:'button',class:'btn',text:'上一页',onclick:function(){state.page--;draw();}}),next=h('button',{type:'button',class:'btn',text:'下一页',onclick:function(){state.page++;draw();}});
+    function filtered(){return tools.filter(function(t){return (!state.plugin||t.plugin===state.plugin)&&(!state.onlySelected||values.has(t.id))&&[t.title,t.id,t.description].join(' ').toLowerCase().includes(state.query.toLowerCase());});}
+    function toggle(id,checked){if(checked)values.add(id);else values.delete(id);onToggle(id,checked);}
+    function batch(checked){filtered().forEach(function(t){toggle(t.id,checked);});node.dispatchEvent(new Event('input',{bubbles:true}));draw();}
+    var enable=h('button',{type:'button',class:'btn',text:'勾选筛选结果',onclick:function(){batch(true);}}),clear=h('button',{type:'button',class:'btn',text:'取消筛选结果',onclick:function(){batch(false);}});enable.disabled=clear.disabled=Boolean(disabled);
+    node.appendChild(h('div',{class:'picker-tool-filters'},search,pluginSelect,h('label',{class:'inline-check'},only,h('span',{text:'只看已选'}))));
+    node.appendChild(h('div',{class:'picker-tool-actions'},summary,enable,clear));node.appendChild(rows);
+    node.appendChild(h('div',{class:'picker-tool-actions'},pageNote,prev,next));
+    function draw(){
+      var matches=filtered(),pages=Math.max(1,Math.ceil(matches.length/8));state.page=Math.max(1,Math.min(state.page,pages));rows.textContent='';
+      summary.textContent=(disabled?'继承默认 · ':node.id==='policy-tools'?'本群自定义 · ':'自定义 · ')+'已选 '+values.size+' / '+tools.length+' 个';
+      enable.disabled=clear.disabled=Boolean(disabled)||!matches.length;
+      matches.slice((state.page-1)*8,state.page*8).forEach(function(t){
+        var check=h('input',{type:'checkbox','aria-label':'允许 '+t.title});check.checked=values.has(t.id);check.disabled=Boolean(disabled);
+        check.addEventListener('change',function(){toggle(t.id,check.checked);draw();});
+        rows.appendChild(h('div',{class:'picker-tool-row'},check,h('div',{},h('strong',{text:t.title}),h('small',{text:t.id+' · '+t.plugin+(t.pluginEnabled?'':' · 插件未启用')}),h('details',{},h('summary',{text:t.description||'暂无说明'}),h('p',{text:t.description||'暂无说明'})))));
+      });
+      if(!matches.length)rows.appendChild(h('div',{class:'empty',text:'没有匹配的工具'}));
+      pageNote.textContent=matches.length+' 条结果 · '+state.page+' / '+pages+' 页';prev.disabled=state.page<=1;next.disabled=state.page>=pages;
     }
+    search.addEventListener('input',function(event){event.stopPropagation();state.query=search.value;state.page=1;draw();});
+    [pluginSelect,only].forEach(function(control){control.addEventListener('input',function(event){event.stopPropagation();});control.addEventListener('change',function(){state.plugin=pluginSelect.value;state.onlySelected=only.checked;state.page=1;draw();});});
+    var missing=selected.filter(function(id){return !tools.some(function(t){return t.id===id;});});
+    if(missing.length)node.appendChild(h('details',{},h('summary',{text:missing.length+' 个工具当前未加载，原选择已保留'}),h('p',{text:missing.join('、')})));
+    draw();
     return tools;
   }
 

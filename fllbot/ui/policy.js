@@ -22,7 +22,7 @@ function renderPolicy(group,providers){
   policyField('trigger').value=policy.trigger_mode||'';
   [['prefix','trigger_prefix'],['cooldown','cooldown_seconds'],['auto-reply-probability','auto_reply_probability'],['extra','system_extra']].forEach(function(pair){policyField(pair[0]).value=policy[pair[1]]==null?'':policy[pair[1]];});
   policyField('tools-inherit').checked=policy.allowed_tools==null;
-  policyToolValues=(policy.allowed_tools||[]).slice();policyInheritValues=((group.inherited_policy||{}).allowed_tools||[]).slice();renderPolicyTools();
+  policyToolValues=(policy.allowed_tools||[]).slice();policyInheritValues=((group.inherited_policy||{}).allowed_tools||[]).slice();policyField('tools').toolPickerState=null;renderPolicyTools();
   var node=policyField('effective');node.textContent='';
   var sourceNames={system:'系统默认',bot:'机器人默认',group:'本群覆盖',legacy_group:'旧版群插件配置',nickname:'机器人昵称',unresolved:'尚未选择机器人'};
   var sources=effective.sources||{};
