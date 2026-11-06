@@ -14,6 +14,7 @@ class ConversationKey:
     self_id: int
     scene: str
     scene_id: int
+    sender_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -143,7 +144,8 @@ class ConversationCapacity:
     @contextmanager
     def admit(self, ctx):
         self.ensure_open()
-        key = ConversationKey('qq',ctx.self_id,ctx.event.scene,ctx.event.scene_id)
+        key = ConversationKey('qq',ctx.self_id,ctx.event.scene,ctx.event.scene_id,
+                              ctx.user_id if ctx.is_group else 0)
         inherited = ctx.received.admission
         if inherited is not None:
             if inherited.released or inherited.key != key:

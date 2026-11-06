@@ -35,7 +35,7 @@ async def test_waiting_turn_freezes_agent_choices_but_execution_checks_live_gran
             output,_ = await _run_tool(ctx,'basic__check_online',{},registry)
             assert json.loads(output)['error'] == 'tool_permission_denied'
     try:
-        async with bot.chat.conversation_lock(10001,'group',20002):
+        async with bot.chat.conversation_lock(10001,'group',20002,ctx.user_id):
             task = asyncio.create_task(run())
             await asyncio.wait_for(entered.wait(),1)
             await bot.permissions.save_group(20002,enabled=True,config={'policy':{
@@ -96,7 +96,7 @@ async def test_turn_freezes_persona_before_waiting_for_conversation_lock(tmp_pat
     bot = await make_bot(tmp_path,builtin=False,llm={'persona':'snapshot'})
     bot.personas.save('snapshot','snapshot','','before queue')
     ctx = Context(bot,FakeConnection(),parse_event(group_message('hello')))
-    lock = bot.chat.conversation_lock(10001,'group',20002)
+    lock = bot.chat.conversation_lock(10001,'group',20002,ctx.user_id)
     entered = asyncio.Event()
     original = bot.storage.create_turn
     async def create(*args):

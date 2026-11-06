@@ -33,7 +33,8 @@ class Dispatcher:
         self._startup: list[HandlerSpec] = []
         self._shutdown: list[HandlerSpec] = []
         self._queue = ConversationQueue(max(1, int(bot.config.plugin.max_pending_events)),
-                                        bot.config.plugin.max_pending_per_conversation)
+                                        bot.config.plugin.max_pending_per_conversation,
+                                        bot.config.plugin.max_concurrent_per_group)
         self._workers: set[asyncio.Task[None]] = set()
         self._worker_count = max(1, int(bot.config.plugin.max_concurrency))
         self._running = 0
@@ -136,6 +137,14 @@ class Dispatcher:
                 trace.add('dedup','duplicate_message','skipped')
                 self.bot.traces.submit(trace,'skipped')
             return
+        with receive_scope(snapshot), activate(trace):
+            if await self.bot.agent_tasks.handle(Context(self.bot, connection, event), defer_reply=True):
+                await self.bot.storage.update_event(envelope.event_key, 'completed', 'agent_control')
+                self.stats['agent_controls'] += 1
+                if trace:
+                    trace.add('agent', 'task_control', 'passed')
+                    self.bot.traces.submit(trace)
+                return
         result = self.emit(event,connection,trace=trace,snapshot=snapshot,envelope=envelope)
         await self.bot.storage.update_event(envelope.event_key,'queued' if result=='queued' else 'dropped',result or 'unsupported')
 
@@ -165,7 +174,8 @@ class Dispatcher:
             snapshot = snapshot or ReceiveSnapshot.capture(self.bot.storage.conversation_generation, self.bot.config.plugin,
                                                self.bot.bots.epoch(int(event.self_id or connection.self_id or 0)))
             if isinstance(event, MessageEvent):
-                ticket = self.bot.capacity.reserve(ConversationKey('qq',int(event.self_id or connection.self_id or 0),event.scene,event.scene_id))
+                ticket = self.bot.capacity.reserve(ConversationKey('qq',int(event.self_id or connection.self_id or 0),event.scene,event.scene_id,
+                    event.user_id if event.is_group else 0))
                 snapshot = replace(snapshot,admission=ticket)
             if isinstance(event, MessageEvent) and envelope is None:
                 snapshot = replace(snapshot,scope_generation=self.bot.storage.scope_generation(
@@ -304,6 +314,9 @@ class Dispatcher:
             record('access', 'scene_denied', 'skipped')
             return
         record('access', 'scene_allowed')
+
+        if isinstance(event, MessageEvent) and await self.bot.agent_tasks.handle(ctx):
+            return
 
         if isinstance(event, MessageEvent):
             with span('memory'):

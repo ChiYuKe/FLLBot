@@ -10,9 +10,10 @@ from .onebot.models import MessageEvent
 
 
 class ConversationQueue:
-    def __init__(self, capacity: int, per_conversation: int) -> None:
+    def __init__(self, capacity: int, per_conversation: int, per_group: int = 6) -> None:
         self.maxsize = capacity
         self.per_conversation = per_conversation
+        self.per_group = per_group
         self._pending: dict[Any, deque] = {}
         self._ready: deque = deque()
         self._active: set[Any] = set()
@@ -26,7 +27,8 @@ class ConversationQueue:
     def key(self, item: tuple) -> Any:
         event, connection = item[:2]
         if isinstance(event, MessageEvent):
-            return ConversationKey('qq', int(event.self_id or connection.self_id or 0), event.scene, event.scene_id)
+            return ConversationKey('qq', int(event.self_id or connection.self_id or 0), event.scene, event.scene_id,
+                                   event.user_id if event.is_group else 0)
         # Protocol notices do not share message ordering or block conversations.
         return object()
 
@@ -49,10 +51,21 @@ class ConversationQueue:
             self._available.set()
 
     async def get(self) -> tuple:
-        while not self._ready:
+        while True:
+            key = None
+            for _ in range(len(self._ready)):
+                candidate = self._ready.popleft()
+                active = sum(isinstance(other, ConversationKey) and other.self_id == candidate.self_id
+                             and other.scene == candidate.scene and other.scene_id == candidate.scene_id
+                             for other in self._active) if isinstance(candidate, ConversationKey) else 0
+                if not isinstance(candidate, ConversationKey) or candidate.scene != 'group' or active < self.per_group:
+                    key = candidate
+                    break
+                self._ready.append(candidate)
+            if key is not None:
+                break
             self._available.clear()
             await self._available.wait()
-        key = self._ready.popleft()
         item = self._pending[key].popleft()
         self._count -= 1
         self._active.add(key)
@@ -64,9 +77,10 @@ class ConversationQueue:
         self._active.remove(key)
         if self._pending[key]:
             self._ready.append(key)
-            self._available.set()
         else:
             del self._pending[key]
+        if self._ready:
+            self._available.set()
         self._unfinished -= 1
         if not self._unfinished:
             self._joined.set()

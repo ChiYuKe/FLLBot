@@ -58,10 +58,11 @@ builtin = true
 hot_reload = true
 watch_interval = 2.0
 # 全局并发处理上限，防止刷屏把进程打满。
-max_concurrency = 8
+max_concurrency = 6
+max_concurrent_per_group = 6 # 同群不同发起者最多同时处理 6 个任务
 # 队列中的待处理事件上限；超出时丢弃新到事件并记录日志。
 max_pending_events = 1000
-# 单会话待处理容量；与全局容量一样需修改启动配置并重建实例。
+# 每位群聊发起者（私聊按会话）的待处理容量；修改后需要重启。
 max_pending_per_conversation = 32
 # 以下时限用于后续接收事件；已接收事件保留原时限。
 queue_timeout_seconds = 30
@@ -100,7 +101,7 @@ supports_images = true
 supports_temperature = true
 token_parameter = "max_tokens"   # 也可使用 max_completion_tokens
 image_token_budget = 4096
-max_concurrency = 2
+max_concurrency = 6
 input_price = 0.0                # 每百万 Token 单价；费用限额要求正数价格
 output_price = 0.0
 # 每个群独立累计，0 表示不限；按服务器本地日期重置。
@@ -143,7 +144,7 @@ system_extra = ""
 # context_window = 65536            # 每个服务可覆盖全局窗口和能力设置
 # supports_tools = true
 # supports_images = false
-# max_concurrency = 2
+# max_concurrency = 6
 #
 # [llm.providers.local]
 # base_url = "http://127.0.0.1:11434/v1"

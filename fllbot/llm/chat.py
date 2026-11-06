@@ -92,8 +92,8 @@ class ChatService:
     def last_latency_ms(self):
         return self.gateway.last_latency_ms
 
-    def conversation_lock(self, self_id: int, scene: str, scene_id: int):
-        key = ConversationKey("qq", self_id, scene, scene_id)
+    def conversation_lock(self, self_id: int, scene: str, scene_id: int, sender_id: int = 0):
+        key = ConversationKey("qq", self_id, scene, scene_id, sender_id if scene == 'group' else 0)
         return self._conversation_pool.lease(key)
 
     @property

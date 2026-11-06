@@ -1,6 +1,6 @@
 function renderStartupConfig(data){
   var node=document.getElementById('startup-config-info');node.textContent='';if(!data)return;
-  var labels={'server.host':'监听地址','server.port':'监听端口','server.cors_origins':'允许的网页来源','admin.enabled':'管理入口','admin.token_file':'管理凭据文件','plugin.dirs':'插件目录','plugin.builtin':'内置插件','plugin.hot_reload':'自动重载插件','plugin.watch_interval':'插件检查间隔','plugin.max_concurrency':'消息处理并行数','plugin.max_pending_events':'消息排队上限','storage.path':'数据库位置','logging.dir':'日志目录','logging.file':'日志文件','logging.json_lines':'结构化日志','logging.ring_size':'内存日志条数'};
+  var labels={'server.host':'监听地址','server.port':'监听端口','server.cors_origins':'允许的网页来源','admin.enabled':'管理入口','admin.token_file':'管理凭据文件','plugin.dirs':'插件目录','plugin.builtin':'内置插件','plugin.hot_reload':'自动重载插件','plugin.watch_interval':'插件检查间隔','plugin.max_concurrency':'消息处理并行数','plugin.max_concurrent_per_group':'单群任务并行数','plugin.max_pending_per_conversation':'每位发起者排队上限','plugin.max_pending_events':'消息排队上限','storage.path':'数据库位置','logging.dir':'日志目录','logging.file':'日志文件','logging.json_lines':'结构化日志','logging.ring_size':'内存日志条数'};
   node.appendChild(h('p',{class:'settings-note',text:data.note}));
   function display(value){return typeof value==='boolean'?(value?'开启':'关闭'):Array.isArray(value)?value.join('、'):String(value);}
   var details=h('details',{class:'advanced'},h('summary',{text:'查看启动配置值'}));

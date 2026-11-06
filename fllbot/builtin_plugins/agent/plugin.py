@@ -7,6 +7,7 @@ import copy
 from typing import Any
 
 from fllbot.plugin import Context, Plugin
+from fllbot.plugin.agent import instruction_sections
 from fllbot.plugin.base import AIToolSpec
 
 plugin = Plugin.from_manifest(__file__)
@@ -137,6 +138,7 @@ def _get_tools(ctx: Context, *, live: bool = False) -> tuple[list[dict[str, Any]
             definitions.append({'type':'function', 'function': {
                 'name':spec.qualified_name, 'description':spec.description, 'parameters':spec.parameters,
             }})
+    definitions.sort(key=lambda item: item['function']['name'])
     return definitions, registry
 
 
@@ -148,4 +150,4 @@ async def _run_tool(ctx: Context, name: str, raw_arguments: Any,
 
 @plugin.on_message(priority=90, name="natural_language_agent")
 async def respond_naturally(ctx: Context) -> None:
-    await ctx.bot.agent_conversations.respond(ctx,_get_tools,_run_tool)
+    await ctx.bot.agent_conversations.respond(ctx, _get_tools, _run_tool, instructions=instruction_sections)

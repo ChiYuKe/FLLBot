@@ -115,7 +115,7 @@ class ConversationService:
 
     @asynccontextmanager
     async def serial(self, ctx: Any):
-        lock = self.lock_factory(ctx.self_id,ctx.event.scene,ctx.event.scene_id)
+        lock = self.lock_factory(ctx.self_id,ctx.event.scene,ctx.event.scene_id,ctx.user_id if ctx.is_group else 0)
         async with asyncio.timeout_at(min(ctx.received.queue_deadline,ctx.received.monotonic_deadline)):
             await lock.acquire()
         try:

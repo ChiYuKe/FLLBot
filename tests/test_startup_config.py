@@ -64,7 +64,7 @@ async def test_legacy_startup_overrides_are_retained_once_not_applied(tmp_path):
         assert bot.config.server.port == original_port
         assert bot.config.storage.path == str(initial.storage.path)
         assert bot.config.admin.enabled is True
-        assert bot.config.plugin.max_concurrency == bot.dispatcher._worker_count == 8
+        assert bot.config.plugin.max_concurrency == bot.dispatcher._worker_count == 6
         assert bot.inactive_startup_overrides['plugin.max_concurrency'] == 1
         assert 'never-load-this' not in bot.config.plugin.dirs
         assert bot.config.permission.allow_private is False

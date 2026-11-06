@@ -24,7 +24,7 @@ ENV_DELIMITER = "__"
 STARTUP_FIELDS = frozenset({
     'server.host', 'server.port', 'server.cors_origins', 'admin.enabled', 'admin.token_file',
     'plugin.dirs', 'plugin.builtin', 'plugin.hot_reload', 'plugin.watch_interval',
-    'plugin.max_concurrency', 'plugin.max_pending_events', 'plugin.max_pending_per_conversation', 'storage.path',
+    'plugin.max_concurrency', 'plugin.max_concurrent_per_group', 'plugin.max_pending_events', 'plugin.max_pending_per_conversation', 'storage.path',
     'logging.dir', 'logging.file', 'logging.json_lines', 'logging.ring_size',
 })
 
@@ -101,7 +101,8 @@ class PluginConfig(BaseModel):
     builtin: bool = True
     hot_reload: bool = True
     watch_interval: float = 2.0
-    max_concurrency: int = 8
+    max_concurrency: int = Field(default=6, ge=1, le=100)
+    max_concurrent_per_group: int = Field(default=6, ge=1, le=100)
     max_pending_events: int = Field(default=1000, ge=1, le=100_000)
     max_pending_per_conversation: int = Field(default=32, ge=1, le=10000)
     event_deadline_seconds: float = Field(default=360.0, gt=0, le=3600)
@@ -152,7 +153,7 @@ class LLMProviderConfig(ModelCapabilities):
     no_stream: bool = False
     input_price: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     output_price: float = Field(default=0.0, ge=0, allow_inf_nan=False)
-    max_concurrency: int = Field(default=2, ge=1, le=100)
+    max_concurrency: int = Field(default=6, ge=1, le=100)
 
 
 
@@ -183,7 +184,7 @@ class LLMConfig(ModelCapabilities):
     fallback_providers: list[str] = Field(default_factory=list)
     group_daily_token_limit: int = Field(default=0, ge=0)
     group_daily_cost_limit: float = Field(default=0.0, ge=0, allow_inf_nan=False)
-    max_concurrency: int = Field(default=2, ge=1, le=100)
+    max_concurrency: int = Field(default=6, ge=1, le=100)
 
     input_price: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     output_price: float = Field(default=0.0, ge=0, allow_inf_nan=False)
