@@ -65,6 +65,9 @@ def queries(spec: dict[str, Any], batch: int | None = None) -> tuple[list[tuple[
         result += [('group_memory_summaries', f'({old_summaries}) OR ({scope("group_memory_summaries")} AND {linked})'),
                    ('group_memory_messages', raw),
                    ('chat_messages', limited('chat_messages', scope('chat_messages')+' AND created_at<:cut_conversations'))]
+    if 'traces' in spec['cutoffs']:
+        where = 'turn_id IN (SELECT turn_id FROM turns WHERE '+scope('turns')+') AND created_at<:cut_traces'
+        result.append(('agent_progress', limited('agent_progress', where)))
     return result, params
 
 

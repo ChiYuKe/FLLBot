@@ -482,11 +482,12 @@ function renderModelUsageTable(usage, node) {
   node.textContent = '';
   if (!usage.by_model.length) { node.appendChild(h('div', {class:'empty', text:'这个时间范围内还没有模型调用。'})); return; }
   var head = h('tr');
-  ['模型 / 服务','调用','失败','输入 Token','输出 Token','总 Token','平均耗时','估算费用'].forEach(function (label) { head.appendChild(h('th', {scope:'col', text:label})); });
+  ['模型 / 服务','调用','失败','输入 Token','输出 Token','总 Token','平均耗时','估算费用','输入缓存命中率'].forEach(function (label) { head.appendChild(h('th', {scope:'col', text:label})); });
   var body = h('tbody');
   usage.by_model.forEach(function (item) {
       var row = h('tr', {}, h('td', {}, h('strong', {text:item.model || '未知模型'}), h('small', {text:(item.provider || '默认服务') + (item.estimated_requests ? ' · 含估算 ' + item.estimated_requests + ' 次' : '')})));
     [usageNumber(item.requests), usageNumber(item.failures), usageNumber(item.prompt_tokens), usageNumber(item.completion_tokens), usageNumber(item.tokens), (Number(item.avg_latency_ms || 0) / 1000).toFixed(2) + ' s', Number(item.cost || 0) ? Number(item.cost).toFixed(6) : '—'].forEach(function (text) { row.appendChild(h('td', {text:text})); });
+    var cache=item.prompt_cache||{};row.appendChild(h('td',{text:cache.hit_rate==null?'未报告':(cache.hit_rate*100).toFixed(1)+'%',title:'仅统计报告缓存用量的请求；已报告 '+(cache.reported_requests||0)+' 次'}));
     body.appendChild(row);
   });
   node.appendChild(h('div', {class:'usage-table-wrap'}, h('table', {class:'usage-model-table', 'aria-label':'按模型统计用量'}, h('thead', {}, head), body)));
@@ -501,12 +502,13 @@ function loadUsage() {
     cards.appendChild(stat('message', 'Token 总量', usage.total_tokens.toLocaleString('zh-CN'), '输入 ' + usage.prompt_tokens + ' / 输出 ' + usage.completion_tokens));
     cards.appendChild(stat('clock', '平均响应', (usage.avg_latency_ms / 1000).toFixed(2) + ' s', '模型调用耗时'));
     cards.appendChild(stat('grid', '调用成功率', usage.requests ? ((usage.requests - usage.failures) / usage.requests * 100).toFixed(1) + '%' : '—', '成功 ' + usageNumber(usage.requests - usage.failures) + ' 次'));
+    var cache=usage.prompt_cache||{};cards.appendChild(stat('spark','输入缓存命中率',cache.hit_rate==null?'未报告':(cache.hit_rate*100).toFixed(1)+'%','服务商已报告 '+(cache.reported_requests||0)+' 次 · 命中 '+usageNumber(cache.cached_tokens||0)+' Token'));
     renderModelUsageTable(usage, document.getElementById('usage-models'));
     var daily = data[1].daily; var chart = document.getElementById('message-chart'); chart.textContent = '';
     var maximum = Math.max.apply(null, daily.map(function (item) { return item.count; }).concat([1]));
     if (!daily.length) chart.appendChild(h('div', { class:'empty', text:'暂无消息数据，连接机器人后将开始记录。' }));
     daily.forEach(function (item) { var bar = h('i', { 'aria-hidden':'true' }); bar.style.height = Math.max(2, item.count / maximum * 130) + 'px'; chart.appendChild(h('div', { class:'bar-column', title:item.day + ' · ' + item.count + ' 条' }, h('span', { text:item.count }), bar, h('span', { text:item.day.slice(5) }))); });
-    document.getElementById('usage-note').textContent = 'Token 优先使用服务商实报，缺失时按文本估算；旧记录无法区分时也标为含估算。费用按调用时配置的每百万 Token 单价累计，单位与配置一致；“—”表示无已记录费用，不代表免费。' + (usage.cost ? ' 合计估算：' + usage.cost : '');
+    document.getElementById('usage-note').textContent = 'Token 优先使用服务商实报，缺失时按文本估算；旧记录无法区分时也标为含估算。缓存命中率按服务商实报的输入 Token 加权统计，未报告记录不算作零命中。费用尚未单独计算缓存折扣，按调用时配置的每百万 Token 单价累计，单位与配置一致；“—”表示无已记录费用，不代表免费。' + (usage.cost ? ' 合计估算：' + usage.cost : '');
   }).catch(function (error) { if (requestId === usageRequestId) document.getElementById('usage-note').textContent = error.message; }).finally(function () { if (requestId === usageRequestId) document.getElementById('usage-refresh').disabled = false; });
 }
 document.getElementById('usage-range').addEventListener('change', loadUsage);
@@ -528,9 +530,27 @@ function renderToolChoices() {
 }
 
 var toolsCatalog = [], toolDefaultBusy = false;
+var toolPage = 1, toolSelected = new Set();
+function filteredTools() {
+  var query = document.getElementById('tool-search').value.trim().toLowerCase();
+  var plugin = document.getElementById('tool-plugin').value;
+  var state = document.getElementById('tool-status').value;
+  return toolsCatalog.filter(function (tool) {
+    return (!plugin || tool.plugin === plugin) && (!state || (state === 'allowed' ? tool.globally_allowed : state === 'denied' ? !tool.globally_allowed : !tool.plugin_enabled)) &&
+      [tool.title,tool.id,tool.plugin,tool.description].join(' ').toLowerCase().includes(query);
+  });
+}
 function loadTools() {
   return request('/api/tools').then(function (data) {
     toolsCatalog = Array.isArray(data.items) ? data.items : [];
+    var picker = document.getElementById('tool-plugin'), chosen = picker.value;
+    picker.textContent = ''; picker.appendChild(h('option',{value:'',text:'全部插件'}));
+    Array.from(new Set(toolsCatalog.map(function(t){return t.plugin;}))).sort().forEach(function(name){
+      picker.appendChild(h('option',{value:name,text:name+'（'+toolsCatalog.filter(function(t){return t.plugin===name;}).length+'）'}));
+    });
+    picker.value = chosen; if (!picker.value) picker.value = '';
+    toolSelected.forEach(function(id){if(!toolsCatalog.some(function(t){return t.id===id;}))toolSelected.delete(id);});
+    refreshSelectControls();
     renderTools();
   }).catch(function (error) {
     var list = document.getElementById('tools-list');
@@ -539,11 +559,19 @@ function loadTools() {
   });
 }
 function renderTools() {
+  if (typeof renderToolCategories === 'function') renderToolCategories();
   var list = document.getElementById('tools-list');
-  var query = (document.getElementById('tool-search').value || '').trim().toLowerCase();
-  var filtered = toolsCatalog.filter(function (tool) {
-    return [tool.title, tool.id, tool.plugin, tool.description].join(' ').toLowerCase().includes(query);
-  });
+  var filtered = filteredTools();
+  var size = Number(document.getElementById('tool-page-size').value);
+  var pages = Math.max(1,Math.ceil(filtered.length/size)); toolPage = Math.min(toolPage,pages);
+  var visible = filtered.slice((toolPage-1)*size,toolPage*size);
+  document.getElementById('tool-page-note').textContent = filtered.length+' 条结果 · 第 '+toolPage+' / '+pages+' 页';
+  document.getElementById('tool-prev').disabled = toolDefaultBusy || toolPage<=1;
+  document.getElementById('tool-next').disabled = toolDefaultBusy || toolPage>=pages;
+  document.getElementById('tool-selection-note').textContent = '已选 '+toolSelected.size+' 个（可跨页）';
+  ['tools-batch-enable','tools-batch-disable','tools-clear-selection'].forEach(function(id){document.getElementById(id).disabled=toolDefaultBusy || !toolSelected.size;});
+  document.getElementById('tools-select-filtered').disabled=toolDefaultBusy || !filtered.length;
+  document.getElementById('tools-refresh').disabled=toolDefaultBusy;
   var openCount = toolsCatalog.filter(function (tool) { return tool.globally_allowed; }).length;
   document.getElementById('tool-summary').textContent = toolsCatalog.length + ' 个工具 · 默认开放 ' + openCount + ' 个';
   list.textContent = '';
@@ -551,21 +579,15 @@ function renderTools() {
     list.appendChild(h('div', { class: 'empty', text: toolsCatalog.length ? '没有匹配的工具，试试其他关键词' : '还没有可用的 Agent 工具；启用提供工具的插件后会显示在这里。' }));
     return;
   }
-  filtered.forEach(function (tool) {
-    var tags = h('span', { class: 'tool-tags' });
-    tags.appendChild(h('span', { class: 'tag ' + (tool.plugin_enabled ? 'on' : 'off'), text: tool.plugin_enabled ? '可用' : '未启用' }));
-    tags.appendChild(h('span', { class: 'tag' + (tool.globally_allowed ? ' on' : ''), text: tool.globally_allowed ? '默认开放' : '默认未开放' }));
-    if (tool.group_count) tags.appendChild(h('span', { class: 'tag', text: tool.group_count + ' 个群单独设置' }));
-    tags.appendChild(h('span', { class: 'tag', text: '来自插件 ' + tool.plugin }));
-    list.appendChild(h('div', { class: 'tool-row' },
-      h('div', { class: 'plugin-icon', text: String(tool.title || tool.id || 'T').slice(0, 1), 'aria-hidden': 'true' }),
-      h('div', { class: 'plugin-main' },
-        h('div', { class: 'plugin-title' }, h('strong', { text: tool.title || tool.id }), tags),
-        h('p', { class: 'plugin-desc', title:tool.description, text: tool.description || '没有说明' }),
-        tool.permission ? h('div', { class: 'plugin-meta' }, h('span', { text: '权限 ' + tool.permission })) : null
-      ),
-      h('div', { class: 'plugin-actions' }, makeToolDefaultSwitch(tool))
-    ));
+  var table=h('table',{class:'tools-table','aria-label':'工具权限列表'}),head=h('tr');
+  var pageCheck=h('input',{type:'checkbox','aria-label':'选择本页工具',onchange:function(){visible.forEach(function(t){if(pageCheck.checked)toolSelected.add(t.id);else toolSelected.delete(t.id);});renderTools();}});
+  pageCheck.checked=visible.length>0 && visible.every(function(t){return toolSelected.has(t.id);});
+  pageCheck.indeterminate=!pageCheck.checked && visible.some(function(t){return toolSelected.has(t.id);});pageCheck.disabled=toolDefaultBusy;
+  head.appendChild(h('th',{},pageCheck));['工具 / 说明','来源插件','可用性','单群覆盖','默认授权'].forEach(function(t){head.appendChild(h('th',{scope:'col',text:t}));});
+  table.appendChild(h('thead',{},head));var body=h('tbody');table.appendChild(body);list.appendChild(table);
+  visible.forEach(function (tool) {
+    var check=h('input',{type:'checkbox','aria-label':'选择 '+(tool.title||tool.id),onchange:function(){if(check.checked)toolSelected.add(tool.id);else toolSelected.delete(tool.id);renderTools();}});check.checked=toolSelected.has(tool.id);check.disabled=toolDefaultBusy;
+    body.appendChild(h('tr',{},h('td',{},check),h('td',{},h('strong',{text:tool.title||tool.id}),h('small',{text:tool.id}),h('details',{},h('summary',{text:tool.description||'暂无说明',title:tool.description}),h('p',{text:tool.description||'暂无说明'}),h('small',{text:'权限：'+(tool.permission||'无额外限制')}))),h('td',{text:tool.plugin}),h('td',{},h('span',{class:'tag '+(tool.plugin_enabled?'on':'off'),text:tool.plugin_enabled?'可用':'插件未启用'})),h('td',{text:tool.group_count?tool.group_count+' 个群':'—'}),h('td',{},makeToolDefaultSwitch(tool))));
   });
 }
 function makeToolDefaultSwitch(tool) {
@@ -578,7 +600,25 @@ function makeToolDefaultSwitch(tool) {
   return h('div',{class:'tool-default-action'},h('small',{text:'默认允许 Agent 调用'}),toggle);
 }
 document.getElementById('tools-refresh').addEventListener('click', loadTools);
-document.getElementById('tool-search').addEventListener('input', renderTools);
+function resetToolFilter(){toolPage=1;toolSelected.clear();renderTools();}
+document.getElementById('tool-search').addEventListener('input', resetToolFilter);
+['tool-plugin','tool-status','tool-page-size'].forEach(function(id){document.getElementById(id).addEventListener('change',resetToolFilter);});
+document.getElementById('tool-prev').addEventListener('click',function(){toolPage--;renderTools();});
+document.getElementById('tool-next').addEventListener('click',function(){toolPage++;renderTools();});
+document.getElementById('tools-select-filtered').addEventListener('click',function(){filteredTools().forEach(function(t){toolSelected.add(t.id);});renderTools();});
+document.getElementById('tools-clear-selection').addEventListener('click',function(){toolSelected.clear();renderTools();});
+async function batchToolAccess(enabled){
+  if(toolDefaultBusy)return;
+  var targets=toolsCatalog.filter(function(t){return toolSelected.has(t.id)&&Boolean(t.globally_allowed)!==enabled;});
+  if(!targets.length){toast('所选工具已是目标状态');return;}
+  toolDefaultBusy=true;renderTools();var failed=0,done=0;
+  try {for(var tool of targets){try{await request('/api/tools/'+encodeURIComponent(tool.id)+'/enabled',{method:'PATCH',body:{enabled:enabled}});done++;}catch(error){failed++;}}
+    if(!dirtyPages.has('agent'))loadedPages.delete('agent');
+    await loadTools();toast('已更新 '+done+' 个工具'+(failed?'，失败 '+failed+' 个，请刷新后重试':''));
+  }finally{toolDefaultBusy=false;toolSelected.clear();renderTools();}
+}
+document.getElementById('tools-batch-enable').addEventListener('click',function(){batchToolAccess(true);});
+document.getElementById('tools-batch-disable').addEventListener('click',function(){batchToolAccess(false);});
 
 function renderManagedGroups() {
   fillOptions('managed-group', groupDirectory, '请选择群聊', 'group_id', function (group) { return (group.group_name || '群聊') + ' · ' + group.group_id; });

@@ -15,9 +15,16 @@ from .backup import DatabaseFileLock, create_backup
 from .locking import SettingsLock
 from .memory import GroupMemoryStore
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 25
 
 MIGRATIONS: dict[int, list[str]] = {
+    25: ['ALTER TABLE llm_usage ADD COLUMN cached_prompt_tokens INTEGER'],
+    24: [
+        """CREATE TABLE agent_progress(id INTEGER PRIMARY KEY AUTOINCREMENT,
+        turn_id TEXT NOT NULL,step INTEGER NOT NULL,phase TEXT NOT NULL,status TEXT NOT NULL,
+        component TEXT NOT NULL,details TEXT NOT NULL DEFAULT '{}',created_at REAL NOT NULL)""",
+        'CREATE INDEX idx_agent_progress_turn ON agent_progress(turn_id,id)',
+    ],
     23: ["ALTER TABLE message_traces ADD COLUMN metrics TEXT NOT NULL DEFAULT '{}'",
          'CREATE INDEX idx_delivery_turn ON reply_deliveries(turn_id,created_at)'],
     22: ["ALTER TABLE turns ADD COLUMN context_metadata TEXT NOT NULL DEFAULT '{}'"],
@@ -398,6 +405,19 @@ class Storage:
             return json.loads(row["value"])
         except json.JSONDecodeError:
             return row["value"]
+
+    async def kv_initialize(self, scope: str, key: str, value: Any) -> Any:
+        """Publish one shared initial value when concurrent turns enter a group."""
+        async with self.data_lock:
+            try:
+                await self.db.execute('INSERT OR IGNORE INTO kv(scope,key,value,updated_at) VALUES(?,?,?,?)',
+                    (scope, key, json.dumps(value, ensure_ascii=False), time.time()))
+                result = await self.kv_get(scope, key)
+                await self.db.commit()
+                return result
+            except BaseException:
+                await self.db.rollback()
+                raise
 
     async def kv_set(self, scope: str, key: str, value: Any) -> None:
         async with self.data_lock:
@@ -884,13 +904,37 @@ class Storage:
             "SELECT execution_id,call_id,tool,effect,status,created_at,finished_at,error "
             "FROM tool_executions WHERE turn_id=? ORDER BY created_at", (turn_id,))).fetchall()
         models = await (await self.db.execute(
-            "SELECT id,provider,model,prompt_tokens,completion_tokens,latency_ms,cost,ok,usage_estimated,created_at "
+            "SELECT id,provider,model,prompt_tokens,completion_tokens,latency_ms,cost,ok,usage_estimated,created_at,cached_prompt_tokens "
             "FROM llm_usage WHERE turn_id=? ORDER BY id", (turn_id,))).fetchall()
         trace = await (await self.db.execute('SELECT metrics FROM message_traces WHERE trace_id=?',(row['trace_id'],))).fetchone()
+        progress = await (await self.db.execute(
+            'SELECT step,phase,status,component,details,created_at FROM agent_progress WHERE turn_id=? ORDER BY id',
+            (turn_id,))).fetchall()
+        known = [item for item in models if item['cached_prompt_tokens'] is not None and item['ok']]
+        known_input = sum(item['prompt_tokens'] for item in known)
+        known_cached = sum(item['cached_prompt_tokens'] for item in known)
         return {**dict(row),'context_metadata':json.loads(row['context_metadata']),
+                'prompt_cache': {'reported_requests': len(known), 'input_tokens': known_input,
+                    'cached_tokens': known_cached, 'hit_rate': known_cached / known_input if known_input else None},
+                'progress': [{**dict(item), 'details': json.loads(item['details'])} for item in progress],
                 'trace_metrics':json.loads(trace['metrics']) if trace else {},
                 'deliveries':[dict(r) for r in deliveries],'tools':[dict(r) for r in tools],
                 'model_requests':[dict(r) for r in models]}
+
+    async def record_agent_progress(self, ctx: Any, step: int, phase: str, status: str,
+                                    component: str = '', details: dict | None = None) -> None:
+        # Metadata only: never persist arguments, prompt bodies or model reasoning.
+        async with self.data_lock:
+            try:
+                await self.db.execute(
+                    'INSERT INTO agent_progress(turn_id,step,phase,status,component,details,created_at) '
+                    'SELECT ?,?,?,?,?,?,? WHERE EXISTS(SELECT 1 FROM turns WHERE turn_id=?)',
+                    (ctx.turn_id, step, phase, status, component[:130],
+                     json.dumps(details or {}, ensure_ascii=False), time.time(), ctx.turn_id))
+                await self.db.commit()
+            except BaseException:
+                await self.db.rollback()
+                raise
 
     async def recovery_plan(self, turn_id: str) -> dict | None:
         turn = await self.turn_detail(turn_id)
@@ -1075,9 +1119,9 @@ class Storage:
                         and self.scope_current(row['self_id'],row['scene'],row['scene_id'],
                                                json.loads(row['metadata'] or '{}').get('scope_epoch'))):
                     await self.db.execute(
-                        "INSERT INTO chat_messages(self_id,scene,scene_id,role,content,created_at) "
-                        "VALUES (?,?,?,'assistant',?,?)",
-                        (row['self_id'], row['scene'], row['scene_id'], row['content'], time.time()))
+                        "INSERT INTO chat_messages(self_id,scene,scene_id,role,content,created_at,user_id) "
+                        "VALUES (?,?,?,'assistant',?,?,?)",
+                        (row['self_id'], row['scene'], row['scene_id'], row['content'], time.time(),metadata.get('user_id', 0)))
                 await self.db.commit()
             except BaseException:
                 await self.db.rollback()
@@ -1214,13 +1258,17 @@ class Storage:
         ok: bool = True,
         error: str = "",
         usage_estimated: bool = False,
+        cached_prompt_tokens: int | None = None,
         turn_id: str = "",
     ) -> None:
+        if (cached_prompt_tokens is not None and (isinstance(cached_prompt_tokens, bool)
+                or not isinstance(cached_prompt_tokens, int) or not 0 <= cached_prompt_tokens <= prompt_tokens)):
+            cached_prompt_tokens = None
         async with self.data_lock:
             try:
                 await self.db.execute(
                     "INSERT INTO llm_usage (scene, scene_id, provider, model, prompt_tokens, completion_tokens,"
-                    " latency_ms, cost, ok, error, created_at, usage_estimated, turn_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " latency_ms, cost, ok, error, created_at, usage_estimated, turn_id,cached_prompt_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         scene,
                         int(scene_id),
@@ -1235,6 +1283,7 @@ class Storage:
                         time.time(),
                         int(usage_estimated),
                         turn_id,
+                        cached_prompt_tokens,
                     ),
                 )
                 await self.db.commit()
@@ -1294,6 +1343,20 @@ class Storage:
         ok_count = int(row["ok_count"] if row else 0)
         prompt = int(row["prompt_tokens"] if row else 0)
         completion = int(row["completion_tokens"] if row else 0)
+        caches = await (await self.db.execute(
+            'SELECT model,provider,COUNT(*) AS reported_requests,SUM(prompt_tokens) AS input_tokens,'
+            'SUM(cached_prompt_tokens) AS cached_tokens FROM llm_usage '
+            'WHERE created_at>=? AND ok=1 AND cached_prompt_tokens IS NOT NULL GROUP BY model,provider',
+            (float(since),))).fetchall()
+        def cache_metrics(items):
+            total = sum(item['input_tokens'] for item in items)
+            hits = sum(item['cached_tokens'] for item in items)
+            return {'reported_requests': sum(item['reported_requests'] for item in items),
+                    'input_tokens': total, 'cached_tokens': hits, 'hit_rate': hits / total if total else None}
+        per_model = {(item['model'], item['provider']): item for item in caches}
+        for item in by_model:
+            cached = per_model.get((item['model'], item['provider']))
+            item['prompt_cache'] = cache_metrics([cached] if cached else [])
         return {
             "requests": requests,
             "failures": max(0, requests - ok_count),
@@ -1304,6 +1367,7 @@ class Storage:
             "cost": round(float(row["cost"] if row else 0), 6),
             "estimated_requests": int(row["estimated_requests"] if row else 0),
             "by_model": by_model,
+            "prompt_cache": cache_metrics(caches),
         }
 
     async def clear_llm_usage(self) -> int:

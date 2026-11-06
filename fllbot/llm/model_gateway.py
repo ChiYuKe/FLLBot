@@ -26,6 +26,7 @@ class ChatReply:
     usage: dict[str, int] = field(default_factory=dict)
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     finish_reason: str = ""
+    reasoning_content: str | None = field(default=None, repr=False)
 
     def summary(self) -> dict[str, Any]:
         return {
@@ -223,6 +224,7 @@ class ModelGateway:
             usage=result.usage,
             tool_calls=tool_calls,
             finish_reason=result.finish_reason,
+            reasoning_content=getattr(result, 'reasoning_content', None),
         )
 
     def _cost(self, provider: str, usage: dict[str, int]) -> float:
@@ -265,6 +267,7 @@ class ModelGateway:
                 ok=ok,
                 error=error,
                 usage_estimated=bool(usage.get("estimated", 0)),
+                cached_prompt_tokens=usage.get('cached_prompt_tokens'),
                 turn_id=current_turn_id(),
             )
         except Exception:  # pragma: no cover - 统计失败不影响对话

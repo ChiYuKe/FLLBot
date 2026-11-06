@@ -1,6 +1,6 @@
 var turnListRequest=0,turnDetailRequest=0,turnCursor=null,turnFilters=[],turnItems=[];
-var turnStates={queued:'排队中',running:'执行中',reply_ready:'回复已生成',delivering:'发送中',delivered:'已送达',ignored:'已忽略',silent:'静默结束',failed:'失败',cancelled:'已取消',expired:'已过期',delivery_uncertain:'送达不确定',superseded:'已改用分段发送',pending:'待发送',sending:'发送中',sent:'发送成功',uncertain:'不确定',succeeded:'工具成功'};
-var turnReasons={global_queue_full:'全局会话容量已满',conversation_queue_full:'当前会话排队已满',queue_expired:'排队等待已过期',admin_debug_completed:'管理调试完成，未发送 QQ',model_failed:'模型请求失败',execution_failed:'执行失败',empty_response:'模型返回空白',explicit_silence:'模型决定静默',tool_completed:'工具已完成对外动作',tool_limit:'工具轮数耗尽',partial_delivery:'部分内容未送达',delivery_failed:'发送失败',delivery_uncertain:'无法确认送达',deadline_exceeded:'超过处理时限',admin_cancelled:'管理员取消',account_disabled:'账号已停用',context_cleared:'会话数据已清理',process_restart:'进程重启中断',delivery_cancelled:'发送已取消',no_reply:'无文字回复'};
+var turnStates={queued:'排队中',running:'执行中',reply_ready:'回复已生成',delivering:'发送中',delivered:'已送达',ignored:'已忽略',silent:'静默结束',failed:'失败',cancelled:'已取消',expired:'已过期',delivery_uncertain:'送达不确定',superseded:'已改用替代发送方式',pending:'待发送',sending:'发送中',sent:'发送成功',uncertain:'不确定',succeeded:'工具成功'};
+var turnReasons={global_queue_full:'全局会话容量已满',conversation_queue_full:'当前会话排队已满',queue_expired:'排队等待已过期',admin_debug_completed:'管理调试完成，未发送 QQ',model_failed:'模型请求失败',execution_failed:'执行失败',empty_response:'模型返回空白',explicit_silence:'模型决定静默',tool_completed:'工具已完成对外动作',tool_limit:'工具轮数耗尽',partial_delivery:'部分内容未送达',delivery_failed:'发送失败',delivery_uncertain:'无法确认送达',deadline_exceeded:'超过处理时限',admin_cancelled:'管理员取消',user_cancelled:'发起者取消',account_disabled:'账号已停用',context_cleared:'会话数据已清理',process_restart:'进程重启中断',delivery_cancelled:'发送已取消',no_reply:'无文字回复'};
 function loadTurns(more){
   var id=++turnListRequest,params=turnFilters.slice(),note=document.getElementById('turns-note');
   if(more&&turnCursor)params.push('before='+turnCursor);
@@ -24,6 +24,13 @@ function showTurn(turnId){
     node.appendChild(h('h3',{text:turnStates[item.status]||item.status}));
     node.appendChild(h('p',{text:turnReasons[item.reason]||item.reason||'没有异常原因'}));
     node.appendChild(h('p',{class:'settings-note',text:'轮次 '+item.turn_id+' · Bot '+item.self_id+' · '+(item.entrypoint==='admin_debug'?'管理调试':'QQ')+' · '+(item.scene==='group'?'群聊':'私聊')+' '+item.scene_id}));
+    var phases={step:'任务步骤',model:'请求模型',tool:'执行工具',compaction:'整理上下文',repeat_reminder:'重复调用提醒',steering:'补充要求'};
+    var progressStates={running:'进行中',succeeded:'完成',failed:'失败',cancelled:'取消',interrupted:'中断',skipped:'跳过',superseded:'已按补充要求调整',queued:'等待应用'};
+    if((item.progress||[]).length){
+      node.appendChild(h('h4',{text:'任务进度'}));
+      item.progress.forEach(function(event){node.appendChild(h('p',{text:'第 '+event.step+' 步 · '+(phases[event.phase]||event.phase)+' · '+(progressStates[event.status]||event.status)+(event.component?' · '+event.component:'')}));});
+      if(item.can_cancel)node.appendChild(h('button',{type:'button',class:'btn',text:'刷新任务进度',onclick:function(){showTurn(turnId);}}));
+    }
     node.appendChild(h('h4',{text:'模型请求'}));
     var timings=item.trace_metrics||{},labels={queue_wait_ms:'排队',first_model_response_ms:'首次模型响应',first_delivery_ms:'首次送达'};
     Object.keys(labels).forEach(function(key){if(timings[key]!==undefined&&timings[key]!==null)node.appendChild(h('p',{class:'settings-note',text:labels[key]+' '+Math.round(timings[key])+' ms'}));});
@@ -33,7 +40,10 @@ function showTurn(turnId){
       ((context.budget||{}).providers||[]).forEach(function(budget){node.appendChild(h('p',{class:'settings-note',text:budget.provider+' / '+budget.model+' · 输入估算 '+budget.input_estimate+' · 输出预留 '+budget.output_reserve+' · 窗口 '+budget.window}));});
     }
     if(!(item.model_requests||[]).length)node.appendChild(h('p',{text:'没有模型请求记录。'}));
-    (item.model_requests||[]).forEach(function(model){node.appendChild(h('p',{text:model.provider+' / '+model.model+' · '+(model.ok?'生成成功':'请求失败')+' · '+((model.prompt_tokens||0)+(model.completion_tokens||0))+' Token'+(model.usage_estimated?'（估算）':'')+' · '+Math.round(model.latency_ms||0)+' ms'}));});
+    (item.model_requests||[]).forEach(function(model){
+      var cached=model.cached_prompt_tokens,cacheText=cached==null?' · 缓存未报告':' · 输入缓存 '+cached+' Token'+(model.prompt_tokens?'（'+(cached/model.prompt_tokens*100).toFixed(1)+'%）':'');
+      node.appendChild(h('p',{text:model.provider+' / '+model.model+' · '+(model.ok?'生成成功':'请求失败')+' · '+((model.prompt_tokens||0)+(model.completion_tokens||0))+' Token'+(model.usage_estimated?'（估算）':'')+cacheText+' · '+Math.round(model.latency_ms||0)+' ms'}));
+    });
     node.appendChild(h('h4',{text:'分段回执'}));
     if(!item.deliveries.length)node.appendChild(h('p',{text:'尚无回复发送记录。'}));
     if(item.deliveries.some(function(part){return part.bodies_cleared;}))node.appendChild(h('p',{class:'settings-note',text:'回复正文已清理，发送回执仍保留。'}));

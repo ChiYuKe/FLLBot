@@ -54,14 +54,20 @@ class ContextBuilder:
 
     async def build(self, scene: str, scene_id: int, text: str, **options) -> ContextSnapshot:
         config = self.configuration()
-        tools = json.dumps(options.pop('tools', None) or [], ensure_ascii=False)
+        tools = json.dumps(sorted(options.pop('tools', None) or [],
+            key=lambda item: item.get('function', {}).get('name', '')), ensure_ascii=False, sort_keys=True)
         rules = options.pop('system_rules', '')
+        instructions = json.loads(json.dumps(options.pop('agent_instructions', []), ensure_ascii=False))
         version = self.effective_version() if self.effective_version else hashlib.sha256(config.model_dump_json().encode()).hexdigest()
         cutoff = time.time()
         provider, model = self.resolve_provider(scene, scene_id, options.get('ctx'), options.get('provider'))
         messages = await self.assemble(scene, scene_id, text, history_before=cutoff, **options)
-        if rules:
-            messages = [{**messages[0], 'content':messages[0]['content'] + rules}, *messages[1:]]
+        # Shared rules precede personas that may interpolate user/time variables.
+        sections = ''.join(f"\n\n[插件策略 {item['source']}]\n{item['text']}"
+                           for item in sorted(instructions, key=lambda item: item['source']))
+        prefix = rules + sections
+        if prefix:
+            messages = [{**messages[0], 'content': prefix + '\n\n' + messages[0]['content']}, *messages[1:]]
         sources = []
         for index, message in enumerate(messages):
             source = message.get('_fllbot_source') or {
@@ -69,6 +75,8 @@ class ContextBuilder:
             sources.append({'index':index,'self_id':options['ctx'].self_id if options.get('ctx') else 0,
                             'scene':scene,'scene_id':scene_id, **source})
         ctx = options.get('ctx')
+        for item in instructions:
+            sources.append({'index': 0, 'kind': 'plugin_instruction', 'source': item['source']})
         if ctx is not None and ctx.quoted_message is not None:
             quote = ctx.quoted_message
             sources[-1]['quote'] = {'message_id':quote.message_id,'user_id':quote.user_id,'error':quote.error}

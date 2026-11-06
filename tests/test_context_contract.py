@@ -29,7 +29,7 @@ async def test_snapshot_freezes_tools_and_rules_before_context_io(tmp_path):
         tools[0]['function']['parameters']['properties']['late'] = {'type':'string'}
         release.set()
         snapshot = await task
-        assert snapshot.messages()[0]['content'] == 'persona runtime rules'
+        assert snapshot.messages()[0]['content'] == ' runtime rules\n\npersona'
         assert snapshot.tools()[0]['function']['parameters']['properties'] == {}
         copy = snapshot.tools()
         copy[0]['function']['name'] = 'changed'

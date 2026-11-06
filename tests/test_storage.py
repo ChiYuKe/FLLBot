@@ -76,6 +76,7 @@ async def test_llm_usage_roundtrip(storage: Storage) -> None:
         "cost": 0.0,
         "estimated_requests": 0,
         "by_model": [],
+        "prompt_cache": {"reported_requests": 0, "input_tokens": 0, "cached_tokens": 0, "hit_rate": None},
     }
 
 

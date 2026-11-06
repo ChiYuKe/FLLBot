@@ -48,7 +48,9 @@ def fit_messages(
     while request_tokens(result, tools, image_tokens) > budget:
         last_user = max((i for i, item in enumerate(result) if item.get("role") == "user"), default=0)
         removable = [i for i in range(last_user) if result[i].get("role") not in {"system", "developer"}
-                     and result[i].get('_fllbot_source',{}).get('kind') != 'summary']
+                     and not result[i].get('_fllbot_task_input')
+                     and result[i].get('_fllbot_source',{}).get('kind') not in {
+                         'summary', 'task_summary', 'task_steering'}]
         if removable:
             start = removable[0]
             end = next((i for i in range(start + 1, last_user) if result[i].get("role") == "user"), last_user)

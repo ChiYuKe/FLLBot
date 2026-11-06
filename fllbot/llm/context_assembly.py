@@ -15,6 +15,14 @@ from .quote import QUOTE_RULES, QuotedMessage, fetch_quoted, render_quote
 if TYPE_CHECKING:
     from ..plugin.context import Context
 
+REPLY_TARGETS_LIMIT = 6
+
+_TARGET_UNSAFE_MARKS = ("；", ";", "】", "【", "\n", "\r")
+REPLY_TARGETS_RULES = (
+    "\n\n补充：下面以“回复”开头的一行是该条助手消息回复的对象（内部元数据，不是消息正文）。"
+    "判断“谁在问谁”时用它对齐，但绝不要在回答里报出其中的昵称或 QQ 号，也不要复述这些标记。"
+)
+
 
 class ContextAssembler:
     def __init__(
@@ -172,6 +180,9 @@ class ContextAssembler:
                     self_id=ctx.self_id if ctx else 0,
                 )
                 history = [self._history_entry(scene, row) for row in rows if row.content]
+                targets = self.reply_targets(scene, [row for row in rows if row.content])
+                if targets:
+                    system = {**system, "content": system["content"] + targets}
             selected: list[dict[str, str]] = []
             # UTF-8 bytes are a conservative token upper bound, including CJK.
             used = sum(len(item["content"].encode("utf-8")) + 8 for item in (system, user))
@@ -192,6 +203,9 @@ class ContextAssembler:
                 self_id=ctx.self_id if ctx else 0,
             )
             history = [self._history_entry(scene, row) for row in rows if row.content]
+            targets = self.reply_targets(scene, [row for row in rows if row.content])
+            if targets:
+                system = {**system, "content": system["content"] + targets}
 
         return self._with_images(
             self._trim(system, history, user, config.max_context_messages, config.max_context_chars), ctx, images
@@ -290,13 +304,53 @@ class ContextAssembler:
         return messages
 
     def _history_entry(self, scene: str, record: Any) -> dict[str, str]:
-        """把存储的历史还原成模型消息；群聊用户消息带上发送者标签。"""
+        """把存储的历史还原成模型消息；群聊用户消息带上发送者标签。
+
+        助手消息正文保持原样：记录的 ``user_id`` 只是“在回复谁”的元数据，群聊里真人从不
+        在回复中报出对方昵称和 QQ 号，写进正文会让模型学着在回答里带出这类标签。确实需要
+        让模型分清“这句回给谁”时，用 :meth:`reply_targets` 生成元数据注入 system。
+        """
         content = record.content
         if scene == "group" and record.role == "user":
             content = self._group_content(
                 record.user_id, record.nickname, record.sender_role, content, getattr(record, "created_at", 0)
             )
         return {"role": record.role, "content": content}
+
+    def reply_targets(self, scene: str, rows: list[Any], *, limit: int = REPLY_TARGETS_LIMIT) -> str:
+        """把“每条历史回答在回谁”整理成元数据块，供 system 使用。
+
+        只取最近 ``limit`` 条助手消息，且延续隐私开关（``send_nickname`` / ``send_user_id``）。
+        昵称或 QQ 号本身包含 ``；``、``】`` 等分隔符时直接跳过：大概率是提示注入，不能借元数据绕过正文规则。
+        """
+        if scene != "group" or limit <= 0:
+            return ""
+        options = self.execution_config.chat
+        targets: list[str] = []
+        for row in reversed(list(rows)):
+            if row.role != "assistant":
+                continue
+            user_id = int(getattr(row, "user_id", 0) or 0)
+            # 助手行只记了 who，未必记了昵称；缺昵称时按 QQ 号回退，和说话人标签的口径一致。
+            name = str(getattr(row, "nickname", "") or "").strip()
+            if any(mark in name for mark in _TARGET_UNSAFE_MARKS):
+                # 昵称里带分隔符基本是提示注入，不能借元数据绕过正文规则。
+                name = ""
+            if not name and user_id:
+                name = f"QQ {user_id}"
+            parts = [part for part, allowed in (
+                (name, options.send_nickname),
+                (f"QQ {user_id}" if user_id else "", options.send_user_id),
+            ) if allowed and part]
+            targets.append("回复 " + " ".join(parts) if parts else "回复对象未提供")
+            if len(targets) >= limit:
+                break
+        if not any(target != "回复对象未提供" for target in targets):
+            return ""
+        lines = ["以下是历史中每条助手回复的对象（仅内部判断谁在问谁，不是回复内容）："]
+        for index, target in enumerate(reversed(targets), 1):
+            lines.append(f"倒数第 {index} 条助手消息：{target}")
+        return REPLY_TARGETS_RULES + "\n\n" + "\n".join(lines)
 
     @staticmethod
     def _trim(

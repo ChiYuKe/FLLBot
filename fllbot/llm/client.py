@@ -21,7 +21,7 @@ import httpx
 from ..config import LLMConfig, LLMProviderConfig
 from ..tracing import record, span
 from .budget import fit_messages, request_tokens, wire_messages
-from .tool_protocol import ToolProtocolError, contains_dsml
+from .tool_protocol import ToolProtocolError, contains_dsml, normalize_tool_calls
 from .tool_protocol import parse_dsml_tool_calls as _parse_dsml_tool_calls
 
 DEFAULT_CONTEXT_WINDOW = 8192
@@ -42,6 +42,10 @@ class EmptyResponseError(LLMError):
     """Upstream completed without a usable answer; safe to retry once."""
 
 
+class ContextOverflowError(LLMError):
+    """A local budget failure or an explicit upstream context limit rejection."""
+
+
 class ToolsUnavailableError(LLMError):
     """The model requested tools during a request that exposed none."""
 
@@ -56,6 +60,8 @@ class ChatResult:
     usage: dict[str, int] = field(default_factory=dict)
     finish_reason: str = ""
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    # Protocol continuation only: never display, log or persist model reasoning.
+    reasoning_content: str | None = field(default=None, repr=False)
 
 
 def estimate_tokens(text: str) -> int:
@@ -205,7 +211,8 @@ class LLMClient:
                 else 0.8
             )
         if tools:
-            payload["tools"] = [dict(item) for item in tools]
+            payload["tools"] = json.loads(json.dumps(sorted(tools,
+                key=lambda item: item.get('function', {}).get('name', '')), ensure_ascii=False, sort_keys=True))
             payload["tool_choice"] = "auto"
         return payload
 
@@ -293,7 +300,7 @@ class LLMClient:
                 config.image_token_budget,
             )
         except ValueError as exc:
-            raise LLMError(str(exc)) from exc
+            raise ContextOverflowError(str(exc)) from exc
 
     async def _effective_context_window(self, name: str, config: LLMProviderConfig) -> int:
         return (
@@ -398,6 +405,16 @@ class LLMClient:
             raise LLMError(f"网络请求失败（{type(exc).__name__}）") from None
 
         if response.status_code >= 400:
+            if response.status_code in {400, 413, 422}:
+                try:
+                    error = response.json().get('error', {})
+                    code = error.get('code', '') if isinstance(error, dict) else ''
+                    message = str(error.get('message', '')).lower() if isinstance(error, dict) else ''
+                    if code in {'context_length_exceeded', 'context_window_exceeded'} or any(
+                        marker in message for marker in ('maximum context length', 'context window exceeded', 'context length exceeded')):
+                        raise ContextOverflowError('模型上下文长度超限', status=response.status_code)
+                except (ValueError, AttributeError):
+                    pass
             raise LLMError(_error_text(response), status=response.status_code)
         try:
             data = response.json()
@@ -421,7 +438,9 @@ class LLMClient:
             text = content.strip()
         else:
             raise LLMError("返回内容 message.content 格式错误")
-        raw_tool_calls = message.get("tool_calls") or []
+        raw_tool_calls = message.get("tool_calls")
+        if raw_tool_calls is None:
+            raw_tool_calls = []
         if not isinstance(raw_tool_calls, list):
             raise LLMError("返回内容 message.tool_calls 格式错误")
         finish_reason = choices[0].get("finish_reason") or "unknown"
@@ -448,7 +467,12 @@ class LLMClient:
                     else "未收到正文或工具调用，请检查模型服务兼容性"
                 )
             )
-        tool_calls = [item for item in raw_tool_calls if isinstance(item, dict)]
+        try:
+            # Truncated envelopes are discarded by the gateway, never executed.
+            tool_calls = (raw_tool_calls if finish_reason == 'length'
+                          else normalize_tool_calls(raw_tool_calls))
+        except ToolProtocolError as exc:
+            raise LLMError(str(exc)) from exc
 
         usage = data.get("usage") or {}
         usage = usage if isinstance(usage, dict) else {}
@@ -457,12 +481,20 @@ class LLMClient:
         prompt_estimated = prompt_tokens is None
         completion_estimated = completion_tokens is None
         estimated = prompt_estimated or completion_estimated
+        reasoning = message.get('reasoning_content') if isinstance(message.get('reasoning_content'), str) else None
         if prompt_tokens is None:
             prompt_tokens = request_tokens(list(messages), list(tools) if tools else None, config.image_token_budget)
         if completion_tokens is None:
-            completion_tokens = estimate_tokens(text) + (
+            completion_tokens = estimate_tokens(text) + estimate_tokens(reasoning or '') + (
                 estimate_tokens(json.dumps(tool_calls, ensure_ascii=False)) if tool_calls else 0
             )
+        cached = _token_count(usage.get('prompt_cache_hit_tokens'))
+        if cached is None:
+            details = usage.get('prompt_tokens_details')
+            if isinstance(details, dict):
+                cached = _token_count(details.get('cached_tokens'))
+        if prompt_estimated or cached is not None and cached > prompt_tokens:
+            cached = None
 
         model = str(data.get("model") or config.model)
         finish_reason = str(choices[0].get("finish_reason") or "")
@@ -486,6 +518,7 @@ class LLMClient:
                 "model": model,
                 "prompt_tokens": prompt_tokens,
                 "prompt_tokens_estimated": prompt_estimated,
+                "cached_prompt_tokens": cached,
                 "completion_tokens": completion_tokens,
                 "completion_tokens_estimated": completion_estimated,
                 "total_tokens": prompt_tokens + completion_tokens,
@@ -506,9 +539,11 @@ class LLMClient:
                 "completion_tokens": completion_tokens,
                 "total_tokens": prompt_tokens + completion_tokens,
                 "estimated": int(estimated),
+                **({'cached_prompt_tokens': cached} if cached is not None else {}),
             },
             finish_reason=finish_reason,
             tool_calls=tool_calls,
+            reasoning_content=reasoning,
         )
 
     async def chat(
@@ -681,6 +716,19 @@ class LLMClient:
 
 def _error_text(response: httpx.Response) -> str:
     # Upstream error bodies may echo the complete prompt, tools or credentials.
+    # Classify known protocol errors into fixed labels; never echo upstream text.
+    if response.status_code in {400, 422}:
+        try:
+            error = response.json().get('error', {})
+            message = str(error.get('message', '')).lower() if isinstance(error, dict) else ''
+        except (ValueError, AttributeError, httpx.ResponseNotRead):
+            message = ''
+        if 'reasoning_content' in message:
+            return f'HTTP {response.status_code}: 模型工具续轮的 reasoning_content 缺失或格式不兼容'
+        if any(key in message for key in ('max_tokens', 'max_completion_tokens', 'max_output_tokens')):
+            return f'HTTP {response.status_code}: 输出上限参数不符合模型限制，请检查最大输出 Token 配置'
+        if any(key in message for key in ('tool_call_id', 'tool_calls', 'tool call')):
+            return f'HTTP {response.status_code}: 模型工具调用与结果的消息格式不匹配'
     labels = {
         400: "模型服务拒绝请求，请检查模型参数",
         401: "模型服务身份验证失败，请检查密钥",

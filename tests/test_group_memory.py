@@ -418,3 +418,51 @@ async def test_summary_generation_cannot_commit_after_epoch_change(memory_store)
     await store.save_summary(1, 10, rows, '1111', [{'topic':'stale'}], generation=epoch)
     assert not await store.summaries(1, 10, '1111', 0, source+1)
     assert await store.recent(1, 10, source+1)
+
+
+@pytest.mark.parametrize("provider_timeout, expected", [(60, 120), (240, 270)])
+async def test_summary_deadline_allows_slow_provider(memory_bot, monkeypatch, provider_timeout, expected):
+    from fllbot.llm import memory as memory_module
+
+    bot = memory_bot
+    await bot.chat.memory.store.append(10001, 20002, "user", "待整理消息", created_at=time.time() - 100)
+    resolve = bot.chat.client.resolve
+
+    def configured_provider(**kwargs):
+        name, config = resolve(**kwargs)
+        return name, config.model_copy(update={"timeout": provider_timeout})
+
+    deadlines = []
+
+    async def wait_for(awaitable, *, timeout):
+        deadlines.append(timeout)
+        return await awaitable
+
+    monkeypatch.setattr(bot.chat.client, "resolve", configured_provider)
+    monkeypatch.setattr(memory_module, "asyncio", SimpleNamespace(wait_for=wait_for))
+    await bot.chat.memory.compress(make_context(bot), 9999)
+    assert deadlines == [expected]
+    assert len(await bot.chat.memory.store.summaries(10001, 20002, bot.chat.memory.privacy(), 0, 9999)) == 1
+
+
+async def test_summary_timeout_retries_smaller_batch_and_keeps_originals(memory_bot, caplog):
+    bot = memory_bot
+    memory = bot.chat.memory
+    for i in range(4):
+        await memory.store.append(10001, 20002, "user", str(i) + "原文" * 1300, created_at=time.time() - 100 + i)
+    context = make_context(bot)
+    valid_response = bot.chat.complete.return_value
+    bot.chat.complete.side_effect = TimeoutError()
+    await memory.compress(context, 9999)
+    original_sources = json.loads(bot.chat.complete.call_args.args[0][-1]["content"])
+    assert "请求超过 120 秒" in caplog.text
+    assert len(await memory.store.pending(10001, 20002, 9999, memory.privacy())) == 4
+    memory._retry_after.clear()
+    bot.chat.complete.side_effect = None
+    bot.chat.complete.return_value = valid_response
+    await memory.compress(context, 9999)
+    retry_sources = json.loads(bot.chat.complete.call_args.args[0][-1]["content"])
+    assert 0 < len(retry_sources) < len(original_sources)
+    assert (10001, 20002) not in memory._summary_failures
+    assert len(await memory.store.recent(10001, 20002, 9999)) == 4
+    assert len(await memory.store.pending(10001, 20002, 9999, memory.privacy())) == 4 - len(retry_sources)

@@ -145,6 +145,7 @@ class GroupMemory:
             async with self.bot.storage.data_lock:
                 if self.enabled(ctx) and ctx.memory_message_id and text:
                     await self.store.append(ctx.self_id,ctx.group_id,'assistant',text,created_at=time.time(),
+                        user_id=ctx.user_id,nickname=ctx.nickname,source_id=ctx.message_id or 0,
                         generation=ctx.data_epoch,account_epoch=ctx.received.account_epoch,scope_epoch=ctx.received.scope_generation)
 
     async def commit_summary(self, ctx: Any, batch: list[dict], privacy: str, topics: list[dict]) -> None:
@@ -181,6 +182,12 @@ class GroupMemory:
             + MEMORY_RULES
             + ("\n当前为新一段对话，旧话题不得主动续接。" if session_start == now else "\n以下原文属于近期连续对话。"),
         }
+        if session_start != now:
+            targets = self.bot.chat.context_assembler.reply_targets(
+                "group", [SimpleNamespace(**row) for row in recent]
+            )
+            if targets:
+                system = {**system, "content": system["content"] + targets}
         remaining = max(0, budget - len(system["content"].encode("utf-8")) - len(user["content"].encode("utf-8")))
         char_remaining = max(0, self.config.memory_context_chars - len(system["content"]) - len(user["content"]))
         summary_reserve = min(6000, remaining // 4)
@@ -232,12 +239,15 @@ class GroupMemory:
             return
         privacy = self.privacy()
         pending = await self.store.pending(*key, before_id, privacy)
+        # Reduce work after failures so a large backlog does not retry unchanged.
+        reduction = 2 ** min(self._summary_failures.get(key, 0), 3)
+        batch_limit = 12000 // reduction
         batch, size = [], 0
         for row in pending:
             cost = len(self.entry(row)["content"])
             if batch and (
                 row["created_at"] - batch[-1]["created_at"] > self.config.memory_session_gap_minutes * 60
-                or size + cost > 12000
+                or size + cost > batch_limit
             ):
                 break
             batch.append(row)
@@ -256,7 +266,10 @@ class GroupMemory:
         sources = []
         summary_provider = self.bot.chat.provider_name("group", ctx.group_id, "summary", ctx.self_id)
         summary_window = await self.bot.chat.client.context_window(provider=summary_provider) or DEFAULT_CONTEXT_WINDOW
-        source_budget = min(36000, summary_window - 3248)
+        _, provider = self.bot.chat.client.resolve(provider=summary_provider)
+        # Include capacity waiting and transport retries in the background deadline.
+        summary_timeout = max(120.0, (provider.timeout or 60.0) + 30.0)
+        source_budget = min(36000 // reduction, summary_window - 3248)
         if source_budget < 1000:
             return
         included = []
@@ -292,7 +305,7 @@ class GroupMemory:
                     task="summary",
                     unbounded_output=True,
                 ),
-                timeout=30,
+                timeout=summary_timeout,
             )
             try:
                 clean = parse_summary(response.text, incomplete=incomplete)
@@ -306,7 +319,7 @@ class GroupMemory:
             self._summary_failures[key] = failures
             delay = min(60 * 2 ** (failures - 1), 3600)
             self._retry_after[key] = time.time() + delay
-            reason = "请求超过 30 秒" if isinstance(exc, TimeoutError) else type(exc).__name__
+            reason = f"请求超过 {summary_timeout:g} 秒" if isinstance(exc, TimeoutError) else type(exc).__name__
             logger.warning("群聊摘要生成失败（%s），保留全部原文，%s 秒后重试", reason, delay)
             logger.debug("群聊摘要失败详情", exc_info=True)
 
