@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import uuid
 from contextlib import nullcontext
@@ -30,11 +31,13 @@ class DeliveryService:
         replies: Any = None,
         project_input: Any = None,
         allowed: Any = delivery_allowed,
+        image_renderer: Any = None,
     ) -> None:
         self.storage = storage
         self.replies = replies
         self.project_input = project_input
         self.allowed = allowed
+        self.image_renderer = image_renderer
         self.track_request = track_request or (lambda ctx: nullcontext())
         self.capacity = capacity
         self.serial = serial or (lambda ctx: self.lock_factory(ctx.self_id, ctx.event.scene, ctx.event.scene_id))
@@ -159,6 +162,7 @@ class DeliveryService:
             return False
         if self.project_input is not None:
             await self.project_input(ctx)
+        segments = getattr(ctx, 'targeted_segments', as_segments)(segments)
         delivery_id = uuid.uuid4().hex
         store = self.storage
         metadata = {
@@ -225,6 +229,7 @@ class DeliveryService:
         if not chunks:
             return
         use_forward = plan.mode == "forward"
+        target_segments = getattr(ctx, 'targeted_segments', as_segments)
         delivery_id = uuid.uuid4().hex
         store = self.storage
         parts = plan.persisted_parts()
@@ -247,6 +252,8 @@ class DeliveryService:
                 "require_ai": require_ai,
                 "memory_message_id": ctx.memory_message_id,
                 **plan.formatting(),
+                'part_segments': {str(part.index): [segment.to_dict() for segment in target_segments(part.segments())]
+                                  for part in plan.parts},
             },
         ):
             return
@@ -258,7 +265,9 @@ class DeliveryService:
                 await store.update_delivery(delivery_id, 0, "cancelled")
                 return
             name = plan.nickname
-            nodes = [MessageSegment.node(ctx.self_id, name, chunk).to_dict() for chunk in chunks]
+            nodes = [MessageSegment.node(ctx.self_id, name,
+                ([MessageSegment.at(ctx.user_id), MessageSegment.text(' ')] if ctx.is_group and getattr(ctx, 'turn_input', None) is not None else [])
+                + [MessageSegment.text(chunk)]).to_dict() for chunk in chunks]
             try:
                 with ctx.trace_span("send", "forward"):
                     if ctx.is_group and ctx.group_id is not None:
@@ -271,13 +280,40 @@ class DeliveryService:
             except BaseException as exc:
                 rejected = isinstance(exc, ActionError) and exc.retcode is not None
                 await store.update_delivery(
-                    delivery_id, 0, "failed" if rejected else "uncertain", error=type(exc).__name__
+                    delivery_id, 0, "failed" if rejected else "uncertain",
+                    error=f'ActionError:retcode={exc.retcode}' if rejected else type(exc).__name__
                 )
                 if not rejected:
                     raise
-                await store.update_delivery(delivery_id, 0, "superseded")
-                # Forward support differs between protocol implementations. Preserve the reply.
-                ctx.logger.warning("聊天记录转发被拒绝，改为分段发送（%s）", type(exc).__name__)
+                # Cancel all text fallback slots before rendering: a long answer
+                # must never turn into a burst of ordinary group messages.
+                for part in plan.parts:
+                    await store.update_delivery(delivery_id, part.index, 'cancelled')
+                logging.getLogger('fllbot.delivery').warning(
+                    '聊天记录转发被拒绝（retcode=%s），改用图片发送', exc.retcode)
+                if not self.allowed(ctx, require_ai):
+                    return
+                fallback_prefix = [segment for segment in plan.parts[0].segments() if segment.type in {'reply', 'at'}]
+                if any(segment.type == 'at' for segment in fallback_prefix):
+                    fallback_prefix.append(MessageSegment.text(' '))
+                try:
+                    if self.image_renderer is None:
+                        raise ValueError('image_renderer_unavailable')
+                    image = await asyncio.to_thread(self.image_renderer, text)
+                    if not isinstance(image, bytes) or not image:
+                        raise ValueError('empty_reply_image')
+                except Exception as render_error:
+                    ctx.turn_reason = 'forward_image_failed'
+                    ctx.trace_event('send', 'forward_image_failed', 'failed', type(render_error).__name__)
+                    notice = '合并转发失败，长文转图片也未能完成，本次已停止发送，避免刷屏。'
+                    await self._send_media(ctx, [*fallback_prefix, MessageSegment.text(notice)], notice, require_ai=require_ai)
+                    return
+                if not self.allowed(ctx, require_ai):
+                    return
+                await store.update_delivery(delivery_id, 0, 'superseded')
+                await self._send_media(ctx, [*fallback_prefix, MessageSegment.image(
+                    'base64://' + base64.b64encode(image).decode('ascii'))], text, require_ai=require_ai)
+                return
             else:
                 await store.update_delivery(delivery_id,0,'sent',message_id=message_id)
                 await self._after_sent(ctx,text)

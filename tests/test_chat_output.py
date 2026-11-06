@@ -76,7 +76,11 @@ async def test_forward_failure_falls_back_without_losing_reply(tmp_path: Path):
         sent = [segment for _, _, segments in connection.sent for segment in segments]
         assert sum(segment.type == 'reply' for segment in sent) == 1
         assert sum(segment.type == 'at' for segment in sent) == 1
-        assert ''.join(segment.text_content for segment in sent if segment.is_text).replace(' ', '') == text
+        assert len(connection.sent) == 1
+        assert sum(segment.type == 'image' for segment in sent) == 1
+        assert not ''.join(segment.text_content for segment in sent if segment.is_text).strip()
+        history = await bot.storage.recent_chat('group', ctx.group_id, self_id=ctx.self_id)
+        assert [row.content for row in history if row.role == 'assistant'] == [text]
     finally:
         await bot.stop()
 

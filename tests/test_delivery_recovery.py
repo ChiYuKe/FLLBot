@@ -180,18 +180,26 @@ async def test_recovery_preserves_quote_at_and_chunks_after_settings_change(tmp_
         await bot.stop()
 
 
-async def test_rejected_forward_recovers_only_failed_fallback_part(tmp_path):
+async def test_rejected_forward_uses_image_and_never_recovers_as_text(tmp_path):
     bot = await make_bot(tmp_path,builtin=False,overrides={'chat':{'reply_mode':'forward','reply_chunk_size':50,'reply_interval_ms':0}})
     connection = FakeConnection()
     connection.send_group_forward_msg = AsyncMock(side_effect=ActionError('send_group_forward_msg',retcode=100))
+    connection.send_group_msg = AsyncMock(side_effect=ActionError('send_group_msg', retcode=100))
+    bot.deliveries.image_renderer = lambda text: b'png-test-image'
     bot.manager.add(connection)
     try:
-        ctx = await failed_reply(bot,connection,ActionError('send_group_msg',retcode=100))
-        connection.send_group_msg = AsyncMock(return_value={'message_id':2})
-        detail = await bot.deliveries.recover(ctx.turn_id)
-        assert detail['status'] == 'delivered'
-        assert [part['status'] for part in detail['deliveries']] == ['superseded','sent','sent']
+        ctx = Context(bot, connection, parse_event(group_message('hello')))
+        with pytest.raises(ActionError):
+            async with bot.conversations.turn(ctx):
+                await send_chat_reply(ctx, 'x' * 100)
+        detail = await bot.storage.turn_detail(ctx.turn_id)
+        assert detail['status'] == 'failed'
+        assert [part['status'] for part in detail['deliveries']] == ['superseded','cancelled','cancelled','failed']
+        assert not await bot.storage.recovery_plan(ctx.turn_id)
+        with pytest.raises(ValueError):
+            await bot.deliveries.recover(ctx.turn_id)
         connection.send_group_msg.assert_awaited_once()
+        assert connection.send_group_msg.call_args.args[1][0].type == 'image'
         connection.send_group_forward_msg.assert_awaited_once()
     finally:
         await bot.stop()

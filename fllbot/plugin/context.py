@@ -234,6 +234,20 @@ class Context:
         return self.sender.role in {"owner", "admin"}
 
     # -- 发送 ------------------------------------------------------------- #
+    def targeted_segments(self, message, *, group_id=None, user_id=None):
+        """Attribute every group-task message, including chunks and tool media."""
+        segments = as_segments(message)
+        if (self.entrypoint != 'qq' or not self.is_group or self.turn_input is None
+                or user_id is not None or group_id is not None and int(group_id) != self.group_id):
+            return segments
+        if any(segment.type == 'reply' for segment in segments):
+            return segments
+        if self.message_id:
+            return [MessageSegment.reply(self.message_id), *segments]
+        if self.user_id and not any(segment.type == 'at' and str(segment.get('qq')) == str(self.user_id) for segment in segments):
+            return [MessageSegment.at(self.user_id), MessageSegment.text(' '), *segments]
+        return segments
+
     def trace_event(self, stage: str, code: str, status: str = 'passed', component: str = '') -> None:
         """Record metadata-only diagnostics; never pass message content or arguments here."""
         record(stage, code, status, component)
@@ -253,7 +267,7 @@ class Context:
             self.trace_event('trigger', 'context_cleared', 'skipped')
             return None
         with span('send'):
-            segments = as_segments(message)
+            segments = self.targeted_segments(message, group_id=group_id, user_id=user_id)
             if group_id is not None:
                 receipt = await self.connection.send_group_msg(int(group_id), segments)
             elif user_id is not None:

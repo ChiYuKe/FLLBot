@@ -98,7 +98,7 @@ async def _read_quoted(ctx: Context, message_id: int, timeout: float) -> QuotedM
     if not _same_scene(ctx, data):
         return QuotedMessage(message_id, error="引用的原消息不属于当前会话，已忽略其内容")
     quoted = _from_data(message_id, data)
-    if not has_forward(quoted.segments) and not any(segment.is_text or segment.type == "image" for segment in quoted.segments):
+    if not has_forward(quoted.segments) and not any(segment.is_text or segment.type in {"image", "file"} for segment in quoted.segments):
         return QuotedMessage(message_id, error="引用的原消息没有可读的文本或图片")
     return quoted
 
@@ -123,6 +123,11 @@ def render_quote(quoted: QuotedMessage, *, with_images: bool) -> tuple[str, list
                 parts.append(readable_text([segment]))
             continue
         if segment.type == "reply":
+            continue
+        if segment.type == "file":
+            name = str(segment.get("name") or segment.get("file_name") or "未命名文件")
+            name = name.replace("\\", "/").rsplit("/", 1)[-1][:120]
+            parts.append(f"[文件附件：{name}]")
             continue
         if has_forward([segment]):
             if forward_rendered:

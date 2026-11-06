@@ -20,6 +20,7 @@ from fastapi.responses import HTMLResponse
 
 from . import __version__
 from .agent_conversation import AgentConversationService
+from .agent_tasks import AgentTasks
 from .bots import BotProfiles
 from .config import AppConfig, ConfigStore, mask_secrets, resolve_path, split_startup_overrides
 from .conversation import ConversationCapacity
@@ -43,6 +44,7 @@ from .onebot.server import ConnectionManager, create_ws_router
 from .permission import PermissionManager
 from .plugin.loader import PluginLoader
 from .policy import migrate_tool_permissions
+from .rendering.text_image import render_reply_image
 from .resources import ResourceReplacementManager
 from .retention import CleanupManager
 from .services import ServiceMonitor
@@ -100,9 +102,14 @@ class FLLBot:
         self.trigger_policy = TriggerPolicy(lambda group, account: agent_settings(self, group, account),
             self.permissions, lambda: self.chat.available, self.chat.scene_enabled,
             lambda ctx: self.bots.wake_word(ctx.self_id, getattr(ctx.connection, 'nickname', '')))
-        self.agent_runtime = AgentRuntime(lambda *args, **kwargs: self.chat.complete(*args, **kwargs))
+        self.agent_runtime = AgentRuntime(lambda *args, **kwargs: self.chat.complete(*args, **kwargs),
+            budget=lambda options, messages, tools: self.model_gateway.describe_budget(
+                options.get('provider') or self.chat.provider_name(options['scene'], options['scene_id'], 'agent', options.get('self_id')),
+                messages, tools))
         self.conversations = ConversationService(self.storage, self.chat.conversation_lock, lambda: self.config,
             self.chat.memory.schedule,self.chat.scope_for_turn,self.capacity,version=lambda config:self.chat.execution_version)
+        self.agent_tasks = AgentTasks(self.storage, self.conversations, self.permissions,
+            self.chat.scene_enabled, self.bots.enabled)
         self.manager = ConnectionManager(
             self.on_raw_event,
             heartbeat_timeout=config.server.heartbeat_timeout,
@@ -111,11 +118,11 @@ class FLLBot:
         self.deliveries = DeliveryService(self.storage, self._recovery_context, self.chat.conversation_lock,
             self.chat.memory.reply, self.conversations.track_delivery, self.capacity,
             self.conversations.serial, self.conversations.track_task,replies=self.replies,
-            project_input=self.conversations.project_input)
+            project_input=self.conversations.project_input, image_renderer=render_reply_image)
         self.agent_conversations = AgentConversationService(triggers=self.trigger_policy,storage=self.storage,
             conversations=self.conversations,build_messages=lambda *args,**kwargs:self.chat.build_messages(*args,**kwargs),
             runtime=self.agent_runtime,send=self.deliveries.send_text,
-            settings=lambda ctx:self.chat.turn_agent_settings(ctx.group_id,ctx.self_id))
+            settings=lambda ctx:self.chat.turn_agent_settings(ctx.group_id,ctx.self_id), tasks=self.agent_tasks)
         self.plugins = PluginLoader(
             self,
             [resolve_path(self.root, item) for item in config.plugin.dirs],
