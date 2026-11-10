@@ -16,15 +16,16 @@ BOUNDARIES = {
     "rules": {"rules"},
     "permission": {"permission"},
     "policy": {"policy"},
-    "llm": {"llm", "config", "onebot", "policy", "tracing", "conversation", "delivery_policy"},
+    "history_images": set(),
+    "llm": {"llm", "config", "onebot", "policy", "tracing", "conversation", "delivery_policy", "history_images"},
     "plugin": {"plugin", "rules", "onebot", "tracing", "conversation"},
 }
 
 # Keep the extracted services independent of the compatibility facade and ingress.
 MODULE_BOUNDARIES = {
-    'delivery_service': {'delivery_policy','onebot.connection','onebot.segments'},
+    'delivery_service': {'delivery_policy','onebot.connection','onebot.segments','history_images'},
     'delivery_policy': set(),
-    'conversation_service': {'conversation','tracing'},
+    'conversation_service': {'conversation','tracing','history_images'},
     'agent_conversation': {'llm.agent_runtime','llm.client'},
     'builtin_plugins.agent.plugin': {'plugin','policy'},
     'llm.output': {'delivery_policy'},
@@ -97,7 +98,10 @@ def check(root: Path = ROOT) -> list[str]:
                 if not any(dependency == prefix or dependency.startswith(prefix+'.')
                            for prefix in MODULE_BOUNDARIES[module]):
                     errors.append(f'{path.relative_to(root)}:{line}: {module} 不能依赖 {target}')
-            if layer in BOUNDARIES and target.startswith("fllbot.") and target.split(".")[1] not in BOUNDARIES[layer]:
+            # Manifest compatibility checks read the host's stable version constant only.
+            version_constant = layer == "plugin" and target == "fllbot.__version__"
+            if (layer in BOUNDARIES and target.startswith("fllbot.")
+                    and target.split(".")[1] not in BOUNDARIES[layer] and not version_constant):
                 errors.append(f"{path.relative_to(root)}:{line}: {layer} 不能反向依赖 {target}")
     packages = root / "plugins"
     if packages.is_dir():
