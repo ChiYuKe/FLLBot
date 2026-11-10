@@ -5,3 +5,7 @@ version = "0.1.0"
 description = "联网插件：提供搜索、网页读取、天气和时间命令及 Agent 工具"
 author = ""
 category = "plugin"
+
+requires_fllbot = ">=0.2,<1"
+requires_python = ">=3.11"
+dependencies = ["httpx>=0.27,<1"]

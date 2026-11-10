@@ -13,7 +13,8 @@ from typing import TYPE_CHECKING, Any
 
 from .base import LoopSpec, Plugin
 from .imports import BUILTIN_PACKAGE, import_plugin, module_name_for, purge_modules
-from .manifest import PluginManifest
+from .package_lock import PackageLock
+from .scaffold import check_package
 
 if TYPE_CHECKING:  # pragma: no cover
     from ..app import FLLBot
@@ -58,6 +59,7 @@ class PluginLoader:
         self._watch_task: asyncio.Task[None] | None = None
         self._known_fingerprints: dict[Path, tuple[Any, ...]] = {}
         self.failed: dict[str, str] = {}
+        self._package_locks: list[PackageLock] = []
 
     # -- 查询 ------------------------------------------------------------- #
     def get(self, name: str) -> Plugin | None:
@@ -75,6 +77,17 @@ class PluginLoader:
 
     # -- 加载 ------------------------------------------------------------- #
     async def load_all(self) -> None:
+        if not self._package_locks:
+            try:
+                for directory in sorted({path.resolve() for path in self.dirs}):
+                    lock = PackageLock(directory)
+                    lock.acquire()
+                    self._package_locks.append(lock)
+            except BaseException:
+                for lock in self._package_locks:
+                    lock.release()
+                self._package_locks.clear()
+                raise
         for directory in self.dirs:
             directory.mkdir(parents=True, exist_ok=True)
             for path in self._iter_candidates(directory):
@@ -115,7 +128,9 @@ class PluginLoader:
                 raise
 
     async def _load_locked(self, path: Path, *, builtin: bool, replace: str | None = None) -> Plugin | None:
-        manifest = PluginManifest.read(path) if path.is_dir() and (path / "plugin.toml").exists() else None
+        manifest = check_package(path) if path.is_dir() and (path / "plugin.toml").exists() else None
+        if manifest:
+            manifest.check_environment()
         module_name = module_name_for(path, builtin)
         backup = {
             key: value
@@ -286,9 +301,14 @@ class PluginLoader:
         return {"reloaded": reloaded, "failed": failed}
 
     async def shutdown(self) -> None:
-        await self.stop_background_tasks()
-        for name in list(self._loaded):
-            await self.unload(name)
+        try:
+            await self.stop_background_tasks()
+            for name in list(self._loaded):
+                await self.unload(name)
+        finally:
+            for lock in self._package_locks:
+                lock.release()
+            self._package_locks.clear()
 
     async def stop_background_tasks(self) -> None:
         """Stop hot reload and periodic callbacks while leaving handlers/resources alive."""

@@ -11,6 +11,11 @@
 .venv/Scripts/python.exe -m fllbot plugin list
 ```
 
+安装别人提供的完整目录包或 ZIP：先停止 FLLBot，再运行
+`.venv/Scripts/python.exe -m fllbot plugin install <目录或ZIP>`。
+后续使用 `plugin upgrade <目录或ZIP>`、`plugin rollback <名称>`、`plugin remove <名称>`。
+升级/移除保留上一份完整包，配置和数据保留；依赖、版本要求和限制见[安装与恢复规范](../docs/plugin-packages.md#安装第三方插件升级与恢复)。
+
 标准结构：
 
 ```text

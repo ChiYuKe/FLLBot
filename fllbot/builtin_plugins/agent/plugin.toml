@@ -5,3 +5,7 @@ version = "0.1.0"
 description = "自然语言智能体：理解群聊并调用插件开放的工具"
 author = ""
 category = "plugin"
+
+requires_fllbot = ">=0.2,<1"
+requires_python = ">=3.11"
+dependencies = []

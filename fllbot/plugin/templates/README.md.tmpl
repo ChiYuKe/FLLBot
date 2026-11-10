@@ -7,6 +7,9 @@ __DESCRIPTION__
 ## 安装与使用
 
 将整个 `__NAME__/` 放进配置的插件目录，启动或等待热重载。发送 `/__NAME__` 验证。
+推荐先停止 FLLBot，执行 `fllbot plugin install <本包目录或ZIP> --root <宿主目录>`。
+更新使用 `plugin upgrade`，恢复使用 `plugin rollback __NAME__`，移除使用 `plugin remove __NAME__`。
+升级和移除保留一份完整包备份，配置和运行数据不会删除。
 命令前缀以宿主配置为准。配置、开关、群覆盖和重载使用 FLLBot 管理界面或 `/api/plugins`。
 
 ## 配置
@@ -23,6 +26,7 @@ __TOOL_DOC__
 ## 依赖与数据
 
 无额外依赖。配置交给宿主持久化；文件数据写入 `ctx.data_dir` / `plugin.data_dir`。
+新增 Python 依赖时在 `plugin.toml` 的 `dependencies` 数组声明包名和版本范围。
 不要在插件目录保存日志、缓存、令牌或数据库，也不要在源码中导入其他用户插件。
 
 ## 开发与维护

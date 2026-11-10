@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 dependencies = [
+    "packaging>=24,<27",
     "Pillow>=10.4,<13",
     "markdown-it-py>=3,<5",
     "Pygments>=2.18,<3",
@@ -40,6 +41,7 @@ include = ["fllbot*"]
 [tool.setuptools.package-data]
 fllbot = ["builtin_plugins/*/*.md", "builtin_plugins/*/plugin.toml",
     "builtin_plugins/*/docs/*.md", "plugin/templates/*.tmpl", "plugin/templates/docs/*.tmpl",
+    "rendering/*.cjs", "rendering/vendor/elk/*.js", "rendering/vendor/elk/*.md",
     "ui/*.html", "ui/*.css", "ui/*.js"]
 
 [tool.pytest.ini_options]

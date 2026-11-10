@@ -5,3 +5,7 @@ version = "0.1.0"
 description = "缺氧源码知识库：检索本地类型/成员索引，按行读取实际 C# 源码"
 author = ""
 category = "plugin"
+
+requires_fllbot = ">=0.2,<1"
+requires_python = ">=3.11"
+dependencies = []

@@ -5,3 +5,7 @@ version = "0.1.0"
 description = "读取当前消息或引用消息中的 QQ 文本与代码文件附件"
 author = ""
 category = "plugin"
+
+requires_fllbot = ">=0.2,<1"
+requires_python = ">=3.11"
+dependencies = ["httpx>=0.27,<1"]

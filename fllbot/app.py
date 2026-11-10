@@ -220,7 +220,12 @@ class FLLBot:
             self.tool_executor.reopen()
             self.chat.memory.reopen()
             self.stopping = False
-            await self.plugins.load_all()
+            try:
+                await self.plugins.load_all()
+            except BaseException:
+                await self.plugins.shutdown()
+                await self.storage.close()
+                raise
             await migrate_tool_permissions(self)
             self.manager.heartbeat_timeout = float(self.config.server.heartbeat_timeout or 0)
             await self.dispatcher.startup()

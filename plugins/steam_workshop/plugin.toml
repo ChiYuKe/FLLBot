@@ -5,3 +5,7 @@ version = "0.1.0"
 description = "Steam 创意工坊助手：读取工坊物品/合集详情，自动总结页面信息"
 author = ""
 category = "plugin"
+
+requires_fllbot = ">=0.2,<1"
+requires_python = ">=3.11"
+dependencies = ["httpx>=0.27,<1"]

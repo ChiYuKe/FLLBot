@@ -38,6 +38,9 @@ version = "0.1.0"
 description = "打招呼插件"
 author = "你的名字"
 category = "plugin"
+requires_fllbot = ">=0.2,<1"
+requires_python = ">=3.11"
+dependencies = ["httpx>=0.27,<1"]
 ```
 
 `schema_version` 是包结构版本，`api_version` 是宿主插件接口版本，当前都为 1。
@@ -48,6 +51,9 @@ category = "plugin"
 包内通过 `Plugin.from_manifest(__file__)` 创建实例，避免代码和包头重复填写版本、作者等信息。
 加载器会校验两者是否一致，缺文件、格式错误和重复插件名会进入加载失败列表。
 不同文件夹不能静默覆盖同名运行插件，重载只替换同一来源。
+`requires_fllbot`、`requires_python` 是可选版本范围，`dependencies` 是可选 Python 分发包依赖列表；
+省略时兼容旧清单。依赖使用包名、版本范围及可选环境标记，不接受 URL 或 extras，避免无法完整检查的声明。
+版本必须能按 Python 版本规则比较。加载前检查 API、宿主、Python 和已安装依赖版本，失败不会执行插件代码。
 稳定 `name` 关联现有配置、权限、群覆盖、工具标识与数据，不要为了移动目录修改它。
 
 ## 快速开发
@@ -69,10 +75,48 @@ category = "plugin"
 
 源模板位于 `fllbot/plugin/templates/`，随安装包分发。修改源模板影响后续生成的插件，不覆盖已有插件。
 
+## 安装第三方插件、升级与恢复
+
+先停止使用该插件目录的 FLLBot，再在其 Python 环境中执行：
+
+```powershell
+.venv/Scripts/python.exe -m fllbot plugin install E:/Downloads/hello-main
+.venv/Scripts/python.exe -m fllbot plugin install E:/Downloads/hello.zip
+.venv/Scripts/python.exe -m fllbot plugin dependencies hello
+.venv/Scripts/python.exe -m fllbot plugin upgrade E:/Downloads/hello-new.zip
+.venv/Scripts/python.exe -m fllbot plugin rollback hello
+.venv/Scripts/python.exe -m fllbot plugin remove hello
+```
+
+install 的两个示例二选一。来源为完整本地包目录或 ZIP；ZIP 可直接包含包文件，也可有唯一顶层目录。
+下载目录名可以不同，安装名取自清单。Git 仓库请先克隆到本地后安装；不自动运行仓库安装脚本。
+自定义位置沿用 `--root`、`--directory`，并确保 directory 对应配置中的 `plugin.dirs`。
+内置插件随宿主发行，不能用这些命令覆盖。安装器不会导入插件源码，但插件运行时拥有宿主进程权限，只安装可信代码。
+
+安装器先在隐藏临时目录检查完整包、Python 语法、静态导入边界和环境兼容，再替换目标目录。
+拒绝 ZIP 路径越界、符号链接、目录联接、重复文件与超过 100 MiB / 10000 个文件的包。
+安装已存在插件会报错；upgrade 要求版本严格增加，并保留上一版在 `plugins/.previous/<name>/`。
+普通校验或文件替换失败保留原包；不承诺断电时的文件系统事务恢复。
+remove 将完整包移到同一备份位置，配置、权限与 `data/plugins/<name>/` 均保留；rollback 可恢复移除的插件，
+或交换当前包与上一版。每个插件只保留一份备份，下次成功升级或移除会替换它。
+恢复只涉及源码和资源，不回滚数据库或插件已产生的外部副作用。
+
+运行中的加载器持有插件目录进程锁，安装、升级、恢复和移除会明确要求停止服务，避免与热重载竞争。
+直接编辑开发包仍支持热重载。新安装包启动时初始化失败会显示在加载失败列表；停服后可用 rollback 恢复。
+
+Python 依赖使用宿主同一环境，目前不提供每插件依赖隔离。
+缺少或冲突的依赖会阻止安装或加载，并列出所需版本；在宿主环境用 pip 安装兼容依赖后重试。
+例如上例依赖可用 `.venv/Scripts/python.exe -m pip install "httpx>=0.27,<1"` 安装，随后运行
+`.venv/Scripts/python.exe -m pip check`。多个插件要求互斥版本时需选择兼容插件版本或分开部署，不能强行覆盖后宣称兼容。
+
 ## 文件职责与文件头
 
 `__init__.py` 只保留 `from .plugin import plugin` 和导出列表；`plugin.py` 读取清单并连接处理器与配置。
 小插件可以把现有逻辑留在 plugin.py；复杂功能按职责拆分，避免每个文件都引入相同配置或循环导入。
+专属业务实现、客户端与静态资源必须留在插件包内，不能要求用户往宿主目录补文件。
+静态检查拒绝越出包的相对导入、其他插件包及宿主 app/API 内部导入；这不是任意 Python 动态行为的隔离机制。
+确实同时由宿主与插件使用的通用能力保留在公共模块，例如 `fllbot/rendering/` 同时支撑宿主图片回复与 text 工具。
+包内 `text/code_render.py`、`markdown_render.py` 仅保留旧导入路径兼容，真实共用实现的位置须在开发文档中说明。
 新建模板默认提供 handlers.py 与 settings.py，包内使用相对导入。
 
 Python 模块顶部使用文档字符串，例如：

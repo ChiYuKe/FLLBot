@@ -64,6 +64,9 @@ def create_package(
             "description": description,
             "author": author,
             "category": "plugin",
+            "requires_fllbot": ">=0.2,<1",
+            "requires_python": ">=3.11",
+            "dependencies": [],
         }
         manifest = (
             "\n".join(f"{key} = {json.dumps(value, ensure_ascii=False)}" for key, value in metadata.items()) + "\n"
@@ -78,5 +81,21 @@ def check_package(directory: Path) -> PluginManifest:
     manifest = PluginManifest.read(directory)
     for source in directory.rglob("*.py"):
         if "__pycache__" not in source.parts:
-            ast.parse(source.read_text(encoding="utf-8-sig"), filename=str(source))
+            tree = ast.parse(source.read_text(encoding="utf-8-sig"), filename=str(source))
+            relative = source.relative_to(directory)
+            if relative.parts[0] == "tests":
+                continue
+            for node in ast.walk(tree):
+                if isinstance(node, ast.ImportFrom):
+                    if node.level > len(relative.parts):
+                        raise ValueError(f"{relative}:{node.lineno}: 相对导入越出插件包")
+                    names = [node.module or ""] if not node.level else []
+                elif isinstance(node, ast.Import):
+                    names = [alias.name for alias in node.names]
+                else:
+                    continue
+                forbidden = ("plugins", "fllbot_user_plugins", "fllbot.builtin_plugins", "fllbot.app", "fllbot.api")
+                for name in names:
+                    if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden):
+                        raise ValueError(f"{relative}:{node.lineno}: 插件必须通过公开 SDK 协作，不能导入 {name}")
     return manifest

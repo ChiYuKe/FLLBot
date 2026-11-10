@@ -9,6 +9,7 @@ import socket
 import sqlite3
 import sys
 import time
+import zipfile
 from pathlib import Path
 from typing import Any
 
@@ -93,13 +94,24 @@ def build_parser() -> argparse.ArgumentParser:
     restore.add_argument("--source", required=True, help="备份数据库路径")
     restore.add_argument("--confirm", action="store_true", help="确认替换当前数据库；现有数据库会先另存副本")
 
-    plugin = sub.add_parser("plugin", help="新建、校验和列出独立插件包")
+    plugin = sub.add_parser("plugin", help="开发、安装、升级和恢复独立插件包")
     actions = plugin.add_subparsers(dest="plugin_action", required=True)
     new = actions.add_parser("new", help="生成带包头、文档、配置与处理器的插件包")
     new.add_argument("name")
     new.add_argument("--template", choices=("command", "tool"), default="command")
     new.add_argument("--description", default="请填写插件用途")
     new.add_argument("--author", default="")
+    for operation in ("install", "upgrade", "remove", "rollback", "dependencies"):
+        action = actions.add_parser(operation, help={
+            "install": "从本地目录或 ZIP 安装完整插件包（先停止 FLLBot）",
+            "upgrade": "升级插件并保留上一版（先停止 FLLBot）",
+            "remove": "移除用户插件，保留备份、配置与数据（先停止 FLLBot）",
+            "rollback": "恢复上一版或已移除插件（先停止 FLLBot）",
+            "dependencies": "显示插件依赖并检查当前环境",
+        }[operation])
+        action.add_argument("source" if operation in {"install", "upgrade"} else "name")
+        action.add_argument("--root", default=".")
+        action.add_argument("--directory", default="plugins")
     for action in (
         new,
         actions.add_parser("check", help="离线校验包结构和 Python 语法"),
@@ -342,6 +354,27 @@ def cmd_plugin(args: argparse.Namespace) -> int:
     root = Path(args.root).resolve()
     directory = resolve_path(root, args.directory)
     try:
+        if args.plugin_action in {"install", "upgrade", "remove", "rollback", "dependencies"}:
+            from .plugin.packages import PackageStore
+
+            store = PackageStore(directory)
+            if args.plugin_action in {"install", "upgrade"}:
+                result = store.install(resolve_path(root, args.source), upgrade=args.plugin_action == "upgrade")
+            elif args.plugin_action == "remove":
+                result = store.remove(args.name)
+            elif args.plugin_action == "rollback":
+                result = store.rollback(args.name)
+            else:
+                from .plugin.manifest import validate_name
+
+                validate_name(args.name)
+                manifest = check_package(directory / args.name)
+                print(json.dumps(manifest.describe(), ensure_ascii=False, indent=2))
+                manifest.check_environment()
+                print("依赖与版本兼容检查通过")
+                return 0
+            print(f"插件操作完成：{result}；配置和运行数据保留，启动 FLLBot 后生效")
+            return 0
         if args.plugin_action == "new":
             print(
                 create_package(
@@ -379,12 +412,13 @@ def cmd_plugin(args: argparse.Namespace) -> int:
                     if args.plugin_action == "list":
                         print(f"{manifest.name}\t{manifest.version}\t{manifest.category}\t{package}")
                     else:
+                        manifest.check_environment()
                         print(f"OK  {manifest.name}: {package}")
                 except (ValueError, OSError, SyntaxError) as error:
                     failed = True
                     print(f"ERROR  {package}: {error}", file=sys.stderr)
         return int(failed)
-    except (ValueError, OSError, SyntaxError) as error:
+    except (ValueError, OSError, SyntaxError, zipfile.BadZipFile) as error:
         print(f"插件操作失败：{error}", file=sys.stderr)
         return 1
 
