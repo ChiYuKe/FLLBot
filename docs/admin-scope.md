@@ -38,7 +38,8 @@
 | `plugin.builtin` | `true` | 插件运行 | 启动构造；修改启动配置来源并重建实例 |
 | `plugin.hot_reload` | `true` | 插件运行 | 启动构造；修改启动配置来源并重建实例 |
 | `plugin.watch_interval` | `2.0` | 插件运行 | 启动构造；修改启动配置来源并重建实例 |
-| `plugin.max_concurrency` | `8` | 插件运行 | 启动构造；修改启动配置来源并重建实例 |
+| `plugin.max_concurrency` | `6` | 插件运行 | 启动构造；修改启动配置来源并重建实例 |
+| `plugin.max_concurrent_per_group` | `6` | 插件运行 | 启动构造；修改启动配置来源并重建实例 |
 | `plugin.max_pending_events` | `1000` | 插件运行 | 启动构造；修改启动配置来源并重建实例 |
 | `plugin.max_pending_per_conversation` | `32` | 插件运行 | 启动构造；共享准入与会话队列容量，修改启动来源并重建实例 |
 | `plugin.event_deadline_seconds` | `360.0` | 插件运行 | 后续接收事件固定总时限；不修改已有轮次 deadline |
@@ -83,7 +84,7 @@
 | `llm.fallback_providers` | `[]` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `llm.group_daily_token_limit` | `0` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `llm.group_daily_cost_limit` | `0.0` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
-| `llm.max_concurrency` | `2` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
+| `llm.max_concurrency` | `6` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `llm.input_price` | `0.0` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `llm.output_price` | `0.0` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `chat.send_nickname` | `true` | 聊天默认 | 后续请求/消息；保存后不追溯已开始操作 |
@@ -96,7 +97,7 @@
 | `chat.memory_session_gap_minutes` | `30` | 聊天默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `chat.memory_recent_messages` | `200` | 聊天默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `chat.memory_context_chars` | `400000` | 聊天默认 | 后续请求/消息；范围 4,000–1,000,000；保存后不追溯已开始操作 |
-| `chat.reply_mode` | `"auto"` | 聊天默认 | 后续请求/消息；保存后不追溯已开始操作 |
+| `chat.reply_mode` | `"auto_image"` | 聊天默认 | 后续请求/消息；长回复默认整理成图片；保存后不追溯已开始操作 |
 | `chat.forward_threshold` | `1200` | 聊天默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `chat.reply_chunk_size` | `0` | 聊天默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `chat.reply_interval_ms` | `350` | 聊天默认 | 后续请求/消息；保存后不追溯已开始操作 |
@@ -135,7 +136,7 @@
 | `llm.providers.*.no_stream` | `false` | 模型服务 | 后续请求；继承规则见上文 |
 | `llm.providers.*.input_price` | `0.0` | 模型服务 | 后续请求；继承规则见上文 |
 | `llm.providers.*.output_price` | `0.0` | 模型服务 | 后续请求；继承规则见上文 |
-| `llm.providers.*.max_concurrency` | `2` | 模型服务 | 后续请求；继承规则见上文 |
+| `llm.providers.*.max_concurrency` | `6` | 模型服务 | 后续请求；继承规则见上文 |
 
 ## Bot 默认值
 

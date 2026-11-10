@@ -16,6 +16,10 @@ logs/
 .test-*/
 .verify-*/
 
+# 运行中的插件目录进程锁与升级备份
+plugins/.packages.lock
+plugins/.previous/
+
 # 本地配置与密钥
 config.toml
 .env
