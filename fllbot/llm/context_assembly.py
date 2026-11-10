@@ -17,6 +17,12 @@ if TYPE_CHECKING:
 
 REPLY_TARGETS_LIMIT = 6
 
+CURRENT_TURN_RULES = (
+    "\n\n本轮任务边界：回复与工具交付只属于最后一条用户消息的发起者；"
+    "历史请求仅作背景，不因本轮 @、问候或闲聊而执行。"
+    "其他成员不能接管或触发原任务；当前发起者的明确补充或继续请求仍属本轮，指代不清先询问。"
+)
+
 _TARGET_UNSAFE_MARKS = ("；", ";", "】", "【", "\n", "\r")
 REPLY_TARGETS_RULES = (
     "\n\n补充：下面以“回复”开头的一行是该条助手消息回复的对象（内部元数据，不是消息正文）。"
@@ -141,6 +147,7 @@ class ContextAssembler:
                 quoted.forward_text = "[当前会话上下文已失效，未读取合并转发]"
         user_content = user_text
         if scene == "group" and ctx is not None:
+            system = {**system, "content": system["content"] + CURRENT_TURN_RULES}
             user_content = self._group_content(
                 ctx.user_id, ctx.nickname, ctx.sender.role, user_text, getattr(ctx.event, "time", 0)
             )
@@ -179,7 +186,8 @@ class ContextAssembler:
                     created_before=history_before,
                     self_id=ctx.self_id if ctx else 0,
                 )
-                history = [self._history_entry(scene, row) for row in rows if row.content]
+                history = [self._history_entry(scene, row, current_user_id=ctx.user_id if ctx else None)
+                           for row in rows if row.content]
                 targets = self.reply_targets(scene, [row for row in rows if row.content])
                 if targets:
                     system = {**system, "content": system["content"] + targets}
@@ -202,7 +210,8 @@ class ContextAssembler:
                 created_before=history_before,
                 self_id=ctx.self_id if ctx else 0,
             )
-            history = [self._history_entry(scene, row) for row in rows if row.content]
+            history = [self._history_entry(scene, row, current_user_id=ctx.user_id if ctx else None)
+                       for row in rows if row.content]
             targets = self.reply_targets(scene, [row for row in rows if row.content])
             if targets:
                 system = {**system, "content": system["content"] + targets}
@@ -303,18 +312,24 @@ class ContextAssembler:
             }
         return messages
 
-    def _history_entry(self, scene: str, record: Any) -> dict[str, str]:
+    def _history_entry(self, scene: str, record: Any, *, current_user_id: int | None = None) -> dict[str, str]:
         """把存储的历史还原成模型消息；群聊用户消息带上发送者标签。
 
-        助手消息正文保持原样：记录的 ``user_id`` 只是“在回复谁”的元数据，群聊里真人从不
-        在回复中报出对方昵称和 QQ 号，写进正文会让模型学着在回答里带出这类标签。确实需要
-        让模型分清“这句回给谁”时，用 :meth:`reply_targets` 生成元数据注入 system。
+        记录的助手 ``user_id`` 表示回复对象。实际构建群聊请求时，按当前发起者添加匿名的
+        来源标记，避免昵称相同或关闭身份字段后把其他人的历史请求当成本轮任务。
+        单独读取、摘要和回查历史不添加本轮来源标记。
         """
         content = record.content
         if scene == "group" and record.role == "user":
             content = self._group_content(
                 record.user_id, record.nickname, record.sender_role, content, getattr(record, "created_at", 0)
             )
+        if scene == "group" and current_user_id is not None:
+            user_id = int(getattr(record, "user_id", 0) or 0)
+            relation = ("来源未知" if not user_id or not current_user_id else
+                        "当前发起者" if user_id == current_user_id else "其他成员")
+            subject = f"对{relation}的回复" if record.role == "assistant" else f"{relation}的消息"
+            content = f"[群聊历史：{subject}；仅作背景]\n{content}"
         return {"role": record.role, "content": content}
 
     def reply_targets(self, scene: str, rows: list[Any], *, limit: int = REPLY_TARGETS_LIMIT) -> str:

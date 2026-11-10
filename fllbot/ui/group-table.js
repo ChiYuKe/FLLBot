@@ -160,7 +160,7 @@ function saveGroupTableField(groupId, key, value) {
   document.getElementById('groups-refresh').disabled = true;
   request('/api/console/groups/' + groupId+groupContextQuery(), {method:'PATCH',headers:groupVersionHeaders(original),body:payload}).then(function (result) {
     groupTableData.set(groupId,result);
-    document.getElementById('group-table-notice').textContent = '已保存'; loadedPages.delete('readiness');
+    document.getElementById('group-table-notice').textContent = key === 'persona' ? '人格已保存，将用于后续新消息；正在处理的任务保留原设定。' : '已保存'; loadedPages.delete('readiness');
   }).catch(function (error) { document.getElementById('group-table-notice').textContent = '保存失败：' + error.message; }).finally(function () {
     groupTableBusy = false; document.getElementById('groups-refresh').disabled = false;
     renderGroupTableRows(); refreshSelectControls();

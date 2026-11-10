@@ -113,3 +113,50 @@ async def test_duplicate_ids_are_rejected_before_execution():
         ctx=ctx(), agent=True, execute=execute)
     assert result.reason == 'invalid_tool_call'
     execute.assert_not_awaited()
+
+
+async def test_plain_chat_keeps_tools_visible_without_extra_summary_request():
+    definitions = [{'type': 'function', 'function': {'name': 'text__send_markdown_file', 'parameters': {}}}]
+    messages = [{'role': 'system', 'content': 'policy'},
+                {'role': 'assistant', 'content': '刚刚整理好的说明'},
+                {'role': 'user', 'content': '好的，谢谢'}]
+    complete = AsyncMock(return_value=SimpleNamespace(text='不客气', tool_calls=[]))
+    budget = AsyncMock()
+    execute = AsyncMock()
+    result = await AgentRuntime(complete, budget).run(messages, scene='group', scene_id=123,
+        ctx=ctx(), agent=True, tools=definitions, execute=execute)
+    assert result.text == '不客气'
+    complete.assert_awaited_once()
+    budget.assert_not_awaited()
+    execute.assert_not_awaited()
+    assert complete.call_args.kwargs['tools'] == definitions
+    assert complete.call_args.args[0][1]['content'] == '刚刚整理好的说明'
+
+
+@pytest.mark.parametrize('failed_result', ['{"error":"tool_uncertain"}', '{"sent":false}',
+                                         '{"error":"invalid_arguments"}'])
+async def test_mixed_delivery_batch_reports_failure_without_replaying_success(failed_result):
+    calls = [{'id': 'ok', 'function': {'name': 'send_image', 'arguments': '{}'}},
+             {'id': 'bad', 'function': {'name': 'send_file', 'arguments': '{}'}}]
+    complete = AsyncMock(side_effect=[SimpleNamespace(text='', tool_calls=calls),
+                                      SimpleNamespace(text='图片已发送，文件尚未完成。', tool_calls=[])])
+    execute = AsyncMock(side_effect=[('{"sent":true,"silent":true}', True), (failed_result, False)])
+    messages = [{'role': 'user', 'content': '把说明发成图片和文件'}]
+    result = await AgentRuntime(complete).run(messages, scene='group', scene_id=123,
+        ctx=ctx(), agent=True, execute=execute)
+    assert result.text == '图片已发送，文件尚未完成。'
+    assert execute.await_count == 2 and complete.await_count == 2
+    assert [call.args[1] for call in execute.await_args_list] == ['send_image', 'send_file']
+    assert [message['tool_call_id'] for message in messages if message['role'] == 'tool'] == ['ok', 'bad']
+    reminders = [message for message in messages if message.get('_fllbot_source', {}).get('kind') == 'tool_failure']
+    assert len(reminders) == 1 and '不要重做' in reminders[0]['content']
+
+
+async def test_all_successful_deliveries_still_finish_without_extra_model_request():
+    complete = AsyncMock(return_value=SimpleNamespace(text='', tool_calls=[
+        {'id': 'ok', 'function': {'name': 'send', 'arguments': '{}'}}]))
+    execute = AsyncMock(return_value=('{"sent":true,"silent":true}', True))
+    result = await AgentRuntime(complete).run([], scene='group', scene_id=123,
+        ctx=ctx(), agent=True, execute=execute)
+    assert result.reason == 'tool_completed'
+    complete.assert_awaited_once()

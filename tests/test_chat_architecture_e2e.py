@@ -83,8 +83,9 @@ async def test_raw_events_link_trigger_turn_model_tool_and_partial_delivery(tmp_
                 ctx = Context(bot,connections[account],parse_event(following))
                 context = await bot.chat.build_messages('group',20002,ctx.text,ctx=ctx)
                 projected = [message['content'] for message in context if message['role']=='assistant']
+                stripped = [content.split('\n',1)[1] if content.startswith('[群聊历史：') else content for content in projected]
                 assert len(projected) == len(expected)
-                assert projected == expected
+                assert stripped == expected
                 assert not any('30003' in actual or '回复对象' in actual for actual in projected)
                 assert not any('INPUT_11' in str(message['content']) for message in context)
         assert 'INPUT_' not in str(await bot.storage.list_turns())

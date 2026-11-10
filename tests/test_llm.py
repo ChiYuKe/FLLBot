@@ -101,7 +101,8 @@ async def test_second_turn_includes_history(llm_bot) -> None:
     second = captured[1]["messages"]
     roles = [item["role"] for item in second]
     assert roles == ["system", "user", "assistant", "user"]
-    assert second[1]["content"] == "测试用户(30003，成员)：第一句"
+    assert second[1]["content"] == "[群聊历史：当前发起者的消息；仅作背景]\n测试用户(30003，成员)：第一句"
+    assert second[2]["content"] == "[群聊历史：对当前发起者的回复；仅作背景]\n嗯嗯"
     assert second[3]["content"] == "测试用户(30003，成员)：第二句"
 
 
@@ -115,7 +116,7 @@ async def test_group_history_labels_each_sender(llm_bot) -> None:
     await llm_bot.chat.respond(Context(bot=llm_bot, connection=FakeConnection(), event=second), "第二句")  # type: ignore[arg-type]
 
     messages = captured[1]["messages"]
-    assert messages[1] == {"role": "user", "content": "小明(30003，管理员)：第一句"}
+    assert messages[1] == {"role": "user", "content": "[群聊历史：其他成员的消息；仅作背景]\n小明(30003，管理员)：第一句"}
     assert messages[3] == {"role": "user", "content": "小红(40004，成员)：第二句"}
 
 
@@ -140,7 +141,7 @@ async def test_reply_targets_are_metadata_not_body(llm_bot) -> None:
 
     messages = captured[1]["messages"]
     assistant = [item for item in messages if item["role"] == "assistant"]
-    assert assistant == [{"role": "assistant", "content": "好"}]
+    assert assistant == [{"role": "assistant", "content": "[群聊历史：对其他成员的回复；仅作背景]\n好"}]
     system = messages[0]["content"]
     assert "倒数第 1 条助手消息：回复" in system
     # 回复对象只应作为元数据出现在 system 里，历史正文不得复述昵称或 QQ 号。

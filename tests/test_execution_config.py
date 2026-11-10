@@ -81,7 +81,10 @@ async def test_model_context_uses_frozen_config_but_authorization_is_live(tmp_pa
         await task
         assert captured['model'] == 'old-model'
         assert captured['max_tokens'] == old_tokens
-        assert captured['messages'][0]['content'] == 'old persona'
+        system = captured['messages'][0]['content']
+        assert system.startswith('old persona')
+        assert 'new persona' not in system
+        assert '本轮任务边界' in system
         assert captured['allowed'] is False
         assert bot.chat.client.config.model == 'new-model'
         assert bot.chat.execution_config is bot.config

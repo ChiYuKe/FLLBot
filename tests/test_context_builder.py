@@ -1,3 +1,4 @@
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import httpx
@@ -6,6 +7,21 @@ from fllbot.app import create_app
 from fllbot.llm.chat import ChatReply
 from fllbot.llm.context_builder import ContextBuilder
 from helpers import make_bot
+
+
+async def test_quote_provenance_stays_with_current_message_when_plugin_policies_are_present():
+    assemble = AsyncMock(return_value=[{'role': 'system', 'content': 'persona'},
+                                      {'role': 'user', 'content': '把这个发成文件'}])
+    config = SimpleNamespace(model_dump_json=lambda: '{}')
+    context = SimpleNamespace(self_id=11, quoted_message=SimpleNamespace(
+        message_id=42, user_id=99, error=''), forward_metadata={})
+    builder = ContextBuilder(assemble, lambda: config, lambda *args: ('default', 'model'))
+    snapshot = await builder.build('group', 123, '把这个发成文件', ctx=context,
+        agent_instructions=[{'source': 'text__file_delivery', 'text': 'file rules'}])
+    sources = snapshot.sources()
+    current = next(source for source in sources if source['kind'] == 'current')
+    assert current['index'] == 1 and current['quote']['message_id'] == 42
+    assert all('quote' not in source for source in sources if source['kind'] == 'plugin_instruction')
 
 
 async def test_snapshot_is_independent_and_has_fixed_cutoff(tmp_path):
