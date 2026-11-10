@@ -52,6 +52,10 @@ def render(
     if not 16 <= font_size <= 48 or not 400 <= width <= 1600:
         raise ValueError("字号须为 16–48，图片宽度须为 400–1600")
     font = load_font(font_path, font_size)
+    if format == "tree":
+        from .tree_render import render_tree
+
+        return render_tree(text, font, width)
     if format == "markdown":
         from .markdown_render import render_markdown
 

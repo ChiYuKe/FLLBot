@@ -9,6 +9,14 @@ from pathlib import Path
 
 
 def code_rows(source: str, language: str, body_font, width: int):
+    from .tree_render import is_tree, tree_rows
+
+    if language.strip() in {"tree", "directory"} or (
+        language.strip() in {"", "text", "plaintext"} and is_tree(source)
+    ):
+        yield from tree_rows(source, body_font, width)
+        return
+
     from PIL import Image, ImageDraw, ImageFont
     from pygments import lex
     from pygments.lexers import TextLexer, get_lexer_by_name

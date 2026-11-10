@@ -1,0 +1,29 @@
+ChiYuKe/ONI-Mods · 仓库结构
+master · C# · GPL-3.0
+ONI-Mods/
+├── NOIMods.sln  全仓解决方案（32 个项目）
+├── README.md  Mod 列表、安装与技术细节
+├── StorageNetwork/  储存网络核心，367 个文件
+│   ├── API/  StorageNetworkApi、UiAccess、PanelHeaderButton
+│   ├── Core/  生命周期、场景注册、成员关系与性能模式
+│   │   └── Components/  入网、过滤器状态与外部 API 桥接
+│   ├── Services/  库存、过滤、补给与转移
+│   │   ├── Inventory/  库存索引、内容索引、来源索引和世界库存镜像
+│   │   ├── Filters/  自动过滤、过滤配置、输入目标预测
+│   │   └── Transfer/  网络转移、过渡变更转移和端口请求建模
+│   ├── ProductionOrders/  生产订单、规划、提交、执行与保留规则
+│   ├── Buildings/  自动化、发电、传感、阀门与生产建筑
+│   ├── Patches/  Harmony 补丁
+│   └── UI/  Panel、PlanPreview、Input、WorldPanel
+├── StorageNetworkTrading/  市场、对话、人物、投资与报价
+├── StorageNetwork.Tests/  契约、运行时与回归检查
+├── SN_DuplicantGenetics/  附属模组
+├── CykModUtils/  共享工具库
+│   ├── Configuration/  JsonConfigStore
+│   ├── IO/  原子写入与根目录路径解析
+│   ├── Game/  资源、建筑、配方、复制人与网络
+│   └── Localization/  本地化字符串、语言包加载与游戏字串注册
+├── AutomaticHarvest/  自动收获
+├── MiniAge/  复制人年龄与特性
+├── OxygenConsumingPlant/  耗氧植物
+└── DebugUI/  游戏内调试工具

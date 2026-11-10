@@ -6,6 +6,9 @@
 | 工具 | 用途 |
 | --- | --- |
 | `text__render_image` | Markdown 或纯文本渲染成长图，自动分页并拼成一张图片发送到当前会话 |
+| `text__render_diagram` | 把 Mermaid flowchart 绘制成架构图/流程图 PNG 并发送到当前会话 |
+| `text__send_html_file` | 将 Markdown 排版为完整 HTML 网页，以 .html 附件发送；支持纯文本模式 |
+| `text__send_markdown_file` | 将原文保存为 UTF-8 .md 附件发送，保留换行、代码和 Markdown 符号 |
 | `text__statistics` | 字符、非空白字符、行、汉字与英文单词统计 |
 | `text__transform` | 空白清理、删除空行、按行去重/排序、大小写、NFKC 规范化 |
 | `text__replace` | 全部字面值替换，返回匹配次数 |
@@ -13,7 +16,64 @@
 | `text__codec` | UTF-8 Base64、URL 百分号、HTML 实体编解码 |
 
 例如向智能体说“把这段说明做成图片发出来”“这些名单按行去重”“美化这段 JSON”。
-除了图片工具会发送消息，其他工具仅返回处理结果给智能体。
+图片、架构图和两个文件工具会发送消息，其他工具仅返回处理结果给智能体。
+
+### 结构树
+
+结构树图片使用 `text__render_image` 的 `format=tree`：用 `├──`、`└──`、`│   ` 表达层级，
+目录名以 `/` 结尾，名称与说明用两个以上空格分隔。参考 GitHub Primer TreeView，使用紧凑层级、
+文件/目录图标、浅色目录分区和灰色说明；米白背景与深色标题保持一致。
+宽图采用固定说明列，窄图把说明移到名称下方，长名称与说明独立换行，不需要手动对齐或断行。
+Markdown 的 `tree` / `directory` 代码块也使用此排版；无语言或 `text` / `plaintext` 代码块中
+含至少两条标准树枝时自动识别。普通代码块继续使用原有代码排版。
+示例效果：[目录结构](../../../docs/images/layout-tree-preview.png)。
+
+### 架构图
+
+`text__render_diagram` 接受 Mermaid flowchart 子集，适合系统架构、模块关系、调用链和分层图：
+
+```text
+flowchart TD
+  subgraph 客户端
+    Web[Web 前端]
+    App[桌面客户端]
+  end
+  subgraph 服务
+    API[API 网关]
+    DB[(数据库)]
+  end
+  Web --> API
+  App -->|调用| API
+  API --> DB
+```
+
+支持 `flowchart`/`graph` 的 `TD`、`TB`、`LR`、`RL`（TB/BT 按纵向、RL 按横向处理）；
+节点 `A[矩形]`、`A(圆角)`、`A{判断}`、`A[(数据库)]`；连线 `-->`、`-.->`、`==>`、`---`；
+边标签 `-->|说明|` 与 `-- 说明 -->`；`subgraph 名称 … end` 分组可嵌套，`%%` 注释、
+`classDef`、`class`、`style`、`:::` 样式后缀会被忽略，代码围栏也会自动跳过。
+
+使用 ELK.js 的 compound layered 布局计算分组、节点、正交连线与边标签的位置，
+根据真实依赖关系排列节点；分组声明顺序不再被当成调用顺序。
+视觉参考 beautiful-mermaid：米白画布、纸白节点、低对比边框、柔和转角与少量绿色强调。
+节点以直接箭头连接，保留虚线、粗线和无向线语义；复杂标签完整换行，不改成编号索引。
+示例效果：[架构排版](../../../docs/images/layout-architecture-preview.png)。示例内容用于检查排版，未重新核验仓库。
+
+限制：源码最多 6000 字符、60 个节点、140 条连线，单图最大 3200×4800 像素；超限返回可执行的错误提示，
+不截断图形。中文字体与字号复用 `font_path` / `font_size` 配置。
+**架构图需要 Node.js 18+ 可从 PATH 调用**；ELK.js 0.12.1 已随包内置，无需 npm 安装。
+本地 Node 子进程只接收 JSON 图数据，25 秒超时；Pillow 绘制中文与 PNG。
+渲染不启动浏览器、不访问网络、不执行用户提供的 JavaScript。缺少 Node 时返回安装提示。
+普通文本图片和结构树仍只需 Python 依赖。发送沿用图片工具的会话失效检查与送达记录，结果不确定时不自动重发。
+
+设计与实现参考：[beautiful-mermaid](https://github.com/lukilabs/beautiful-mermaid)、
+[ELK.js](https://github.com/kieler/elkjs)、[Primer TreeView](https://primer.style/product/components/tree-view/)。
+例如“把这份说明转成 HTML 文件发我”“把上面的内容保存为 MD 文件，名字叫 使用说明.md”。
+文件工具需要在后台单独授权，沿用 text 插件与会话权限；支持当前群聊和私聊，不接受任意发送目标。
+可选 `filename` 指定附件名，默认 `document.html` / `document.md`；省略扩展名自动补齐，拒绝路径或不匹配扩展名。
+HTML 默认 `format=markdown`，支持标题、列表、表格和代码块；`format=plain` 原样展示文本。
+生成自带样式的 UTF-8 完整网页，不执行输入中的 HTML，不嵌入图片或加载外部资源，图片显示替代文字。
+MD 按 UTF-8 原样保存。附件直接通过内存 Base64 文件消息发送，不在插件源码目录留下临时文件；单个生成文件最多 2 MiB。
+发送沿用图片工具的会话失效检查与送达记录；结果不确定时不自动重发，也不会报告成功。
 智能体按场景决定是否发图片：短回复、简单列表、代码片段及仅需解释/总结时用普通文字；
 较长且层次清楚、放在聊天气泡里难读的内容（例如多个小节、粗体标签与多组项目符号）可排成图片。
 Markdown 符号本身不是转图理由；用户明确要图片时遵照用户要求。用户要简短总结时，直接提供总结。

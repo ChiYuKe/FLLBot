@@ -123,7 +123,7 @@ def test_repeated_code_glyphs_have_identical_pixel_shape_and_baseline():
 
 async def test_registration_and_loading(tmp_path):
     assert not plugin.handlers
-    assert len(plugin.ai_tools) == 6
+    assert len(plugin.ai_tools) == 9
     bot = build_bot(tmp_path)
     await bot.start()
     try:
@@ -207,3 +207,24 @@ async def test_image_tool_format_is_optional_and_plain_is_available(monkeypatch)
     await module.render_image(ctx, "# 标题", format="plain")
     assert spy.call_args.kwargs["format"] == "plain"
     assert module.image_parameters["required"] == ["text"]
+
+
+async def test_diagram_tool_renders_and_sends(monkeypatch):
+    module = importlib.import_module("fllbot.builtin_plugins.text.plugin")
+    sender = AsyncMock(return_value=True)
+    monkeypatch.setattr(module, "send_media_reply", sender)
+    ctx = SimpleNamespace(settings={})
+    source = "flowchart TD\n subgraph 服务\n A[入口] --> B[处理]\n end"
+
+    result = await module.render_diagram(ctx, source, "分层")
+
+    assert result == {"sent": True, "images": 1}
+    args, kwargs = sender.call_args
+    assert args[0] is ctx
+    assert args[2] == "分层"
+    assert kwargs == {"require_ai": True}
+    assert base64.b64decode(args[1][0].data["file"].removeprefix("base64://")).startswith(b"\x89PNG")
+    sender.reset_mock()
+    assert "error" in await module.render_diagram(ctx, "not a diagram")
+    sender.assert_not_called()
+    assert module.diagram_parameters["required"] == ["text"]

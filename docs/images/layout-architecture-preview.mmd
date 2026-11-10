@@ -1,0 +1,51 @@
+flowchart TD
+subgraph 游戏与框架层
+ONI[ONI 游戏程序集<br/>Unity]
+Harmony[Harmony 补丁框架]
+end
+subgraph 共享工具层
+Utils[CykModUtils<br/>日志 · 配置 · 本地化 · 诊断]
+end
+subgraph 储存网络核心 · StorageNetwork
+API[API 公开契约<br/>ApiVersion 1]
+Core[Core<br/>生命周期与场景]
+Services[Services<br/>库存 · 过滤 · 补给 · 转移]
+Orders[ProductionOrders<br/>生产订单]
+Buildings[Buildings<br/>建筑与端口]
+UI[UI<br/>面板与生产设置]
+Patches[Patches<br/>35 个补丁]
+end
+subgraph 附属模组
+Trading[StorageNetworkTrading<br/>交易扩展]
+Genetics[SN_DuplicantGenetics<br/>复制人遗传]
+Tests[StorageNetwork.Tests<br/>契约与回归验证]
+end
+subgraph 独立功能 Mod
+Mods[21 个功能 Mod]
+end
+subgraph 开发工具与示例
+Tools[DebugUI 等 9 个工具项目]
+end
+subgraph 构建与发布
+Solution[NOIMods.sln]
+Release[bin Release<br/>mods Dev]
+end
+ONI --> Harmony
+ONI --> Utils
+Harmony --> Patches
+Utils --> Core
+Utils --> Orders
+Services --> Core
+Core --> API
+Orders --> Services
+Buildings --> Services
+UI --> Orders
+Patches --> UI
+API --> Trading
+API --> Genetics
+API --> Tests
+Patches -.->|行为验证| Tests
+Utils --> Mods
+Mods --> Tools
+Solution --> Release
+Tools --> Release

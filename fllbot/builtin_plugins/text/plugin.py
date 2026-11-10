@@ -8,16 +8,38 @@ import base64
 from fllbot.llm.output import send_media_reply
 from fllbot.onebot.segments import MessageSegment
 from fllbot.plugin import Context, Plugin
+from fllbot.rendering.diagram_render import render_diagram as render_diagram_image
 from fllbot.rendering.text_image import join_pages as _join_pages
 
+from .file_export import export_file
 from .service import MAX_CHARS, process, render
 
 plugin = Plugin.from_manifest(__file__)
+plugin.agent_instruction(
+    "file_delivery", tools=["send_html_file", "send_markdown_file"],
+    text="用户要求 HTML 或 Markdown/MD 文件时，先整理完整内容，再调用对应文件工具一次发送附件。"
+    "HTML 文件默认将 Markdown 排版成完整网页；MD 文件保留 Markdown 原文。"
+    "不要把文件正文仅贴到聊天里代替附件；成功发送后只做简短提示，不重复全文。"
+    "失败或送达不确定时如实说明，不声称文件已发送，不自动重发。",
+)
 plugin.agent_instruction(
     'image_delivery', tools=['render_image'],
     text='用户要求图片时，先完成并整理答复，再对完整内容调用 render_image 一次；'
          '不要把草稿或逐段内容分次渲染。图片发送后不再重复图片中的长文。'
          '摘要默认控制在一页，用户明确要求详细分析时保留必要章节和细节。',
+)
+plugin.agent_instruction(
+    'tree_delivery', tools=['render_image'],
+    text='用户要求结构树或目录结构图片时，使用 render_image 的 format=tree。'
+         '使用标准 ├──、└──、│   树枝缩进，目录以 / 结尾，文件名与说明之间用两个以上空格分隔。'
+         '不要手动换行长文件名或用空格对齐说明，排版器会自动处理。',
+)
+plugin.agent_instruction(
+    "diagram_delivery", tools=["render_diagram"],
+    text="用户要求架构图、模块关系图、调用链、分层图或流程图时，先依据已确认的代码或资料整理层级与关系，"
+         "写成 Mermaid flowchart（每层用 subgraph，节点名保持简短，边按需加说明），再调用 render_diagram 一次绘制。"
+         "不要用 render_image 的代码块、ASCII 字符画或结构树代替架构图。"
+         "图内节点建议不超过 20 个；复杂系统按主题拆图，不要把所有细节塞进一张。发送后只做简短说明，不重复图内文字。",
 )
 plugin.setting(
     "font_path",
@@ -123,7 +145,7 @@ async def codec(ctx: Context, text: str, mode: str) -> dict:
     return await run("codec", text, mode=mode)
 
 
-image_parameters = schema(format=modes("markdown", "plain"))
+image_parameters = schema(format=modes("markdown", "plain", "tree"))
 image_parameters["required"] = ["text"]
 image_parameters["properties"]["format"]["default"] = "markdown"
 
@@ -133,18 +155,13 @@ image_parameters["properties"]["format"]["default"] = "markdown"
     effect="side_effecting",
     title="文本转图片",
     timeout=60,
-    description="将文本排版为 PNG 并发送到当前会话；自动换行分页（最多20页）。"
-    "是否调用由你结合用户意图和内容判断，不要因为文本含有 Markdown 符号就自动转图。"
-    "先在内部完成并整理完整答复，再对整段内容调用本工具一次；绝不要按段落/章节分次渲染，也不要把草稿、引用的原问题或代码片段单独做图。"
-    "工具发送图片后，最终聊天回复只留一句简短提示或补充，不要再复制一遍图片中的长文。"
-    "通常短回答、简单列表、代码片段、用户只是提问/要求解释或总结时直接文字回复。"
-    "当答复较长且层次明显，排版图片明显更易读时，可将整理后的答复排版成图片发送。"
-    "摘要或介绍默认先提炼重点并控制在一页；不要原样搬入整篇 README、长聊天记录或所有目录条目。"
-    "只有用户明确要求全文/详细版本时才生成多页，尽量不超过 2 页；更多内容先压缩或询问是否需要完整长图。"
-    "用户明确要求图片时优先按要求发送；用户只要求简短提炼时不要把长篇原文改成图片。"
-    "默认按 Markdown 排版，支持标题、加粗、列表、引用、代码块、表格及链接文字；"
-    "长篇技术分析或 Markdown 文档允许生成一张连续长图，最多 20 个排版页；保持章节、代码和解释完整，不擅自压缩成一页摘要。"
-    "需逐字显示 Markdown 符号时选择 format=plain。HTML 按原文显示，图片只显示说明，不加载外部资源。",
+    description="将完整答复排版为 PNG 长图并发送到当前会话。默认 format=markdown，支持标题、列表、引用、表格、代码块和链接文字；"
+    "结构树使用 format=tree，自动绘制树枝、区分目录、分列排版文件名与说明；Markdown 中的树形代码块也会自动美化。"
+    "format=plain 逐字显示原文。最多 20 个排版页，合成一张连续长图；表格最多 12 列。"
+    "图片显示替代文字，不加载本地或远程资源；HTML 按原文显示。"
+    "用户明确要图片时使用；普通短答、简单列表或代码片段直接文字回复。"
+    "先整理完整内容，一次调用，不发送草稿或逐段调用。摘要默认精炼；用户要求全文或详细版本时保持内容完整。"
+    "发送成功后不要再在聊天里重复图片中的长文。",
     parameters=image_parameters,
 )
 async def render_image(ctx: Context, text: str, format: str = "markdown") -> dict:
@@ -169,3 +186,97 @@ async def render_image(ctx: Context, text: str, format: str = "markdown") -> dic
     segments = [MessageSegment.image("base64://" + base64.b64encode(image_data).decode("ascii"))]
     sent = await send_media_reply(ctx, segments, text, require_ai=True)
     return {"sent": sent, "images": 1 if sent else 0, "pages_in_image": len(pages) if sent else 0}
+
+
+diagram_parameters = {
+    "type": "object",
+    "properties": {
+        "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 6000,
+            "description": "Mermaid flowchart 文本，例如 flowchart TD 后接节点与连线",
+        },
+        "title": {"type": "string", "maxLength": 120, "description": "可选图标题"},
+    },
+    "required": ["text"],
+    "additionalProperties": False,
+}
+
+
+@plugin.on_ai_tool(
+    "render_diagram",
+    effect="side_effecting",
+    title="绘制架构图",
+    timeout=60,
+    max_output_chars=2000,
+    description=(
+        "把 Mermaid flowchart 文本绘制成一张 PNG 架构图并发送到当前会话。"
+        "支持 flowchart TD/LR、节点 A[名称]/A(圆角)/A{判断}/A[(数据库)]、"
+        "连线 --> / -.-> / ==> / ---、边标签 -->|说明|、subgraph … end 分组（可嵌套）。"
+        "适合系统架构、模块关系、调用链和分层图。示例：flowchart TD\n"
+        "subgraph 前端\nWeb[Web]\nend\nWeb --> API[API]\nAPI --> DB[(数据库)]。"
+        "先整理完整图再调用一次；发送后不要重复图内文字。"
+    ),
+    parameters=diagram_parameters,
+)
+async def render_diagram(ctx: Context, text: str, title: str = "") -> dict:
+    settings = ctx.settings
+    try:
+        image_data = await asyncio.to_thread(
+            render_diagram_image,
+            text,
+            title=title,
+            font_path=str(settings.get("font_path") or ""),
+            font_size=int(settings.get("font_size", 24)),
+        )
+    except (ValueError, ImportError) as exc:
+        return {"error": "缺少图片渲染依赖，请更新安装 FLLBot" if isinstance(exc, ImportError) else str(exc)}
+    segments = [MessageSegment.image("base64://" + base64.b64encode(image_data).decode("ascii"))]
+    summary = title.strip() or "架构图"
+    sent = await send_media_reply(ctx, segments, summary, require_ai=True)
+    return {"sent": sent, "images": 1 if sent else 0}
+
+
+def file_parameters(*, html: bool = False) -> dict:
+    parameters = schema(filename={
+        "type": "string", "minLength": 1, "maxLength": 120,
+        "description": "可选附件名，仅文件名，不能包含路径；省略扩展名时自动补齐",
+    })
+    parameters["required"] = ["text"]
+    if html:
+        parameters["properties"]["format"] = {**modes("markdown", "plain"), "default": "markdown"}
+    return parameters
+
+
+async def send_document(ctx: Context, text: str, kind: str, filename: str, *, format: str = "markdown") -> dict:
+    try:
+        name, payload = await asyncio.to_thread(export_file, text, kind, filename, format=format)
+    except (ValueError, ImportError) as exc:
+        return {"error": "缺少 HTML 排版依赖，请更新安装 FLLBot" if isinstance(exc, ImportError) else str(exc)}
+    segments = [MessageSegment.file("base64://" + base64.b64encode(payload).decode("ascii"), name=name)]
+    sent = await send_media_reply(ctx, segments, text, require_ai=True)
+    return {"sent": sent, "files": 1 if sent else 0, "filename": name, "bytes": len(payload)}
+
+
+@plugin.on_ai_tool(
+    "send_html_file", title="文本转 HTML 文件", effect="side_effecting", timeout=60,
+    description="将完整文本转成 UTF-8 HTML 附件，发送到当前群聊或私聊。"
+    "默认将 Markdown 标题、列表、代码块和表格排版成可离线打开的完整网页；format=plain 原样显示文本。"
+    "不执行原始 HTML，不加载图片或其他外部资源。filename 可选，默认 document.html。"
+    "先整理完整内容再调用一次；成功后不要在聊天中重复文件全文。",
+    parameters=file_parameters(html=True),
+)
+async def send_html_file(ctx: Context, text: str, filename: str = "document.html", format: str = "markdown") -> dict:
+    return await send_document(ctx, text, "html", filename, format=format)
+
+
+@plugin.on_ai_tool(
+    "send_markdown_file", title="文本转 Markdown 文件", effect="side_effecting", timeout=60,
+    description="将完整 Markdown 或纯文本原样保存为 UTF-8 .md 附件，发送到当前群聊或私聊。"
+    "保留换行、代码和 Markdown 符号，不渲染、不摘要、不截断。filename 可选，默认 document.md。"
+    "先整理完整内容再调用一次；成功后不要在聊天中重复文件全文。",
+    parameters=file_parameters(),
+)
+async def send_markdown_file(ctx: Context, text: str, filename: str = "document.md") -> dict:
+    return await send_document(ctx, text, "md", filename)
