@@ -133,6 +133,38 @@ async def test_mention_after_wake_word_still_replies(tmp_path, monkeypatch):
         await bot.stop()
 
 
+@pytest.mark.parametrize(('recipient', 'text', 'modes', 'expected'), [
+    ('99999', '木鱼住哪里', ['at', 'prefix'], False),
+    ('99999', '木鱼住哪里', ['all'], False),
+    ('10001', '住哪里', ['at', 'prefix'], True),
+    (None, '木鱼，住哪里', ['at', 'prefix'], True),
+    (None, '他说木鱼住哪里', ['at', 'prefix'], False),
+    ('99999', '木鱼住哪里', ['at'], False),
+])
+async def test_quoted_reply_checks_real_leading_at_target(tmp_path, monkeypatch, recipient, text, modes, expected):
+    bot = await make_bot(tmp_path, llm={'enabled': True, 'api_key': 'fake', 'context_window': 8192})
+    try:
+        await bot.permissions.save_group(20002, enabled=True, config={'policy': {
+            'auto_group': True, 'trigger_modes': modes, 'cooldown_seconds': 0}})
+        complete = AsyncMock(return_value=SimpleNamespace(text='收到', tool_calls=[]))
+        monkeypatch.setattr(bot.chat, 'complete', complete)
+        connection = FakeConnection()
+        connection.nickname = '木鱼'
+        message = [{'type': 'reply', 'data': {'id': '888'}}, {'type': 'text', 'data': {'text': '  '}}]
+        if recipient:
+            message.append({'type': 'at', 'data': {'qq': recipient}})
+        message.append({'type': 'text', 'data': {'text': ' ' + text}})
+        # Quoted content is irrelevant to trigger matching; no protocol lookup is needed
+        # when the message is addressed to someone else.
+        await bot.dispatcher.dispatch(parse_event(group_message(text, message=message)), connection)
+        assert complete.await_count == int(expected)
+        assert len(connection.texts()) == int(expected)
+        if not expected:
+            assert not any(action == 'get_msg' for action, _ in connection.calls)
+    finally:
+        await bot.stop()
+
+
 @pytest.mark.parametrize(("mode", "text", "mention", "expected", "expected_content"), [
     ("at", "你好", None, False, ""),
     ("at", "你好", 10001, True, "测试用户(30003，成员)：你好"),

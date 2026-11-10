@@ -24,6 +24,10 @@ def _addressed_elsewhere(ctx: Any) -> bool:
     """消息以 @ 别人开头时，是在跟别人说话，不当作在叫 Bot。"""
     targets: list[str] = []
     for segment in ctx.message:
+        # QQ replies prepend a metadata segment before the actual @ recipient.
+        # It is not spoken content and must not hide an address to another member.
+        if segment.type == "reply":
+            continue
         if segment.type == "at":
             targets.append(str(segment.get("qq")))
             continue

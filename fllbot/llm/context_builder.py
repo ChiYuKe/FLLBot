@@ -79,7 +79,8 @@ class ContextBuilder:
             sources.append({'index': 0, 'kind': 'plugin_instruction', 'source': item['source']})
         if ctx is not None and ctx.quoted_message is not None:
             quote = ctx.quoted_message
-            sources[-1]['quote'] = {'message_id':quote.message_id,'user_id':quote.user_id,'error':quote.error}
+            current_source = next(item for item in sources if item['index'] == len(messages)-1)
+            current_source['quote'] = {'message_id':quote.message_id,'user_id':quote.user_id,'error':quote.error}
         if ctx is not None and ctx.forward_metadata:
             sources.append({'index':len(messages)-1,'self_id':ctx.self_id,'scene':scene,'scene_id':scene_id,
                             **ctx.forward_metadata})
