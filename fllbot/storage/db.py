@@ -15,9 +15,13 @@ from .backup import DatabaseFileLock, create_backup
 from .locking import SettingsLock
 from .memory import GroupMemoryStore
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 
 MIGRATIONS: dict[int, list[str]] = {
+    26: [
+        "ALTER TABLE chat_messages ADD COLUMN images TEXT NOT NULL DEFAULT '[]'",
+        "ALTER TABLE group_memory_messages ADD COLUMN images TEXT NOT NULL DEFAULT '[]'",
+    ],
     25: ['ALTER TABLE llm_usage ADD COLUMN cached_prompt_tokens INTEGER'],
     24: [
         """CREATE TABLE agent_progress(id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -286,12 +290,14 @@ class ChatRecord(tuple):
         nickname: str = "",
         sender_role: str = "",
         created_at: float = 0,
+        images: list[str] | None = None,
     ) -> ChatRecord:
         record = super().__new__(cls, (role, content))
         record.user_id = int(user_id or 0)
         record.nickname = nickname or ""
         record.sender_role = sender_role or ""
         record.created_at = float(created_at or 0)
+        record.images = list(images or [])
         return record
 
     @property
@@ -1119,9 +1125,10 @@ class Storage:
                         and self.scope_current(row['self_id'],row['scene'],row['scene_id'],
                                                json.loads(row['metadata'] or '{}').get('scope_epoch'))):
                     await self.db.execute(
-                        "INSERT INTO chat_messages(self_id,scene,scene_id,role,content,created_at,user_id) "
-                        "VALUES (?,?,?,'assistant',?,?,?)",
-                        (row['self_id'], row['scene'], row['scene_id'], row['content'], time.time(),metadata.get('user_id', 0)))
+                        "INSERT INTO chat_messages(self_id,scene,scene_id,role,content,created_at,user_id,images) "
+                        "VALUES (?,?,?,'assistant',?,?,?,?)",
+                        (row['self_id'], row['scene'], row['scene_id'], row['content'], time.time(),metadata.get('user_id', 0),
+                         json.dumps(metadata.get('images', []) if index == 0 else [])))
                 await self.db.commit()
             except BaseException:
                 await self.db.rollback()
@@ -1139,6 +1146,7 @@ class Storage:
         user_id: int = 0,
         nickname: str = "",
         sender_role: str = "",
+        images: list[str] | None = None,
         generation: int | None = None,
         account_epoch: int | None = None,
         scope_epoch: int | None = None,
@@ -1153,8 +1161,8 @@ class Storage:
                 if generation is not None and generation != self.conversation_generation:
                     return
                 await self.db.execute(
-                    "INSERT INTO chat_messages (scene, scene_id, role, content, user_id, nickname, sender_role, created_at, self_id) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    "INSERT INTO chat_messages (scene, scene_id, role, content, user_id, nickname, sender_role, created_at, self_id, images) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         scene,
                         int(scene_id),
@@ -1165,6 +1173,7 @@ class Storage:
                         str(sender_role or "")[:20],
                         time.time(),
                         int(self_id or 0),
+                        json.dumps(images or []),
                     ),
                 )
                 await self.db.commit()
@@ -1183,7 +1192,7 @@ class Storage:
         self_id: int = 0,
     ) -> list[ChatRecord]:
         query = (
-            "SELECT role, content, user_id, nickname, sender_role, created_at FROM chat_messages "
+            "SELECT role, content, user_id, nickname, sender_role, created_at, images FROM chat_messages "
             "WHERE scene = ? AND scene_id = ? AND self_id = ?"
         )
         params: list[Any] = [scene, int(scene_id), int(self_id or 0)]
@@ -1205,6 +1214,7 @@ class Storage:
                 nickname=row["nickname"] or "",
                 sender_role=row["sender_role"] or "",
                 created_at=row["created_at"],
+                images=json.loads(row["images"]),
             )
             for row in reversed(rows)
         ]

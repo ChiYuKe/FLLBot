@@ -131,6 +131,11 @@ class GroupMemory:
 
     async def observe(self, ctx: Any) -> None:
         """Capture only when receive-time and commit-time policy both allow it."""
+        from ..history_images import input_images
+
+        if not self.eligible(ctx):
+            return
+        images = await input_images(ctx)
         async with self.bot.storage.settings_lock:
             async with self.bot.storage.data_lock:
                 if not self.eligible(ctx):
@@ -138,13 +143,15 @@ class GroupMemory:
                 ctx.memory_message_id = await self.store.append(
                     ctx.self_id,ctx.group_id,'user',ctx.text or ctx.readable,created_at=time.time(),
                     user_id=ctx.user_id,nickname=ctx.nickname,sender_role=ctx.sender.role,source_id=ctx.message_id,
+                    images=images,
                     generation=ctx.data_epoch,account_epoch=ctx.received.account_epoch,scope_epoch=ctx.received.scope_generation)
 
-    async def reply(self, ctx: Any, text: str) -> None:
+    async def reply(self, ctx: Any, text: str, *, images: list[str] | None = None) -> None:
         async with self.bot.storage.settings_lock:
             async with self.bot.storage.data_lock:
                 if self.enabled(ctx) and ctx.memory_message_id and text:
                     await self.store.append(ctx.self_id,ctx.group_id,'assistant',text,created_at=time.time(),
+                        images=images,
                         user_id=ctx.user_id,nickname=ctx.nickname,source_id=ctx.message_id or 0,
                         generation=ctx.data_epoch,account_epoch=ctx.received.account_epoch,scope_epoch=ctx.received.scope_generation)
 
@@ -156,8 +163,9 @@ class GroupMemory:
                     await self.store.save_summary(ctx.self_id,ctx.group_id,batch,privacy,topics,
                         generation=ctx.data_epoch,account_epoch=ctx.received.account_epoch,scope_epoch=ctx.received.scope_generation)
 
-    def entry(self, row: dict) -> dict[str, str]:
-        return self.bot.chat._history_entry("group", SimpleNamespace(**row))
+    def entry(self, row: dict, *, current_user_id: int | None = None) -> dict[str, str]:
+        return self.bot.chat.context_assembler._history_entry(
+            "group", SimpleNamespace(**row), current_user_id=current_user_id)
 
     async def build(self, ctx: Any, system: dict, user: dict, *, images: list[str] | None = None) -> list[dict]:
         now = time.time()
@@ -195,7 +203,8 @@ class GroupMemory:
         raw_chars = char_remaining - min(2000, char_remaining // 4)
         selected = []
         for row in reversed(recent):
-            entry = {**self.entry(row),'_fllbot_source':{'kind':'memory','message_id':row['id']}}
+            entry = {**self.entry(row, current_user_id=ctx.user_id),
+                     '_fllbot_source':{'kind':'memory','message_id':row['id']}}
             size = len(entry["content"].encode("utf-8")) + 16
             if size > raw_remaining or len(entry["content"]) > raw_chars:
                 if selected or raw_remaining < 200 or raw_chars < 100:

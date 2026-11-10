@@ -50,12 +50,16 @@ class ReplyService:
               message_id: int, user_id: int, options: Any, default_chunk_size: int,
               nickname: str = 'FLLBot') -> ReplyPlan:
         chunks = split_text(text, options.reply_chunk_size or default_chunk_size)
-        forward = options.reply_mode == 'forward' or (options.reply_mode == 'auto' and len(text)>=options.forward_threshold)
+        image = options.reply_mode == 'image' or (
+            options.reply_mode == 'auto_image' and len(text) >= options.forward_threshold)
+        forward = options.reply_mode == 'forward' or (
+            options.reply_mode == 'auto' and len(text) >= options.forward_threshold)
+        mode = 'image' if image else 'forward' if forward else 'split'
         parts = tuple(ReplyPart(index+int(forward),chunk,
                                 message_id if options.quote_reply and index==0 else 0,
                                 user_id if options.at_sender and scene=='group' and index==0 else 0)
                       for index,chunk in enumerate(chunks))
-        return ReplyPlan(turn_id,self_id,scene,scene_id,'forward' if forward else 'split',text,parts,
+        return ReplyPlan(turn_id,self_id,scene,scene_id,mode,text,parts,
                          nickname,options.reply_interval_ms)
 
 def split_text(text: str, size: int) -> list[str]:

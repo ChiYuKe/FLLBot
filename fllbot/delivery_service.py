@@ -10,6 +10,7 @@ from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any
 
 from .delivery_policy import delivery_allowed
+from .history_images import snapshot_images
 from .onebot.connection import ActionError, confirmed_message_id
 from .onebot.segments import MessageSegment, as_segments
 
@@ -133,10 +134,13 @@ class DeliveryService:
                             raise
             return await self.storage.turn_detail(turn_id)
 
-    async def _after_sent(self, ctx, text):
+    async def _after_sent(self, ctx, text, images=None):
         if self.after_sent is not None:
             try:
-                await self.after_sent(ctx, text)
+                if images:
+                    await self.after_sent(ctx, text, images=images)
+                else:
+                    await self.after_sent(ctx, text)
             except Exception as exc:
                 logging.getLogger('fllbot.delivery').warning('送达后记忆写入失败：%s',type(exc).__name__)
 
@@ -163,10 +167,12 @@ class DeliveryService:
         if self.project_input is not None:
             await self.project_input(ctx)
         segments = getattr(ctx, 'targeted_segments', as_segments)(segments)
+        images = await snapshot_images(segments)
         delivery_id = uuid.uuid4().hex
         store = self.storage
         metadata = {
             "mode": "media",
+            "images": images,
             "format_version": 1,
             "part_segments": {"0": [segment.to_dict() for segment in segments]},
             "scope_epoch": ctx.received.scope_generation,
@@ -205,7 +211,39 @@ class DeliveryService:
         await store.update_delivery(
             delivery_id, 0, "sent", message_id=message_id
         )
-        await self._after_sent(ctx, content)
+        await self._after_sent(ctx, content, images=images)
+        return True
+
+    async def _send_image_reply(
+        self, ctx: Context, plan: Any, text: str, *, require_ai: bool = True
+    ) -> bool:
+        """Send the whole reply as one image; False means rendering failed before sending."""
+        if not self.allowed(ctx, require_ai):
+            return True
+        if self.image_renderer is None:
+            ctx.trace_event("send", "reply_image_failed", "failed", "renderer_unavailable")
+            return False
+        try:
+            image = await asyncio.to_thread(self.image_renderer, text)
+            if not isinstance(image, bytes) or not image:
+                raise ValueError("empty_reply_image")
+        except Exception as exc:
+            ctx.trace_event("send", "reply_image_failed", "failed", type(exc).__name__)
+            logging.getLogger("fllbot.delivery").warning(
+                "回复转图片失败，改用文本发送：%s", type(exc).__name__
+            )
+            return False
+        if not self.allowed(ctx, require_ai):
+            return True
+        prefix = [segment for segment in plan.parts[0].segments() if segment.type in {"reply", "at"}]
+        if any(segment.type == "at" for segment in prefix):
+            prefix.append(MessageSegment.text(" "))
+        await self._send_media(
+            ctx,
+            [*prefix, MessageSegment.image("base64://" + base64.b64encode(image).decode("ascii"))],
+            text,
+            require_ai=require_ai,
+        )
         return True
 
     async def _send_text(self, ctx: Context, text: str, *, require_ai: bool = True) -> None:
@@ -228,6 +266,29 @@ class DeliveryService:
         chunks = [part.text for part in plan.parts]
         if not chunks:
             return
+        options = ctx.reply_settings or ctx.config.chat
+        if plan.mode == "image":
+            if await self._send_image_reply(ctx, plan, text, require_ai=require_ai):
+                return
+            # Rendering failed before any protocol call. Reuse the ordinary
+            # long-reply path so the complete answer is still delivered.
+            plan = self.replies.build(
+                text,
+                turn_id=ctx.turn_id,
+                self_id=ctx.self_id,
+                scene="group" if ctx.is_group else "private",
+                scene_id=ctx.group_id if ctx.is_group else ctx.user_id,
+                message_id=ctx.message_id,
+                user_id=ctx.user_id,
+                options=options.model_copy(
+                    update={"reply_mode": "forward" if len(text) >= options.forward_threshold else "split"}
+                ),
+                default_chunk_size=ctx.reply_default_chunk_size or ctx.config.llm.chunk_size,
+                nickname=getattr(ctx.connection, "nickname", "") or "FLLBot",
+            )
+            chunks = [part.text for part in plan.parts]
+            if not chunks:
+                return
         use_forward = plan.mode == "forward"
         target_segments = getattr(ctx, 'targeted_segments', as_segments)
         delivery_id = uuid.uuid4().hex

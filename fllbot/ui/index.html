@@ -79,11 +79,11 @@
       <div class="setting-field"><label for="chat-memory-context-chars">上下文预算（字符）</label><input id="chat-memory-context-chars" type="number" min="4000" max="1000000" step="1000"><small>默认 400000。超过条数或预算时压缩较早原文，仍受模型窗口约束。关闭记忆后沿用模型设置中的历史限制。</small></div>
     </div></section>
     <section class="chat-settings-group chat-settings-output" aria-labelledby="chat-heading-output"><div class="chat-section-heading"><h3 id="chat-heading-output">回复输出</h3><p>选择发送方式和分段节奏。</p></div><div class="chat-field-grid">
-      <div class="setting-field chat-span"><label for="chat-reply-mode">发送方式</label><select id="chat-reply-mode"><option value="auto">自动 · 长回复转聊天记录</option><option value="forward">始终使用聊天记录</option><option value="split">普通消息 · 自动分段</option></select><small>支持群聊与私聊；聊天记录发送失败时自动改为分段消息。</small></div>
-      <div class="setting-field" id="chat-threshold-field"><label for="chat-forward-threshold">转聊天记录阈值（字）</label><input id="chat-forward-threshold" type="number" min="200" max="20000" step="100"></div>
+      <div class="setting-field chat-span"><label for="chat-reply-mode">发送方式</label><select id="chat-reply-mode"><option value="auto_image">自动 · 长回复转图片</option><option value="auto">自动 · 长回复转聊天记录</option><option value="image">始终使用图片</option><option value="forward">始终使用聊天记录</option><option value="split">普通消息 · 自动分段</option></select><small>长回复默认整理成一张图片，避免刷屏；可改为聊天记录、普通分段或始终发送图片。</small></div>
+      <div class="setting-field" id="chat-threshold-field"><label for="chat-forward-threshold">长回复阈值（字）</label><input id="chat-forward-threshold" type="number" min="200" max="20000" step="100"><small>达到该字数后按所选的自动方式整理；图片生成失败时自动改发文本。</small></div>
       <div class="setting-field"><label for="chat-reply-chunk-size">每段长度（字）</label><input id="chat-reply-chunk-size" type="number" min="0" max="5000" placeholder="0：沿用模型设置"><small>0 沿用模型设置。</small></div>
       <div class="setting-field"><label for="chat-reply-interval-ms">分段间隔（毫秒）</label><input id="chat-reply-interval-ms" type="number" min="0" max="5000" step="50"></div>
-      <div class="setting-field chat-output-flags chat-span"><label><input id="chat-quote_reply" type="checkbox"> 引用原消息</label><label><input id="chat-at_sender" type="checkbox"> @ 发送者</label><small>仅普通消息首段生效，避免连续提醒。</small></div>
+      <div class="setting-field chat-output-flags chat-span"><label><input id="chat-quote_reply" type="checkbox"> 引用原消息</label><label><input id="chat-at_sender" type="checkbox"> @ 发送者</label><small>对普通分段与图片生效，仅作用于首条，避免连续提醒。</small></div>
     </div></section>
 
 

@@ -17,6 +17,7 @@ def test_chat_options_require_auth_and_survive_restart(tmp_path: Path):
     with TestClient(create_app(build_bot(tmp_path))) as client:
         assert client.get('/api/console/chat').status_code == 401
         options = client.get('/api/console/chat', headers=AUTH).json()
+        assert options['reply_mode'] == 'auto_image'
         options.update(send_nickname=False, send_time=True, allow_images=True, read_forward=True, wake_word='bot', wake_only_mode='raw', wake_only_replies=['我在', '怎么啦'])
         assert client.put('/api/console/chat', headers=AUTH, json=options).status_code == 200
     with TestClient(create_app(build_bot(tmp_path))) as client:
@@ -31,7 +32,9 @@ async def test_disabled_metadata_is_removed_from_current_and_history(tmp_path: P
         await bot.storage.add_chat_message('group', 20002, 'user', '历史正文', user_id=40004, nickname='历史昵称', sender_role='admin', self_id=10001)
         ctx = Context(bot=bot, connection=FakeConnection(), event=parse_event(group_message('当前正文', nickname='当前昵称')))
         messages = await bot.chat.build_messages('group', 20002, '当前正文', ctx=ctx)
-        assert [m['content'] for m in messages[1:]] == ['历史正文', '当前正文']
+        assert messages[1]['content'] == '[群聊历史：其他成员的消息；仅作背景]\n历史正文'
+        assert messages[-1]['content'] == '当前正文'
+        assert '40004' not in str(messages) and '历史昵称' not in str(messages)
         assert all(value == '' for key, value in bot.chat._variables('group', 20002, ctx).items() if key in {'user_id', 'user_name', 'nickname', 'time', 'date', 'weekday'})
         await bot.update_config({'chat': {'send_nickname': True, 'send_time': True}})
         messages = await bot.chat.build_messages('group', 20002, '当前正文', ctx=ctx)

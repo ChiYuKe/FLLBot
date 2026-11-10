@@ -22,6 +22,7 @@ class GroupMemoryStore:
         nickname: str = "",
         sender_role: str = "",
         source_id: int = 0,
+        images: list[str] | None = None,
         generation: int | None = None,
         account_epoch: int | None = None,
         scope_epoch: int | None = None,
@@ -36,8 +37,8 @@ class GroupMemoryStore:
                     return 0
                 cursor = await self.storage.db.execute(
                     "INSERT OR IGNORE INTO group_memory_messages "
-                    "(self_id,group_id,role,content,user_id,nickname,sender_role,source_id,created_at) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (self_id, group_id, role, content, user_id, nickname[:120], sender_role[:20], source_id, created_at),
+                    "(self_id,group_id,role,content,user_id,nickname,sender_role,source_id,created_at,images) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (self_id, group_id, role, content, user_id, nickname[:120], sender_role[:20], source_id, created_at, json.dumps(images or [])),
                 )
                 await self.storage.db.commit()
                 if cursor.rowcount:

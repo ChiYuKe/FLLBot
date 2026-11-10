@@ -252,7 +252,7 @@ class ChatConfig(BaseModel):
     memory_session_gap_minutes: int = Field(default=30, ge=5, le=1440)
     memory_recent_messages: int = Field(default=200, ge=10, le=1000)
     memory_context_chars: int = Field(default=400000, ge=4000, le=1_000_000)
-    reply_mode: Literal["auto", "forward", "split"] = "auto"
+    reply_mode: Literal["auto", "auto_image", "forward", "image", "split"] = "auto_image"
     forward_threshold: int = Field(default=1200, ge=200, le=20000)
     reply_chunk_size: int = Field(default=0, ge=0, le=5000)
     reply_interval_ms: int = Field(default=350, ge=0, le=5000)

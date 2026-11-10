@@ -157,6 +157,10 @@ system_extra = ""
 # summary = "local"                  # 群聊话题摘要可使用单独的模型服务（群/账号指定服务仍优先）
 
 [chat]
+# 长回复默认整理成图片：auto_image 达到阈值转图片，auto 转聊天记录，image 始终图片，
+# forward 始终聊天记录，split 普通分段。可在后台 Agent 聊天设置中切换。
+# reply_mode = "auto_image"
+# forward_threshold = 1200
 # 仅作用于已开启 Agent 的群：近期普通群聊也会按需发送给配置的模型服务。
 group_memory = true
 memory_session_gap_minutes = 30

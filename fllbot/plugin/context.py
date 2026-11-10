@@ -67,6 +67,7 @@ class Context:
     tool_execution_id: str = ""
     memory_summary_before: int = 0
     memory_message_id: int = 0
+    history_images: list[str] | None = field(default=None, repr=False)
     lifecycle_epoch: int = field(default=0, init=False)
     data_epoch: int = field(default=0, init=False)
     received: ReceiveSnapshot = field(init=False)

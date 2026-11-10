@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager, contextmanager, nullcontext
 from typing import Any
 
 from .conversation import CapacityExceeded, ServiceClosing, turn_scope
+from .history_images import input_images
 from .tracing import current_trace_id
 
 
@@ -31,6 +32,7 @@ class ConversationService:
         if content is None or ctx.input_projected:
             return
         await self.storage.add_chat_message(ctx.event.scene,ctx.event.scene_id,'user',content,
+            images=await input_images(ctx),
             user_id=ctx.user_id,nickname=ctx.nickname,sender_role=ctx.sender.role,self_id=ctx.self_id,
             generation=ctx.data_epoch,account_epoch=ctx.received.account_epoch,scope_epoch=ctx.received.scope_generation)
         ctx.input_projected = True

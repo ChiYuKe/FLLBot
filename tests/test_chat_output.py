@@ -41,7 +41,7 @@ async def test_unconfirmed_receipt_is_uncertain_and_never_visible_or_replayed(tm
 @pytest.mark.parametrize('private', [False, True])
 async def test_long_replies_use_forward_nodes(tmp_path: Path, private):
     bot = await make_bot(tmp_path, builtin=False, overrides={'chat': {
-        'forward_threshold': 200, 'reply_chunk_size': 100, 'reply_interval_ms': 0,
+        'reply_mode': 'auto', 'forward_threshold': 200, 'reply_chunk_size': 100, 'reply_interval_ms': 0,
     }})
     try:
         connection = FakeConnection()

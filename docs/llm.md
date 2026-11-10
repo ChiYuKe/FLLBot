@@ -66,8 +66,8 @@ Token 优先使用服务商返回值；服务商缺失用量时使用原有文�
 - `wake_word`：统一唤醒词，留空兼容原账号唤醒词或昵称。
 - `wake_only_mode`：`prompt`（使用 `wake_only_prompt` 替换本次正文）、`raw`（发送原话）、`fixed`（从 `wake_only_replies` 随机取一条直接回复，不请求模型）、`ignore`（不调用模型）。历史仍记录用户原话。
 - `wake_only_replies`：`fixed` 模式使用的固定回复列表，每行一条，空行与首尾空白会被忽略，最多 50 条。
-- `reply_mode`：`auto` 默认达到 `forward_threshold`（1200 字）时合并转发；`forward` 始终转发；`split` 普通分段消息。群聊与私聊均支持，转发失败自动回退为分段消息。仅影响模型最终回复，不改变工具自行发送的媒体。
-- `reply_chunk_size`：每段/转发节点字数，0 沿用 `llm.chunk_size`；`reply_interval_ms` 控制普通分段间隔。`quote_reply` 与 `at_sender` 仅作用于普通回复首段。
+- `reply_mode`：`auto_image`（默认）达到 `forward_threshold`（1200 字）时把整条回复整理成一张图片；`auto` 达到阈值时合并转发；`forward` 始终转发；`image` 始终转图片；`split` 普通分段消息。群聊与私聊均支持，转发失败自动改为图片，图片生成失败再退回文本（长回复按 `auto` 的方式转发）。历史与记忆仍保存原文而非图片。仅影响模型最终回复，不改变工具自行发送的媒体。
+- `reply_chunk_size`：每段/转发节点字数，0 沿用 `llm.chunk_size`；`reply_interval_ms` 控制普通分段间隔。`quote_reply` 与 `at_sender` 只作用于首条输出，普通分段与图片回复均生效。
 
 模型服务、人格和群聊触发策略仍在各自的栏目管理。关闭信息开关不会删除本地历史，但后续构建模型请求时会省略相应元数据。
 

@@ -20,7 +20,7 @@ function renderChatPreview() {
   var mode = values.wake_only_mode;
   document.getElementById('chat-prompt-field').hidden = mode !== 'prompt';
   document.getElementById('chat-fixed-field').hidden = mode !== 'fixed';
-  document.getElementById('chat-threshold-field').hidden = values.reply_mode !== 'auto';
+  document.getElementById('chat-threshold-field').hidden = values.reply_mode !== 'auto' && values.reply_mode !== 'auto_image';
   if (mode === 'fixed') {
     document.getElementById('chat-wake-preview').textContent = values.wake_only_replies.length
       ? '不请求模型，随机回复其中一条，例如：' + values.wake_only_replies[0]

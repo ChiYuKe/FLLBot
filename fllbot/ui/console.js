@@ -378,8 +378,38 @@ function loadTestOptions() {
     fillOptions('test-account', data[2].items, '独立调试（不读取 QQ 历史）', 'self_id', function(item){return (item.nickname||'Bot')+' · '+item.self_id+(item.enabled===false?' · 已停用':'');});
   }).catch(function (error) { document.getElementById('test-note').textContent = error.message; });
 }
-function bubble(message, role) {
-  return h('div', { class:'bubble ' + role }, h('small', { text:role === 'user' ? '你' : role === 'assistant' ? 'FLLBot' : role }), h('span', { text:message }));
+function showHistoryImage(url) {
+  var dialog = h('dialog', { class:'history-image-viewer', 'aria-label':'查看图片' },
+    h('button', { type:'button', class:'btn', text:'关闭', onclick:function () { dialog.close(); } }),
+    h('img', { src:url, alt:'消息图片' }));
+  dialog.addEventListener('close', function () { dialog.remove(); });
+  dialog.addEventListener('click', function (event) { if (event.target === dialog) dialog.close(); });
+  document.body.appendChild(dialog); dialog.showModal();
+}
+function bubble(message, role, images) {
+  var kind = role === 'user' ? 'user' : role === 'assistant' ? 'assistant' : 'system';
+  var name = kind === 'user' ? '你' : kind === 'assistant' ? 'FLLBot' : role;
+  var body = h('div', { class:'bubble ' + kind });
+  var urls = Array.isArray(images) ? images.filter(function (url) {
+    return typeof url === 'string' && /^data:image\/(png|jpeg|gif|webp);base64,[A-Za-z0-9+/]+={0,2}$/.test(url);
+  }).slice(0, 4) : [];
+  if (message && !(urls.length && /^(\[图片\]\s*)+$/.test(message))) body.appendChild(h('div', { text:message }));
+  if (urls.length) {
+    var gallery = h('div', { class:'message-images' });
+    urls.forEach(function (url, index) {
+      var button = h('button', { type:'button', class:'message-image', 'aria-label':'查看第 ' + (index + 1) + ' 张图片', onclick:function () { showHistoryImage(url); } });
+      button.appendChild(h('img', { src:url, alt:'消息图片 ' + (index + 1), loading:'lazy', decoding:'async', onerror:function () {
+        button.replaceWith(h('span', { class:'message-image-error', text:'图片无法显示' }));
+      } }));
+      gallery.appendChild(button);
+    });
+    body.appendChild(gallery);
+  }
+  return h('div', { class:'message-row ' + kind },
+    h('div', { class:'message-avatar', 'aria-hidden':'true', text:kind === 'user' ? '你' : kind === 'assistant' ? 'F' : 'S' }),
+    h('div', { class:'message-main' },
+      h('div', { class:'message-name', text:name }),
+      body));
 }
 document.getElementById('test-form').addEventListener('submit', function (event) {
   event.preventDefault();
@@ -434,7 +464,7 @@ function selectRoom(room) {
   request('/api/chat/' + room.scene + '/' + room.scene_id + '?limit=100&self_id='+(room.self_id||0)).then(function (data) {
     if (requestId !== historyRequestId) return;
     var node = document.getElementById('history-messages'); node.textContent = '';
-    data.messages.forEach(function (message) { node.appendChild(bubble(message.content, message.role)); });
+    data.messages.forEach(function (message) { node.appendChild(bubble(message.content, message.role, message.images)); });
     if (!data.messages.length) node.appendChild(h('div', { class:'empty', text:'该会话暂无记录。' }));
     node.scrollTop = node.scrollHeight; document.getElementById('history-delete').disabled = false;
   }).catch(function (error) { if (requestId === historyRequestId) document.getElementById('history-messages').textContent = error.message; });

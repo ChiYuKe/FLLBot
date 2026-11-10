@@ -641,6 +641,7 @@ def create_api_router(bot: FLLBot) -> APIRouter:
                 {
                     "role": row.role,
                     "content": row.content,
+                    "images": json.loads(row.images) if isinstance(getattr(row, 'images', None), str) else getattr(row, 'images', []),
                     "user_id": row.user_id,
                     "nickname": row.nickname,
                     "sender_role": row.sender_role,
