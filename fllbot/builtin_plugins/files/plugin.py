@@ -24,6 +24,7 @@ plugin.agent_instruction(
     "read_file",
     title="读取 QQ 文件",
     effect="read_only",
+    capabilities=("net.read",),
     timeout=30,
     max_output_chars=15000,
     description="读取当前消息或直接引用的同会话消息中的文本/代码文件附件，如 .cs/.py/.js/.txt/.md。"

@@ -613,7 +613,13 @@ def create_console_router(bot: FLLBot) -> APIRouter:
                     if any(not name or len(name) > 120 for name in policy.allowed_tools):
                         raise HTTPException(400, "工具名称无效")
                     policy.allowed_tools = list(dict.fromkeys(policy.allowed_tools))
-                config["policy"] = policy.model_dump(exclude_none=True)
+                data = policy.model_dump(exclude_none=True)
+                # 旧版页面只提交自己认识的字段；未提交的群覆盖（例如沙盒开关）应保留，
+                # 而显式提交 null 的字段仍表示恢复继承。
+                for key, value in (config.get("policy") or {}).items():
+                    if key not in policy.model_fields_set:
+                        data[key] = value
+                config["policy"] = data
         await bot.permissions.save_group(group_id, enabled=payload.enabled, config=config)
         return {"ok": True, **group_detail(group_id, self_id)}
 

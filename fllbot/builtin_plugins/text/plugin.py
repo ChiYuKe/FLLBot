@@ -153,6 +153,7 @@ image_parameters["properties"]["format"]["default"] = "markdown"
 @plugin.on_ai_tool(
     "render_image",
     effect="side_effecting",
+    capabilities=("qq.send",),
     title="文本转图片",
     timeout=60,
     description="将完整答复排版为 PNG 长图并发送到当前会话。默认 format=markdown，支持标题、列表、引用、表格、代码块和链接文字；"
@@ -207,6 +208,7 @@ diagram_parameters = {
 @plugin.on_ai_tool(
     "render_diagram",
     effect="side_effecting",
+    capabilities=("qq.send",),
     title="绘制架构图",
     timeout=60,
     max_output_chars=2000,
@@ -260,7 +262,8 @@ async def send_document(ctx: Context, text: str, kind: str, filename: str, *, fo
 
 
 @plugin.on_ai_tool(
-    "send_html_file", title="文本转 HTML 文件", effect="side_effecting", timeout=60,
+    "send_html_file", title="文本转 HTML 文件", effect="side_effecting",
+    capabilities=("qq.send",), timeout=60,
     description="将完整文本转成 UTF-8 HTML 附件，发送到当前群聊或私聊。"
     "默认将 Markdown 标题、列表、代码块和表格排版成可离线打开的完整网页；format=plain 原样显示文本。"
     "不执行原始 HTML，不加载图片或其他外部资源。filename 可选，默认 document.html。"
@@ -272,7 +275,8 @@ async def send_html_file(ctx: Context, text: str, filename: str = "document.html
 
 
 @plugin.on_ai_tool(
-    "send_markdown_file", title="文本转 Markdown 文件", effect="side_effecting", timeout=60,
+    "send_markdown_file", title="文本转 Markdown 文件", effect="side_effecting",
+    capabilities=("qq.send",), timeout=60,
     description="将完整 Markdown 或纯文本原样保存为 UTF-8 .md 附件，发送到当前群聊或私聊。"
     "保留换行、代码和 Markdown 符号，不渲染、不摘要、不截断。filename 可选，默认 document.md。"
     "先整理完整内容再调用一次；成功后不要在聊天中重复文件全文。",

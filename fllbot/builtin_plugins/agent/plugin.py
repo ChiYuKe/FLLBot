@@ -55,6 +55,19 @@ plugin.setting(
     description="自动参与群聊时，每条普通消息交给智能体处理的概率；@ 和唤醒词触发不受影响。",
     group_scoped=True,
 )
+plugin.setting(
+    "participation_threshold",
+    type="int",
+    label="自动参与判断阈值",
+    default=-10,
+    min=-100,
+    max=100,
+    description=(
+        "自动参与时，先用确定性信号（是否提问、是否接话、是否纯语气词/复读等）评分，"
+        "低于阈值就不请求模型。默认 -10 只过滤明显无需接话的消息；调高更安静，-100 关闭筛选。"
+    ),
+    group_scoped=True,
+)
 
 
 
@@ -73,6 +86,7 @@ _silence_spec = AIToolSpec(
 @plugin.on_ai_tool(
     'search_history',
     effect="read_only",
+    capabilities=("memory.read",),
     title='回查本群记忆',
     description=(
         '当前用户明确问起过去的聊天或要求继续旧话题时使用；仅查询当前机器人在当前群启用记忆后的记录。'

@@ -739,6 +739,7 @@ async def now_command(ctx: Context) -> None:
 @plugin.on_ai_tool(
     "web_search",
     effect="read_only",
+    capabilities=("net.read",),
     title="联网搜索",
     description=(
         "联网搜索实时信息，返回标题、链接和摘要。涉及新闻、最新数据、政策变化、"
@@ -765,6 +766,7 @@ async def web_search(ctx: Context, query: str, count: int | None = None) -> dict
 @plugin.on_ai_tool(
     "read_webpage",
     effect="read_only",
+    capabilities=("net.read",),
     title="读取网页",
     description=(
         "读取普通公开网页链接，提取页面标题、正文、列表和表格。用户要求阅读普通网页、总结文档或整理页面时必须调用。"
@@ -790,6 +792,7 @@ async def read_webpage(ctx: Context, url: str, offset: int = 0) -> dict[str, Any
 @plugin.on_ai_tool(
     "get_weather",
     effect="read_only",
+    capabilities=("net.read",),
     title="天气查询",
     description=(
         "查询城市的实时天气和未来几天预报（Open-Meteo）。回答天气、气温、下雨、穿衣等问题前必须调用，"
@@ -821,6 +824,7 @@ async def get_weather(ctx: Context, city: str = "", days: int | None = None) -> 
 @plugin.on_ai_tool(
     "get_current_time",
     effect="read_only",
+    capabilities=("net.read",),
     title="当前时间",
     description=(
         "查询当前日期和时间，可指定城市时区。回答「现在几点」「今天几号」「星期几」等问题前必须调用，不要猜测。"

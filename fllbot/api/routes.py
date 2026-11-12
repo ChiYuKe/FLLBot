@@ -15,7 +15,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ValidationError
 
 from .. import __version__
-from ..config import StartupConfigError
+from ..config import ConfigConflictError, StartupConfigError
 from ..conversation import CapacityExceeded, ServiceClosing
 from ..llm.client import DEFAULT_CONTEXT_WINDOW, LLMError
 from ..logging_setup import get_ring
@@ -66,6 +66,7 @@ class ModelDiscoveryRequest(BaseModel):
     base_url: str | None = None
     api_key: str | None = None
     provider: str | None = None
+    top_level: bool = False
 
 
 class ModelDiagnosticRequest(BaseModel):
@@ -163,6 +164,21 @@ def create_api_router(bot: FLLBot) -> APIRouter:
             "plugin_count": len({item["plugin"] for item in items}),
             "globally_allowed_count": sum(1 for item in items if item["globally_allowed"]),
         }
+
+    @protected.get("/sandbox", summary="智能体执行沙盒状态")
+    async def sandbox_status(group_id: int | None = Query(default=None, gt=0)) -> dict[str, Any]:
+        data = bot.sandbox.status()
+        if group_id:
+            policy = bot.sandbox.policy(group_id)
+            data["group"] = {
+                "group_id": group_id,
+                "capabilities": {
+                    "read": policy.allow_read, "write": policy.allow_write,
+                    "network": policy.allow_network, "private_network": policy.allow_private_network,
+                },
+                "workspace": str(policy.workspace),
+            }
+        return data
 
     @protected.patch("/tools/{tool_id}/enabled", summary="按具体工具设置默认授权", dependencies=[Depends(settings_write)])
     async def toggle_tool(tool_id: str, payload: GroupToggle) -> dict[str, Any]:
@@ -407,10 +423,10 @@ def create_api_router(bot: FLLBot) -> APIRouter:
 
     @protected.patch("/config", summary="运行时更新配置", dependencies=[Depends(settings_write)])
     async def patch_config(payload: dict[str, Any] = Body(...), if_match: str | None = Header(default=None)) -> dict[str, Any]:
-        if if_match is not None and if_match != bot.config_revision():
-            raise HTTPException(409, "全局配置已被修改，请重新读取后保存。当前修改未提交。")
         try:
-            config = await bot.update_config(payload)
+            config = await bot.update_config(payload, expected_revision=if_match)
+        except ConfigConflictError as exc:
+            raise HTTPException(409, str(exc)) from exc
         except StartupConfigError as exc:
             raise HTTPException(409, {'code': 'startup_config_read_only', 'fields': exc.fields, 'message': str(exc)}) from exc
         except ValidationError as exc:
@@ -543,7 +559,7 @@ def create_api_router(bot: FLLBot) -> APIRouter:
 
     @protected.post("/llm/test", summary="直接测试模型连通性")
     async def llm_test(payload: LLMTestRequest) -> dict[str, Any]:
-        if not bot.chat.available:
+        if not payload.provider and not bot.chat.available:
             raise HTTPException(400, "尚未启用 LLM 或未配置 API Key")
         try:
             reply = await bot.chat.test(payload.prompt, persona_name=payload.persona, provider=payload.provider)
@@ -595,6 +611,7 @@ def create_api_router(bot: FLLBot) -> APIRouter:
         try:
             models = await bot.chat.client.model_catalog(
                 provider=payload.provider, base_url=payload.base_url, api_key=payload.api_key,
+                top_level=payload.top_level,
             )
         except LLMError as exc:
             raise HTTPException(502, str(exc)) from exc

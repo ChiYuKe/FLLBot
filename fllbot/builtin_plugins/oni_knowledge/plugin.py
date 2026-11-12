@@ -55,6 +55,7 @@ async def _run(ctx, operation, **arguments):
     "search",
     title="检索缺氧源码知识库",
     effect="read_only",
+    capabilities=("fs.read",),
     timeout=20,
     max_output_chars=26000,
     description="检索管理员提供的 ONI/缺氧反编译源码类型或成员索引。支持中文功能词和 C# 符号；"
@@ -99,6 +100,7 @@ async def search(
     "read_source",
     title="读取缺氧源码片段",
     effect="read_only",
+    capabilities=("fs.read",),
     timeout=15,
     max_output_chars=26000,
     description="按检索得到的相对 file 路径和 1 起始行号读取实际 C# 源码。默认 160 行，最多 240 行；"

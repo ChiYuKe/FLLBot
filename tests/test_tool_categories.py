@@ -28,11 +28,14 @@ def test_tool_categories_and_individual_grants_persist(tmp_path: Path) -> None:
         assert plugins["voice"]["category"] == plugins["web"]["category"] == plugins["basic"]["category"] == "plugin"
         catalog = client.get("/api/tools", headers=AUTH).json()
         assert {item["name"] for item in catalog["providers"]} == {
-            "basic", "voice", "web", "text", "github", "files", "oni_knowledge"}
+            "basic", "voice", "web", "text", "github", "files", "oni_knowledge", "workspace"}
         assert {item["id"] for item in catalog["items"]} >= {"voice__speak", "web__web_search", "web__read_webpage", "web__get_weather", "web__get_current_time"}
         items = {item['id']:item for item in catalog['items']}
         assert items['voice__speak']['effect'] == 'side_effecting'
+        assert items['voice__speak']['risk'] == 'write'
+        assert items['workspace__write_file']['capabilities'] == ['fs.write']
         assert items['web__web_search']['effect'] == items['basic__check_online']['effect'] == 'read_only'
+        assert items['web__web_search']['capabilities'] == ['net.read']
         assert items['web__web_search']['timeout'] > 0
         assert items['web__web_search']['max_output_chars'] >= 64
         url = "/api/tools/web__web_search/enabled"

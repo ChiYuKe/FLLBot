@@ -78,6 +78,7 @@ def _options(ctx: Context) -> dict:
 @plugin.on_ai_tool(
     "read_repository",
     effect="read_only",
+    capabilities=("net.read",),
     title="读取 GitHub 仓库",
     timeout=45,
     max_output_chars=24000,
@@ -153,6 +154,7 @@ async def github_read_repository(
 @plugin.on_ai_tool(
     "list_directory",
     effect="read_only",
+    capabilities=("net.read",),
     title="列出 GitHub 目录",
     timeout=30,
     max_output_chars=14000,
@@ -190,6 +192,7 @@ async def github_list_directory(
 @plugin.on_ai_tool(
     "read_sources",
     effect="read_only",
+    capabilities=("net.read",),
     title="读取 GitHub 源码",
     timeout=60,
     max_output_chars=40000,
@@ -227,6 +230,7 @@ async def github_read_sources(
 @plugin.on_ai_tool(
     "search_repositories",
     effect="read_only",
+    capabilities=("net.read",),
     title="搜索 GitHub 仓库",
     timeout=30,
     max_output_chars=14000,
@@ -262,6 +266,7 @@ async def github_search_repositories(
 @plugin.on_ai_tool(
     "read_releases",
     effect="read_only",
+    capabilities=("net.read",),
     title="读取 GitHub 版本",
     timeout=30,
     max_output_chars=16000,
@@ -289,6 +294,7 @@ async def github_read_releases(ctx: Context, repository: str, limit: int = 3) ->
 @plugin.on_ai_tool(
     "read_commits",
     effect="read_only",
+    capabilities=("net.read",),
     title="读取 GitHub 提交",
     timeout=30,
     max_output_chars=14000,

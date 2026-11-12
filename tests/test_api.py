@@ -27,7 +27,7 @@ def test_health_and_auth(tmp_path: Path) -> None:
         assert status.status_code == 200
         data = status.json()
         names = {item["name"] for item in data["plugins"]}
-        assert names == {"basic", "agent", "text", "github", "files", "oni_knowledge"}
+        assert names == {"basic", "agent", "text", "github", "files", "oni_knowledge", "workspace"}
         assert data["storage"]["schema_version"] >= 1
         assert data["ws_path"] == "/onebot/v11/ws"
 
@@ -228,3 +228,29 @@ def test_single_file_plugin_readme(tmp_path: Path) -> None:
         response = client.get("/api/plugins/plain/readme", headers=AUTH)
         assert response.status_code == 200
         assert "# plain" in response.json()["content"]
+
+
+def test_model_provider_edit_and_removal_persist(tmp_path: Path) -> None:
+    bot = build_bot(tmp_path, builtin=False)
+    with TestClient(create_app(bot)) as client:
+        revision = client.get("/api/config", headers=AUTH).json()["revision"]
+        added = client.patch("/api/config", headers={**AUTH, "If-Match": revision}, json={"llm": {
+            "providers": {"default": {}, "go": {"model": "go-model", "api_key": "provider-secret-value"}},
+            "default": "go", "fallback_providers": ["default"],
+        }})
+        assert added.status_code == 200
+        assert "provider-secret-value" not in added.text
+        assert client.patch("/api/config", headers={**AUTH, "If-Match": revision}, json={}).status_code == 409
+        edited = client.patch("/api/config", headers=AUTH, json={"llm": {
+            "providers": {"go": {"model": "updated"}}, "routes": {"group": "go"},
+        }})
+        assert edited.status_code == 200
+        assert bot.config.llm.resolve("go")[1].api_key == "provider-secret-value"
+        deletion = {"providers": {"go": None}, "default": "default"}
+        assert client.patch("/api/config", headers=AUTH, json={"llm": deletion}).status_code == 409
+        deletion["routes"] = {"group": "default"}
+        assert client.patch("/api/config", headers=AUTH, json={"llm": deletion}).status_code == 200
+        assert client.get("/api/config", headers=AUTH).json()["overrides"]["llm"]["providers"]["go"] is None
+
+    with TestClient(create_app(build_bot(tmp_path, builtin=False))) as client:
+        assert [item["name"] for item in client.get("/api/llm/providers", headers=AUTH).json()] == ["default"]

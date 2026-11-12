@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 from ..rules import Rule, evaluate
 from ..rules import command as command_rule
+from ..sandbox import CapabilityError, effective_risk, normalize
 from .agent import AgentInstruction, ToolHook, validate_name
 from .settings import PluginSettings, SettingField
 
@@ -38,10 +39,18 @@ class AIToolSpec:
     effect: Literal["read_only", "idempotent", "side_effecting"] = "side_effecting"
     timeout: float = 30.0
     max_output_chars: int = 8000
+    # 显式声明工具会碰什么；未声明时沿用旧的权限行为，声明后由沙盒裁决。
+    capabilities: tuple[str, ...] = ()
+    risk: Literal["read", "write", "destructive"] | None = None
 
     def __post_init__(self) -> None:
         if self.effect not in {"read_only", "idempotent", "side_effecting"}:
             raise ValueError("AI 工具 effect 无效")
+        try:
+            self.capabilities = normalize(self.capabilities)
+            self.risk = effective_risk(self.effect, self.capabilities, self.risk)
+        except CapabilityError as exc:
+            raise ValueError(str(exc)) from None
         if isinstance(self.timeout, bool) or not isinstance(self.timeout, (int, float)) or not math.isfinite(self.timeout) or self.timeout <= 0:
             raise ValueError("AI 工具 timeout 必须是有限正数")
         if isinstance(self.max_output_chars, bool) or not isinstance(self.max_output_chars, int) or self.max_output_chars < 64:
@@ -361,6 +370,8 @@ class Plugin:
                     "description": spec.description,
                     "permission": spec.permission,
                     "effect": spec.effect,
+                    "risk": spec.risk,
+                    "capabilities": list(spec.capabilities),
                     "timeout": spec.timeout,
                     "max_output_chars": spec.max_output_chars,
                 }
@@ -391,6 +402,8 @@ class Plugin:
         effect: Literal["read_only", "idempotent", "side_effecting"] = "side_effecting",
         timeout: float = 30.0,
         max_output_chars: int = 8000,
+        capabilities: tuple[str, ...] | list[str] = (),
+        risk: Literal["read", "write", "destructive"] | None = None,
     ) -> Callable[[AIToolCallback], AIToolCallback]:
         """显式注册一个 AI 可调用工具；未声明的插件能力不会暴露给模型。
 
@@ -418,7 +431,7 @@ class Plugin:
                     permission=permission,
                     plugin_name=self.name,
                     effect=effect, timeout=timeout, max_output_chars=max_output_chars,
-                    title=title.strip(),
+                    title=title.strip(), capabilities=tuple(capabilities), risk=risk,
                 )
             )
             return func

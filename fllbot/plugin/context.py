@@ -76,6 +76,8 @@ class Context:
     # 被引用消息的解析结果：由 ChatService 在构建请求时填充，同一事件只读取一次。
     quoted_message: Any = field(default=None, repr=False)
     quoted_loaded: bool = field(default=False, repr=False)
+    # 本轮沙盒操作计数；同一轮的工具调用共享，用于配额与诊断。
+    sandbox_usage: dict = field(default_factory=dict, repr=False)
     _text_cache: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
@@ -212,6 +214,14 @@ class Context:
     @property
     def llm(self) -> Any:
         return self.bot.chat
+
+    @property
+    def sandbox(self) -> Any:
+        """受限的工作区文件与联网入口；普通命令处理器也可复用同一策略。"""
+        service = getattr(self.bot, "sandbox", None)
+        if service is None:
+            raise RuntimeError("当前宿主没有装配执行沙盒")
+        return service.runtime(self)
 
     @property
     def settings(self) -> Any:

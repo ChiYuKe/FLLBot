@@ -35,6 +35,10 @@ class StartupConfigError(ValueError):
         super().__init__('这些参数只能在启动配置文件或启动命令中修改并重启：' + '、'.join(fields) + '；本次未保存任何改动')
 
 
+class ConfigConflictError(ValueError):
+    pass
+
+
 def split_startup_overrides(overrides: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     active = copy.deepcopy(overrides)
     archived = {}
@@ -146,6 +150,7 @@ class LLMProviderConfig(ModelCapabilities):
     base_url: str = ""
     api_key: str = ""
     api_key_env: str = ""
+    inherit_api_key: bool = True
     model: str = ""
     timeout: float | None = None
     max_tokens: int | None = Field(default=None, ge=1, le=1_000_000)
@@ -189,6 +194,13 @@ class LLMConfig(ModelCapabilities):
     input_price: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     output_price: float = Field(default=0.0, ge=0, allow_inf_nan=False)
 
+    @field_validator("providers", mode="before")
+    @classmethod
+    def omit_removed_providers(cls, value):
+        if isinstance(value, dict):
+            return {name: provider for name, provider in value.items() if provider is not None}
+        return value
+
     @model_validator(mode="after")
     def validate_fallbacks(self):
         unknown = set(self.fallback_providers) - set(self.provider_names())
@@ -217,7 +229,7 @@ class LLMConfig(ModelCapabilities):
                 for key in ModelCapabilities.model_fields
             },
             base_url=raw.base_url or self.base_url,
-            api_key=raw.api_key or self.api_key,
+            api_key=raw.api_key or (self.api_key if raw.inherit_api_key else ""),
             api_key_env=raw.api_key_env,
             model=raw.model or self.model,
             timeout=raw.timeout if raw.timeout is not None else self.timeout,
@@ -270,6 +282,39 @@ class ChatConfig(BaseModel):
         return [item.strip() for item in value if item and item.strip()][:50]
 
 
+class SandboxConfig(BaseModel):
+    """智能体执行沙盒：能力开关、工作区围栏、联网范围与本轮额度。"""
+
+    enabled: bool = True
+    # 相对路径按项目根目录解析；工具只能读写这个目录内的文件。
+    workspace: str = "data/agent_workspace"
+    allow_read: bool = True
+    allow_write: bool = False
+    allow_network: bool = True
+    allow_network_write: bool = False
+    allow_private_network: bool = False
+    allow_qq_send: bool = True
+    allow_destructive: bool = False
+    allow_process: bool = False
+    destructive_requires_superuser: bool = True
+    # 自动参与群聊时，写入/管理类操作必须由群友明确请求。
+    write_requires_addressed: bool = True
+    allowed_hosts: list[str] = Field(default_factory=list)
+    denied_hosts: list[str] = Field(default_factory=list)
+    deny_paths: list[str] = Field(default_factory=lambda: [
+        ".env", ".env.*", "config.toml", "data/admin_token.txt", "data/fllbot.db",
+        "data/backups", "data/backups/*", "logs", "logs/*", ".git", ".git/*",
+        "*.pem", "*.key", "*.pfx",
+    ])
+    max_read_bytes: int = Field(default=200_000, ge=1_000, le=20_000_000)
+    max_write_bytes: int = Field(default=200_000, ge=1_000, le=20_000_000)
+    max_fetch_bytes: int = Field(default=2_000_000, ge=1_000, le=50_000_000)
+    request_timeout: float = Field(default=10.0, gt=0, le=120)
+    max_redirects: int = Field(default=3, ge=0, le=10)
+    max_calls_per_turn: int = Field(default=16, ge=1, le=200)
+    max_write_calls_per_turn: int = Field(default=4, ge=0, le=100)
+
+
 class RetentionConfig(BaseModel):
     enabled: bool = False
     interval_seconds: int = Field(default=3600, ge=60, le=86400)
@@ -291,6 +336,7 @@ class AppConfig(BaseModel):
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
     llm: LLMConfig = Field(default_factory=LLMConfig)
     chat: ChatConfig = Field(default_factory=ChatConfig)
+    sandbox: SandboxConfig = Field(default_factory=SandboxConfig)
     retention: RetentionConfig = Field(default_factory=RetentionConfig)
 
 
@@ -426,7 +472,8 @@ def mask_secrets(config: AppConfig | dict[str, Any]) -> dict[str, Any]:
     if "api_key" in llm:
         llm["api_key"] = _mask(llm["api_key"])
     for provider in llm.get("providers", {}).values():
-        provider["api_key"] = _mask(provider.get("api_key", ""))
+        if isinstance(provider, dict) and "api_key" in provider:
+            provider["api_key"] = _mask(provider["api_key"])
     for section, key in (("admin", "token"), ("server", "access_token")):
         if key in data.get(section, {}):
             data[section][key] = _mask(data[section][key])

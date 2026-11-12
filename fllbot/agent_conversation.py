@@ -41,6 +41,7 @@ class AgentConversationService:
                 reply = random.choice(fixed_replies)
                 await self.conversations.project_input(ctx, record_text)
                 await self.send(ctx, reply, require_ai=False)
+                self.triggers.observe_reply(ctx)
                 ctx.stop()
                 return
 
@@ -101,6 +102,7 @@ class AgentConversationService:
                         ctx.input_projected = True
                     if result.text:
                         await self.send(ctx, result.text)
+                        self.triggers.observe_reply(ctx)
                 elif result.reason == "empty_response" and ctx.to_me:
                     ctx.turn_reason = "empty_response"
                     await self.send(ctx, "我暂时没能生成回复，请稍后再试。")

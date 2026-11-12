@@ -22,7 +22,7 @@ from . import __version__
 from .agent_conversation import AgentConversationService
 from .agent_tasks import AgentTasks
 from .bots import BotProfiles
-from .config import AppConfig, ConfigStore, mask_secrets, resolve_path, split_startup_overrides
+from .config import AppConfig, ConfigConflictError, ConfigStore, mask_secrets, resolve_path, split_startup_overrides
 from .conversation import ConversationCapacity
 from .conversation_service import ConversationService
 from .delivery_service import DeliveryService
@@ -43,10 +43,11 @@ from .onebot.models import MessageEvent, MetaEvent, NoticeEvent, parse_event
 from .onebot.server import ConnectionManager, create_ws_router
 from .permission import PermissionManager
 from .plugin.loader import PluginLoader
-from .policy import migrate_tool_permissions
+from .policy import migrate_tool_permissions, policy_overrides
 from .rendering.text_image import render_reply_image
-from .resources import ResourceReplacementManager
+from .resources import ResourceReplacementManager, resource_references
 from .retention import CleanupManager
+from .sandbox import SandboxService
 from .services import ServiceMonitor
 from .storage import Storage
 from .tool_executor import ToolExecutor
@@ -76,7 +77,9 @@ class FLLBot:
         self.bots = BotProfiles(self)
         self._dedupe = DedupCache(size=1024, ttl=180.0)
         self.permissions = PermissionManager(self)
-        self.tool_executor = ToolExecutor(self.storage, self.permissions)
+        self.sandbox = SandboxService(lambda: self.config.sandbox, self.root,
+            group_overrides=lambda group_id: policy_overrides(self, group_id))
+        self.tool_executor = ToolExecutor(self.storage, self.permissions, self.sandbox)
         self.capacity = ConversationCapacity(lambda: self.config.plugin)
         self.dispatcher = Dispatcher(self)
         self.personas = PersonaStore(
@@ -144,10 +147,21 @@ class FLLBot:
     def config(self) -> AppConfig:
         return self.config_store.current
 
-    async def update_config(self, patch: dict[str, Any]) -> AppConfig:
+    async def update_config(self, patch: dict[str, Any], *, expected_revision: str | None = None) -> AppConfig:
         """应用运行时配置覆盖并持久化。"""
         async with self.storage.settings_lock:
+            if expected_revision is not None and expected_revision != self.config_revision():
+                raise ConfigConflictError("全局配置已被修改，请重新读取后保存。")
             config, overrides = self.config_store.prepare_patch(patch)
+            removed = set(self.config.llm.providers) - set(config.llm.provider_names())
+            for name in sorted(removed):
+                references = [
+                    item["label"] for item in resource_references(self, "provider", name) if item["scope"] != "system"
+                ]
+                if name == config.llm.default or name in config.llm.routes.values():
+                    references.append("系统默认模型或模型路由")
+                if references:
+                    raise ConfigConflictError(f"模型服务 {name} 仍被引用：" + "、".join(references))
             transaction = asyncio.create_task(self.storage.meta_set("config_overrides", overrides))
             cancelled = False
             while True:
@@ -371,6 +385,7 @@ class FLLBot:
             "failed_plugins": dict(self.plugins.failed),
             "dispatcher": self.dispatcher.summary(),
             "tool_executor": self.tool_executor.status(),
+            "sandbox": {"enabled": self.sandbox.policy(None).enabled, "stats": dict(self.sandbox.stats)},
             "storage": await self.storage.summary(),
             "llm": self.chat.status(),
             "personas": self.personas.names(),

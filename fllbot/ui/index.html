@@ -125,6 +125,25 @@
           <div class="setting-field"><label for="agent-system-extra">额外系统指令</label><textarea id="agent-system-extra" placeholder="可补充智能体的语气、规则或业务背景"></textarea></div>
 </div></details>          <div class="settings-footer"><span id="model-save-note" class="settings-note"></span><button class="btn" id="model-test" type="button">测试已保存的连接</button><button class="btn" id="agent-model-reload" type="button">重新读取</button><button class="btn primary" id="agent-model-save" type="button">保存模型设置</button></div>
         </form>
+        <details class="advanced" id="model-providers" hidden>
+          <summary>多供应商</summary>
+          <form class="settings-form" id="model-provider-form">
+            <div class="setting-field"><label for="provider-select">编辑供应商</label><select id="provider-select"></select></div>
+            <div class="form-grid">
+              <div class="setting-field" id="provider-name-field"><label for="provider-name">供应商标识</label><input id="provider-name" placeholder="opencode-go" pattern="[A-Za-z0-9_\-]+"></div>
+              <div class="setting-field"><label for="provider-url">服务地址</label><input id="provider-url" type="url" placeholder="https://api.example.com/v1"></div>
+              <div class="setting-field"><label for="provider-model">模型名称</label><input id="provider-model" placeholder="填写供应商提供的模型 ID"></div>
+              <div class="setting-field"><label for="provider-key">API Key</label><input id="provider-key" type="password" autocomplete="new-password" placeholder="留空保留已保存的密钥"></div>
+              <div class="setting-field"><label for="provider-key-env">密钥环境变量</label><input id="provider-key-env" pattern="[A-Za-z_][A-Za-z0-9_]*" placeholder="可选，优先于 API Key"></div>
+            </div>
+            <div class="settings-footer">
+              <button class="btn" id="provider-test" type="button">测试已保存的连接</button>
+              <button class="btn" id="provider-delete" type="button">删除供应商</button>
+              <button class="btn primary" type="submit">保存供应商</button>
+            </div>
+          </form>
+          <p class="settings-note" id="provider-note" role="status"></p>
+        </details>
       </div>
     </section>
 
@@ -234,6 +253,10 @@
         <div class="form-row"><span id="group-tools-label" class="form-label">可用 Agent 工具</span><div class="form-control tools-controls" role="group" aria-labelledby="group-tools-label"><label class="inline-check"><input id="policy-tools-inherit" type="checkbox" checked><span>跟随默认 Agent 工具权限</span></label><div id="policy-tools" class="tool-choices"></div></div></div>
         <div class="form-row"><label for="policy-cooldown">回复间隔</label><div class="form-control inline-value"><input id="policy-cooldown" type="number" min="0" max="120" step="1" placeholder="默认"><span>秒 / 同一用户</span></div></div>
         <div class="form-row"><label for="policy-auto-reply-probability">自动参与概率</label><div class="form-control inline-value"><input id="policy-auto-reply-probability" type="number" min="0" max="100" step="1" placeholder="默认"><span>% / 普通消息</span><small>只影响“自动参与”触发；@ 和唤醒词触发不受影响。留空跟随默认设置。</small></div></div>
+<div class="form-row"><label for="policy-participation-threshold">自动参与阈值</label><div class="form-control inline-value"><input id="policy-participation-threshold" type="number" min="-100" max="100" step="1" placeholder="默认"><span>分</span><small>先按提问、接话、语气词等信号评分，低于阈值不请求模型；-100 关闭筛选。留空跟随默认设置。</small></div></div>
+<div class="form-row"><label for="policy-sandbox-write">沙盒写入</label><div class="form-control"><select id="policy-sandbox-write"><option value="">跟随默认</option><option value="on">允许</option><option value="off">禁止</option></select><small>只影响声明了写入能力的工具；自动参与时仍不会执行写入，需要群友明确请求。</small></div></div>
+<div class="form-row"><label for="policy-sandbox-network">沙盒联网</label><div class="form-control"><select id="policy-sandbox-network"><option value="">跟随默认</option><option value="on">允许</option><option value="off">禁止</option></select><small>联网工具仍需通过主机白/黑名单与内网地址检查。</small></div></div>
+<div class="form-row"><label for="policy-sandbox-private-network">沙盒内网</label><div class="form-control"><select id="policy-sandbox-private-network"><option value="">跟随默认</option><option value="on">允许</option><option value="off">禁止</option></select><small>默认禁止访问本机、局域网与保留地址。</small></div></div>
         <details class="effective-details form-diagnostics"><summary>生效详情</summary><p class="settings-note" id="group-bot-context"></p><div id="policy-effective" class="policy-effective"></div></details>
         <details class="effective-details form-diagnostics"><summary>变更记录</summary><p class="settings-note">记录改动字段，不保存配置内容；当前不区分具体管理者。</p><div id="group-changes"></div></details>
       </div>

@@ -17,8 +17,9 @@ BOUNDARIES = {
     "permission": {"permission"},
     "policy": {"policy"},
     "history_images": set(),
+    "sandbox": {"sandbox"},
     "llm": {"llm", "config", "onebot", "policy", "tracing", "conversation", "delivery_policy", "history_images"},
-    "plugin": {"plugin", "rules", "onebot", "tracing", "conversation"},
+    "plugin": {"plugin", "rules", "onebot", "tracing", "conversation", "sandbox"},
 }
 
 # Keep the extracted services independent of the compatibility facade and ingress.

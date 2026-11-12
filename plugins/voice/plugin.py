@@ -768,6 +768,7 @@ async def health(ctx: Context) -> None:
 @plugin.on_ai_tool(
     "speak",
     effect="side_effecting",
+    capabilities=("qq.send",),
     timeout=360.0,
     title="语音朗读",
     description=(

@@ -20,6 +20,8 @@ class ExecutionConfig:
     defaults: Any
     personas: Any
     agent: dict = field(default_factory=dict)
+    self_id: int = 0
+    sender_id: int = 0
 
     @property
     def version(self) -> str:

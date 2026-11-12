@@ -23,8 +23,14 @@ class GroupPolicy(BaseModel):
     trigger_prefix: str | None = Field(default=None, max_length=80)
     cooldown_seconds: int | None = Field(default=None, ge=0, le=120)
     auto_reply_probability: int | None = Field(default=None, ge=0, le=100)
+    # 自动参与的确定性判断阈值；越低越容易交给模型，-100 表示不筛选。
+    participation_threshold: int | None = Field(default=None, ge=-100, le=100)
     max_tool_rounds: int | None = Field(default=None, ge=0)
     allowed_tools: list[str] | None = Field(default=None, max_length=256)
+    # 单群沙盒覆盖：None 跟随全局，False 收紧，True 放宽（管理端显式操作）。
+    sandbox_write: bool | None = None
+    sandbox_network: bool | None = None
+    sandbox_private_network: bool | None = None
     provider: str = Field(default="", max_length=80)
     system_extra: str = Field(default="", max_length=4000)
 
@@ -43,6 +49,8 @@ def tool_index(bot: FLLBot) -> dict[str, dict[str, Any]]:
                 "description": spec.description,
                 "permission": spec.permission,
                 "effect": spec.effect,
+                "risk": spec.risk,
+                "capabilities": list(spec.capabilities),
                 "timeout": spec.timeout,
                 "max_output_chars": spec.max_output_chars,
             }
@@ -124,7 +132,8 @@ def agent_settings(bot: FLLBot, group_id: int, self_id: int | None = None) -> di
     plugin = bot.plugins.get("agent")
     values = plugin.settings.values() if plugin else {
         "auto_group": False, "trigger_mode": "all", "trigger_prefix": "ai",
-        "cooldown_seconds": 5, "auto_reply_probability": 100, "max_tool_rounds": 0, "allowed_tools": [],
+        "cooldown_seconds": 5, "auto_reply_probability": 100, "participation_threshold": -10,
+        "max_tool_rounds": 0, "allowed_tools": [],
     }
     defaults = bot.bots.defaults(self_id)
     if defaults.reply_mode != "inherit":
@@ -185,6 +194,7 @@ def effective_policy(bot: FLLBot, group_id: int, self_id: int | None = None) -> 
         "message": "当前查看的机器人尚未连接 NapCat", "target": "bots",
     }
     sources = policy_sources(bot, group_id, self_id)
+    sandbox = bot.sandbox.policy(group_id)
     return {
         **values, "name": (overrides.get("name") or "未命名策略") if overrides else "跟随原有配置",
         "custom": bool(overrides), "provider": provider, "model": selected["model"] if selected else "不可用",
@@ -194,6 +204,11 @@ def effective_policy(bot: FLLBot, group_id: int, self_id: int | None = None) -> 
         "tools": [catalog[name] for name in available_tools],
         "unavailable_tools": [name for name in allowed_tools if name not in available_tools],
         "sources": sources,
+        "sandbox": {
+            "read": sandbox.allow_read, "write": sandbox.allow_write,
+            "network": sandbox.allow_network, "private_network": sandbox.allow_private_network,
+            "destructive": sandbox.allow_destructive,
+        },
         "blocked_codes": [item["code"] for item in checks if not item["passed"]],
         "diagnostics": {
             "ready": not reasons and connection_check["passed"],
@@ -210,7 +225,8 @@ def policy_sources(bot: FLLBot, group_id: int, self_id: int | None = None) -> di
     overrides = policy_overrides(bot, group_id)
     defaults = bot.bots.defaults(self_id)
     sources = dict.fromkeys(
-        ("auto_group", "trigger_mode", "cooldown_seconds", "auto_reply_probability", "max_tool_rounds", "allowed_tools"),
+        ("auto_group", "trigger_mode", "cooldown_seconds", "auto_reply_probability",
+         "participation_threshold", "max_tool_rounds", "allowed_tools"),
         "system",
     )
     if defaults.reply_mode != "inherit":

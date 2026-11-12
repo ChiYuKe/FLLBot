@@ -167,6 +167,41 @@ memory_session_gap_minutes = 30
 memory_recent_messages = 200
 memory_context_chars = 400000
 
+[sandbox]
+# 智能体执行沙盒：工具必须显式声明能力，执行前按这里的策略自动裁决。
+# 未声明能力的旧工具不受影响；新插件建议声明 capabilities。
+enabled = true
+# 工作区目录（相对项目根目录）。文件工具只能读写这里，绝对路径和 .. 会被拒绝。
+workspace = "data/agent_workspace"
+# 默认只读、可联网、不可写；按需开放。
+allow_read = true
+allow_write = false
+allow_network = true
+allow_network_write = false
+# 允许访问本机/局域网/保留地址；默认关闭，避免访问内网服务。
+allow_private_network = false
+allow_qq_send = true
+# 群管理、删除等破坏性能力和本机程序执行默认关闭。
+allow_destructive = false
+allow_process = false
+destructive_requires_superuser = true
+# 自动参与（未 @、未用唤醒词）时不执行写入/管理类操作。
+write_requires_addressed = true
+# 联网主机白名单（留空表示不限）与黑名单，支持 *.example.com。
+allowed_hosts = []
+denied_hosts = []
+# 工作区内仍然禁止访问的敏感路径（fnmatch 模式）。
+deny_paths = [".env", ".env.*", "config.toml", "data/admin_token.txt", "data/fllbot.db",
+    "data/backups", "data/backups/*", "logs", "logs/*", ".git", ".git/*", "*.pem", "*.key", "*.pfx"]
+max_read_bytes = 200000
+max_write_bytes = 200000
+max_fetch_bytes = 2000000
+request_timeout = 10.0
+max_redirects = 3
+# 单轮工具调用与写入次数上限。
+max_calls_per_turn = 16
+max_write_calls_per_turn = 4
+
 [retention]
 # 自动清理默认关闭；0 表示该类不自动清理。保存策略不会立即删除数据。
 enabled = false

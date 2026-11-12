@@ -76,9 +76,10 @@ class ExecutionConnection:
 
 
 class ToolExecutor:
-    def __init__(self, storage: Any, permissions: Any) -> None:
+    def __init__(self, storage: Any, permissions: Any, sandbox: Any = None) -> None:
         self.storage = storage
         self.permissions = permissions
+        self.sandbox = sandbox
         self.closing = False
         self.max_callbacks = 32
         self._callbacks: dict[asyncio.Task, Any] = {}
@@ -201,7 +202,8 @@ class ToolExecutor:
                 return False
             live_owner, live_spec = live
             if (live_owner is not owner or live_spec.callback is not spec.callback
-                    or live_spec.parameters != spec.parameters or live_spec.effect != spec.effect):
+                    or live_spec.parameters != spec.parameters or live_spec.effect != spec.effect
+                    or live_spec.capabilities != spec.capabilities or live_spec.risk != spec.risk):
                 return False
             return (ctx.data_current and ctx.received.monotonic_deadline > time.monotonic()
                     and not getattr(ctx.connection, '_closed', False)
@@ -233,6 +235,16 @@ class ToolExecutor:
         except Exception:
             return failure('invalid_arguments')
         arguments = copy.deepcopy(arguments)
+        # 沙盒裁决先于任何钩子和回调；拒绝不会产生外部动作，也不消耗本轮额度。
+        sandbox_runtime = None
+        sandbox_verdict = None
+        if self.sandbox is not None:
+            sandbox_runtime = self.sandbox.runtime(ctx)
+            sandbox_verdict = sandbox_runtime.check(spec, arguments)
+            sandbox_runtime.note(spec, sandbox_verdict)
+            if not sandbox_verdict.allowed:
+                ctx.trace_event('tool', 'tool_blocked', 'failed', name)
+                return encode_result(sandbox_verdict.payload(), 2000), False
         hooks = self._hooks(ctx, name)
         event = ToolEvent(name, ctx.turn_id, ctx.tool_call_id,
                           arguments=json.dumps(arguments, ensure_ascii=False, sort_keys=True))
@@ -264,6 +276,15 @@ class ToolExecutor:
         if not allowed():
             await self.storage.finish_tool(execution_id, 'cancelled')
             return failure('tool_permission_denied')
+        if sandbox_runtime is not None:
+            # 认领期间配置可能被修改；真正执行前按最新策略再裁决一次。
+            refreshed = sandbox_runtime.check(spec, arguments)
+            if not refreshed.allowed:
+                await self.storage.finish_tool(execution_id, 'cancelled')
+                sandbox_runtime.note(spec, refreshed)
+                ctx.trace_event('tool', 'tool_blocked', 'failed', name)
+                return encode_result(refreshed.payload(), 2000), False
+            sandbox_verdict = refreshed
         # The durable claim yielded; concurrent requests may have filled the slots.
         # No await between this final check and callback registration.
         if self.closing or len(self._callbacks) >= self.max_callbacks:
@@ -276,6 +297,8 @@ class ToolExecutor:
         execution_ctx.tool_execution_id = execution_id
         execution_ctx.plugin = owner
         execution_ctx.connection = ExecutionConnection(ctx.connection,execution_ctx)
+        if sandbox_runtime is not None and sandbox_verdict is not None:
+            sandbox_runtime.commit(spec, sandbox_verdict)
         callback = asyncio.create_task(spec.callback(execution_ctx, **arguments),name='fllbot-tool-'+execution_id)
         self._callbacks[callback] = execution_ctx
         callback.add_done_callback(self._settled)
