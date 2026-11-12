@@ -7,10 +7,13 @@ flowchart LR
     QQ[NapCat / OneBot 11] --> Protocol[onebot 协议与连接]
     Protocol --> App[app.py 应用装配与事件入口]
     App --> Dispatcher[dispatcher 规则 / 权限 / 派发]
+    Dispatcher --> Triggers[trigger_policy / participation 参与判断]
+    Dispatcher --> Sandbox[sandbox 能力 / 裁决 / 工作区]
     Dispatcher --> Packages[独立插件包]
     Packages --> SDK[plugin SDK / Context]
     SDK --> Storage[storage 持久化]
     SDK --> LLM[llm 模型与会话]
+    SDK --> Sandbox
     UI[ui 管理界面] --> API[api 鉴权与管理接口]
     API --> App
     Packages --> Services[外部服务：TTS / 搜索等]
@@ -43,6 +46,9 @@ flowchart LR
 | `onebot/` | 消息模型、消息段、连接与协议交互，不反向调用插件或管理 API |
 | `dispatcher.py` / `rules.py` | 处理器派发、规则、并发、超时与冷却 |
 | `permission.py` / `policy.py` | 开关、用户和群权限、策略解析；插件复用而非重复实现 |
+| `trigger_policy.py` / `participation.py` | 触发决策与自动参与评分；只读当前消息和短期状态，不请求模型 |
+| `sandbox/` | 工具能力声明、策略解析、操作裁决、工作区文件与受控联网；不导入插件、协议或存储 |
+| `tool_executor.py` | 工具校验、权限复核、沙盒裁决、执行事实与审计；拒绝不产生外部动作 |
 | `storage/` | SQLite 与迁移、消息和配置持久化，不导入 UI、插件或应用入口 |
 | `events.py` / `logging_setup.py` | 事件分发、去重、日志与观测 |
 | `llm/` | 模型客户端、会话、人设、输出与转发消息适配；不依赖具体插件或 API 页面 |
@@ -73,7 +79,8 @@ fllbot/plugin/
 ## 依赖边界
 
 协议、存储、基础配置、事件与规则层不反向依赖应用装配或插件实现。
-plugin SDK 可使用 rules 与 onebot；通过 Context 和类型约定访问装配后的宿主，不运行时导入 app.py。
+plugin SDK 可使用 rules、onebot 与 sandbox；通过 Context 和类型约定访问装配后的宿主，不运行时导入 app.py。
+sandbox 自身只依赖标准库与 httpx，不导入插件、协议、存储或管理接口，保证裁决层可以被独立测试。
 llm 使用配置、协议模型和策略解析，不导入插件包、管理 API 或页面。
 app、dispatcher 与 api 负责连接这些能力，用户插件不导入 app 或 api 的内部实现。
 
@@ -100,6 +107,19 @@ app、dispatcher 与 api 负责连接这些能力，用户插件不导入 app �
 统一脚本校验核心架构、标准插件包、`fllbot/plugins/tests/scripts` 的代码和项目回归测试。
 services 有独立运行环境和依赖，应单独验证；不随机器人框架测试启动真实 TTS、模型或 QQ 连接。
 插件开发命令和文件头约定见 [插件包规范](plugin-packages.md)，具体 SDK 见 [插件 API](plugin-api.md)。
+
+### 群聊智能体参与与执行沙盒
+
+自动参与先经过 `participation` 的确定性评分：@、唤醒词、提问、接话提高分数，纯语气词、复读、刷屏降低分数；
+低于群阈值时不请求模型，只记录触发决策原因。阈值默认较低，明确请求不会被过滤，是否开口仍由模型决定。
+
+AI 工具在 `on_ai_tool` 中声明 `capabilities` 与 `risk`，`ToolExecutor` 在任何钩子和回调之前调用
+`SandboxService.runtime(ctx).check()`。裁决依次检查能力开关、路径（绝对/越界/敏感文件）、链接
+（协议/主机白名单/内网地址）、发起者权限与触发方式、本轮调用额度；写入与管理类操作在自动参与时拒绝。
+只有真正执行才消耗额度；拒绝结果以 `tool_blocked` 返回模型，并写入仅含元数据的追踪与沙盒最近裁决。
+
+`ctx.sandbox` 提供工作区内文件读写与受控联网，解析后再次校验根目录并在每次重定向时复核目标；
+沙盒是进程内资源围栏，不替代操作系统隔离。设计细节与拒绝原因见 [群聊智能体与执行沙盒](agent-sandbox.md)。
 
 ### 数据保留事务与会话失效
 

@@ -28,7 +28,8 @@
 - **LLM 子系统**：OpenAI 兼容接口、上下文与人格管理，可供管理 API 和自定义插件使用
 - **管理 API**：状态/连接/插件/群/配置/日志/统计/人格/插件配置、通用 OneBot 调用、KV 读写、SSE 实时事件流
 - **可靠性**：有界事件队列与溢出统计、分阶段关闭与任务排空、SQLite 在线备份和校验后恢复
-- **开箱内置插件**：`basic`（包含 `ping`、`echo`、`help`、`plugins` 命令）、`agent`（群级自然语言智能体）、`text`（智能体文本、图片与架构图排版工具）、`github`（公开仓库读取）、`files`（QQ 文本与代码附件读取）和 `oni_knowledge`（本地缺氧源码检索与读取；工具需在后台授权）
+- **开箱内置插件**：`basic`（包含 `ping`、`echo`、`help`、`plugins` 命令）、`agent`（群级自然语言智能体）、`text`（智能体文本、图片与架构图排版工具）、`github`（公开仓库读取）、`files`（QQ 文本与代码附件读取）、`oni_knowledge`（本地缺氧源码检索与读取；工具需在后台授权）和 `workspace`（沙盒工作区文件读写与受控网页读取）
+- **群聊参与与执行沙盒**：自动参与先用确定性信号评分（@、唤醒词、提问、接话加分；纯语气词、复读、刷屏减分），通过后才请求模型；AI 工具声明能力与风险，执行前统一裁决能力开关、工作区路径、主机白名单、发起者权限与自动参与边界，拒绝不产生外部动作
 
 ## 快速开始（Windows）
 
@@ -101,6 +102,7 @@ INFO  fllbot: FLLBot 0.1.0 已启动：WS /onebot/v11/ws | 插件 2 个 | LLM �
 | `storage` | `path` `backup_dir` | SQLite 路径只在启动来源修改；备份目录可在线更新 |
 | `logging` | `level` `dir` `json_lines` `ring_size` | 控制台 + JSONL 文件 + 内存环形缓冲 |
 | `llm` | `enabled` `base_url` `api_key` `model` `persona` ... | LLM 服务配置，供 API 与自定义插件使用 |
+| `sandbox` | `allow_write` `allow_network` `allowed_hosts` `workspace` `max_*` | 智能体工具的能力开关、工作区、主机范围与单轮额度 |
 
 > 运行时用 `PATCH /api/config` 修改的参数会保存到数据库并在重启后保留。监听、数据库位置、插件加载、日志文件和管理入口等启动参数必须在配置文件/启动命令中修改并重启；在线修改返回 409，整次请求不保存。旧版未生效的启动覆盖会归档保留，后台可只读查看。完整范围见 [配置与数据作用域](docs/admin-scope.md)。
 
@@ -113,7 +115,7 @@ INFO  fllbot: FLLBot 0.1.0 已启动：WS /onebot/v11/ws | 插件 2 个 | LLM �
 | `/help`（`帮助` `菜单` `commands`） | 列出可用命令 | 所有人 |
 | `/plugins`（`插件`） | 插件状态 | 所有人 |
 
-LLM 客户端和管理 API 可供自定义插件调用。WebUI 将行为与群聊规则收进“配置”，将模型和人格作为可复用资源管理。智能体默认不读取群消息；开启后可选择仅 @、唤醒词或自动参与群聊，并勾选可调用的插件工具。
+LLM 客户端和管理 API 可供自定义插件调用。WebUI 将行为与群聊规则收进“配置”，将模型和人格作为可复用资源管理。智能体默认不读取群消息；开启后可选择仅 @、唤醒词或自动参与群聊，并勾选可调用的插件工具。自动参与会先经过确定性评分，明显无需接话的消息不请求模型；工具执行前还会按沙盒策略自动判断能否执行。
 
 ## 联网工具（web 插件）
 
@@ -128,6 +130,24 @@ LLM 客户端和管理 API 可供自定义插件调用。WebUI 将行为与群�
 智能体工具：`web__web_search`、`web__read_webpage`、`web__get_weather`、`web__get_current_time`。
 需要阅读指定链接时授权「读取网页」；在「智能体 → 允许调用的工具」（或单群详细设置的“可用工具”）里勾选对应工具后，模型才会看到它们；配置项（搜索后端、
 API Key、默认城市、预报天数、超时）都在插件配置里，详见 [plugins/web/README.md](plugins/web/README.md)。
+
+## 沙盒工作区（workspace 插件）
+
+`workspace` 给智能体一个受限的动手环境，工具都通过宿主 `ctx.sandbox` 访问资源：
+
+| 工具 | 能力 | 说明 |
+| --- | --- | --- |
+| `workspace__list_files` | `fs.read` | 列出工作区内相对目录 |
+| `workspace__read_file` | `fs.read` | 读取工作区内文本文件 |
+| `workspace__write_file` | `fs.write` | 写入文本（默认关闭，需管理员开启；自动参与时不会执行） |
+| `workspace__fetch_url` | `net.read` | 抓取公开 http(s) 文本页面 |
+
+工作区默认 `data/agent_workspace/`；绝对路径、`..`、软链接逃逸和 `.env`、数据库、令牌、日志等
+敏感文件会被拒绝。联网受主机白/黑名单与内网地址检查约束，每次跳转重新校验。
+
+策略在 `config.toml` 的 `[sandbox]`（`allow_write`、`allowed_hosts`、大小与额度等），
+单群可用 `sandbox_write` / `sandbox_network` 收紧或放宽。完整说明见
+[群聊智能体与执行沙盒](docs/agent-sandbox.md)。
 
 ## 写插件
 
@@ -270,10 +290,13 @@ fllbot/
 ├── plugin/             # 插件基类、上下文、加载器（热重载）
 ├── dispatcher.py       # 优先级 / 阻断 / 权限 / 限流
 ├── permission.py       # 超管、群开关、插件开关、冷却
+├── trigger_policy.py   # 触发决策与自动参与状态
+├── participation.py    # 自动参与评分（确定性、可解释）
+├── sandbox/            # 能力声明、操作裁决、工作区文件与受控联网
 ├── storage/            # SQLite + 迁移 + 仓储
 ├── llm/                # 客户端、人格、多轮对话
 ├── api/                # 管理 REST + SSE
-├── builtin_plugins/    # basic、agent、text、github、files 与 oni_knowledge
+├── builtin_plugins/    # basic、agent、text、github、files、oni_knowledge 与 workspace
 plugins/                # 用户插件（运行时加载，已 gitignore 之外）
 personas/               # 用户人格（全部由你创建，程序不内置人格）
 tools/                  # fake_napcat.py、smoke_test.py

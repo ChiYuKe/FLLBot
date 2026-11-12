@@ -107,6 +107,28 @@
 | `chat.wake_only_mode` | `"prompt"` | 聊天默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `chat.wake_only_prompt` | `"（用户只叫了你的名字，没有说具体内容，请简短自然地回应。）"` | 聊天默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `chat.wake_only_replies` | `[]` | 聊天默认 | 后续请求/消息；保存后不追溯已开始操作 |
+| `sandbox.enabled` | `true` | 沙盒策略 | 后续工具调用；关闭后未声明能力的旧行为继续生效 |
+| `sandbox.workspace` | `"data/agent_workspace"` | 沙盒策略 | 后续工具调用；相对项目根目录解析 |
+| `sandbox.allow_read` | `true` | 沙盒策略 | 后续工具调用；单群不可覆盖 |
+| `sandbox.allow_write` | `false` | 沙盒策略 | 后续工具调用；单群可用 sandbox_write 覆盖 |
+| `sandbox.allow_network` | `true` | 沙盒策略 | 后续工具调用；单群可用 sandbox_network 覆盖 |
+| `sandbox.allow_network_write` | `false` | 沙盒策略 | 后续工具调用；单群不可覆盖 |
+| `sandbox.allow_private_network` | `false` | 沙盒策略 | 后续工具调用；单群可用 sandbox_private_network 覆盖 |
+| `sandbox.allow_qq_send` | `true` | 沙盒策略 | 后续工具调用；只影响显式声明 qq.send 的工具 |
+| `sandbox.allow_destructive` | `false` | 沙盒策略 | 后续工具调用；破坏性能力默认关闭 |
+| `sandbox.allow_process` | `false` | 沙盒策略 | 后续工具调用；当前没有本机程序执行器 |
+| `sandbox.destructive_requires_superuser` | `true` | 沙盒策略 | 后续工具调用；拒绝非超级管理员发起的破坏性操作 |
+| `sandbox.write_requires_addressed` | `true` | 沙盒策略 | 后续工具调用；自动参与时拒绝写入/管理类操作 |
+| `sandbox.allowed_hosts` | `[]` | 沙盒策略 | 后续工具调用；空表示不限制主机 |
+| `sandbox.denied_hosts` | `[]` | 沙盒策略 | 后续工具调用；优先于白名单 |
+| `sandbox.deny_paths` | `[".env", ".env.*", "config.toml", "data/admin_token.txt", "data/fllbot.db", "data/backups", "data/backups/*", "logs", "logs/*", ".git", ".git/*", "*.pem", "*.key", "*.pfx"]` | 沙盒策略 | 后续工具调用；工作区内仍拒绝的敏感路径 |
+| `sandbox.max_read_bytes` | `200000` | 沙盒策略 | 后续工具调用；单次读取上限 |
+| `sandbox.max_write_bytes` | `200000` | 沙盒策略 | 后续工具调用；单次写入上限 |
+| `sandbox.max_fetch_bytes` | `2000000` | 沙盒策略 | 后续工具调用；单次抓取上限 |
+| `sandbox.request_timeout` | `10.0` | 沙盒策略 | 后续工具调用；单次联网超时秒数 |
+| `sandbox.max_redirects` | `3` | 沙盒策略 | 后续工具调用；每次跳转重新校验 |
+| `sandbox.max_calls_per_turn` | `16` | 沙盒策略 | 后续工具调用；按事件上下文计数 |
+| `sandbox.max_write_calls_per_turn` | `4` | 沙盒策略 | 后续工具调用；按事件上下文计数 |
 | `retention.enabled` | `false` | 数据维护 | 后续定时检查；保存不立即清理 |
 | `retention.interval_seconds` | `3600` | 数据维护 | 后续定时检查；调度器每 60 秒检查一次 |
 | `retention.messages_days` | `0` | 数据维护 | 后续请求/消息；保存后不追溯已开始操作 |
@@ -129,6 +151,7 @@
 | `llm.providers.*.base_url` | `""` | 模型服务 | 后续请求；继承规则见上文 |
 | `llm.providers.*.api_key` | `""` | 模型服务 | 后续请求；继承规则见上文 |
 | `llm.providers.*.api_key_env` | `""` | 模型服务 | 后续请求；继承规则见上文 |
+| `llm.providers.*.inherit_api_key` | `true` | 模型服务 | 后续请求；false 时不继承全局 api_key，需服务自身密钥或环境变量 |
 | `llm.providers.*.model` | `""` | 模型服务 | 后续请求；继承规则见上文 |
 | `llm.providers.*.timeout` | `null` | 模型服务 | 后续请求；继承规则见上文 |
 | `llm.providers.*.max_tokens` | `null` | 模型服务 | 后续请求；继承规则见上文 |
@@ -162,6 +185,10 @@
 | `group_policy.trigger_prefix` | `null` | 群单独配置 | 保留兼容字段；当前实际唤醒词见 chat.wake_word 与 Bot 默认值 |
 | `group_policy.cooldown_seconds` | `null` | 群单独配置 | 后续消息；同群多个 Bot 共享覆盖 |
 | `group_policy.auto_reply_probability` | `null` | 群单独配置 | 后续消息；同群多个 Bot 共享覆盖 |
+| `group_policy.participation_threshold` | `null` | 群单独配置 | 后续消息；自动参与评分阈值，null 跟随插件默认 -10 |
+| `group_policy.sandbox_write` | `null` | 群单独配置 | 后续工具调用；null 跟随全局 sandbox.allow_write |
+| `group_policy.sandbox_network` | `null` | 群单独配置 | 后续工具调用；null 跟随全局 sandbox.allow_network |
+| `group_policy.sandbox_private_network` | `null` | 群单独配置 | 后续工具调用；null 跟随全局 sandbox.allow_private_network |
 | `group_policy.max_tool_rounds` | `null` | 旧版兼容字段 | 已停用，工具调用不限制轮数 |
 | `group_policy.allowed_tools` | `null` | 群单独配置 | 后续消息；同群多个 Bot 共享覆盖 |
 | `group_policy.provider` | `""` | 群单独配置 | 后续消息；同群多个 Bot 共享覆盖 |

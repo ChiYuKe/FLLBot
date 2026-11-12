@@ -162,6 +162,34 @@ async def lookup_order(ctx: Context, order_id: str) -> dict[str, str]:
 
 `title` 是管理端展示用的名称（例如「联网搜索」），省略时回退到工具名。回调签名为 `async def callback(ctx, **arguments)`，工具 ID 会以 `插件名__工具名` 的形式交给模型，也是单群策略 `allowed_tools` 里保存的值。模型服务需兼容 OpenAI Chat Completions 的 `tools` / `tool_calls` 格式。
 
+工具可以声明沙盒能力，让宿主在执行前做统一裁决：
+
+```python
+@plugin.on_ai_tool(
+    "write_note",
+    effect="side_effecting",
+    capabilities=("fs.write",),
+    risk="write",  # 可省略；不能低于能力推导出的下限
+    title="写入工作区",
+    description="把文本写入沙盒工作区",
+    parameters={
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "content": {"type": "string"}},
+        "required": ["path", "content"],
+        "additionalProperties": False,
+    },
+)
+async def write_note(ctx: Context, path: str, content: str) -> dict:
+    return ctx.sandbox.files.write_text(path, content)
+```
+
+能力取值为 `fs.read`、`fs.write`、`net.read`、`net.write`、`qq.send`、`qq.manage`、`memory.read`、
+`system.read`、`process.exec`；`risk` 为 `read`、`write`、`destructive`。未声明能力的旧工具保持原有权限行为。
+声明后，宿主按 `[sandbox]` 策略检查能力开关、参数中的路径与链接、发起者权限、自动参与边界和本轮额度；
+被拒绝时回调不会执行，模型收到 `{"error": "tool_blocked", "reason": ...}`。文件与联网应通过
+`ctx.sandbox.files` / `ctx.sandbox.network`，不要自行打开路径或创建 HTTP 客户端。详见
+[群聊智能体与执行沙盒](agent-sandbox.md)。能力与风险也会出现在 `GET /api/tools` 和插件元数据里。
+
 ## 声明式配置
 
 插件可以声明自己的配置项，管理端（含你的桌面端）能用 `/api/plugins/{name}/settings`
