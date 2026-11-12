@@ -382,3 +382,48 @@ async def test_long_current_input_is_not_silently_truncated(llm_bot):
     ctx = Context(bot=llm_bot, connection=FakeConnection(), event=parse_event(group_message(text, at=10001)))
     await llm_bot.chat.respond(ctx, text)
     assert captured[0]['messages'][-1]['content'].endswith(text)
+
+
+async def test_opencode_go_session_is_reused_and_scoped(tmp_path, monkeypatch):
+    monkeypatch.setattr("fllbot.llm.client.TRANSIENT_RETRY_DELAYS", (0.0,))
+    bot = build_bot(tmp_path, llm={
+        **LLM_CONFIG, "context_window": 8192, "default": "go",
+        "providers": {
+            "go": {"base_url": "https://opencode.ai/inference/go/openai/v1"},
+            "other": {"base_url": "https://other.example/v1"},
+        },
+    })
+    calls = []
+
+    def handler(request):
+        session = request.headers.get("x-opencode-session")
+        calls.append((request.url.host, session))
+        if request.url.host == "opencode.ai" and not session:
+            return httpx.Response(400)
+        if len(calls) == 1:
+            return httpx.Response(503)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    messages = [{"role": "user", "content": "hello"}]
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        bot.chat.client._http = http
+        for account, sender in [(10001, 20001), (10001, 20001), (10001, 20002), (10002, 20001)]:
+            with bot.chat.execution_scope("group", 30001, account, sender_id=sender):
+                assert await bot.chat.client.chat(messages) == "ok"
+        await bot.chat.client.chat(messages, provider="other")
+
+    assert calls[0] == calls[1] == calls[2]
+    assert len({session for _, session in calls[:5]}) == 3
+    assert calls[-1] == ("other.example", None)
+
+
+async def test_opencode_go_uses_the_catalog_endpoint():
+    def handler(request):
+        assert request.url.path == "/inference/go/v1/models"
+        assert request.headers.get("x-opencode-session")
+        return httpx.Response(200, json={"data": [{"id": "deepseek-v4.1-flash"}]})
+
+    config = LLMConfig(api_key="test-key", base_url="https://opencode.ai/inference/go/openai/v1")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = LLMClient(lambda: config, http_client=http)
+        assert await client.list_models() == ["deepseek-v4.1-flash"]

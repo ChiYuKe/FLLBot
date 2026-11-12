@@ -300,7 +300,7 @@
     document.getElementById('agent-models-refresh').disabled = true;
     note.textContent = '正在获取可用模型…';
     return request('/api/llm/models/discover', { method: 'POST', body: {
-      base_url: base, api_key: document.getElementById('agent-api-key').value.trim() || null
+      base_url: base, api_key: document.getElementById('agent-api-key').value.trim() || null, top_level: true
     } }).then(function (data) {
       if (id !== modelDiscoveryId) return;
       modelCatalog = Array.isArray(data.models) ? data.models : [];
@@ -833,8 +833,8 @@
     var source = document.createElement('div');
     while (form.firstChild) source.appendChild(form.firstChild);
     var groups = [
-      { title: '群聊响应', description: '控制智能体何时处理本群消息。', keys: ['auto_group', 'trigger_mode', 'trigger_prefix', 'auto_reply_probability', 'cooldown_seconds'] },
-      { title: '工具', description: '选择模型可以调用的工具。工具由插件提供，执行时仍检查插件开关与用户权限。', keys: ['allowed_tools'] }
+      { title: '群聊响应', description: '控制智能体何时处理本群消息；自动参与先评分，低于阈值不请求模型。', keys: ['auto_group', 'trigger_mode', 'trigger_prefix', 'auto_reply_probability', 'participation_threshold', 'cooldown_seconds'] },
+      { title: '工具', description: '选择模型可以调用的工具。工具由插件提供，执行时仍检查插件开关、用户权限与沙盒策略。', keys: ['allowed_tools'] }
     ];
     var fields = {};
     while (source.firstChild) {
@@ -916,6 +916,7 @@
     document.getElementById('agent-temperature').value = agentModelInitial.temperature;
     document.getElementById('agent-system-extra').value = agentModelInitial.system_extra;
     document.getElementById('model-manual').value = agentModelInitial.model;
+    renderModelProviders(llm);
   }
 
   function renderPersonaList() {
@@ -1103,6 +1104,7 @@
     if (agentModelLoading) return;
     agentModelLoading = true;
     agentModelLoaded = false;
+    document.getElementById('model-providers').hidden = true;
     document.getElementById('agent-model').disabled = true;
     syncModelPicker();
     document.getElementById('agent-model-save').disabled = true;

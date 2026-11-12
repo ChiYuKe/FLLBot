@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import time
+import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -28,6 +29,15 @@ DEFAULT_CONTEXT_WINDOW = 8192
 
 # 网络异常、429 和临时 5xx 的有限重试间隔；其他 HTTP 错误直接返回。
 TRANSIENT_RETRY_DELAYS: tuple[float, ...] = (0.6, 1.5)
+
+
+def _opencode_go_path(base_url: str) -> str:
+    url = httpx.URL(base_url)
+    if url.scheme == "https" and url.host == "opencode.ai":
+        path = url.path.rstrip("/") + "/"
+        if path.startswith(("/zen/go/", "/inference/go/")):
+            return path
+    return ""
 
 
 class LLMError(RuntimeError):
@@ -80,10 +90,12 @@ class LLMClient:
         config_provider: Callable[[], LLMConfig],
         *,
         http_client: httpx.AsyncClient | None = None,
+        session_id: Callable[[], str] | None = None,
     ) -> None:
         self._config_provider = config_provider
         self._http = http_client
         self._owns_client = http_client is None
+        self._session_id = session_id
         self.logger = logging.getLogger("fllbot.llm")
         self._catalogs: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
         self._capacity = asyncio.Condition()
@@ -180,7 +192,10 @@ class LLMClient:
         if not key:
             hint = f"（环境变量 {provider.api_key_env}）" if provider.api_key_env else ""
             raise LLMError(f"未配置 API Key{hint}")
-        return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+        if _opencode_go_path(provider.base_url):
+            headers["x-opencode-session"] = self._session_id() if self._session_id else uuid.uuid4().hex
+        return headers
 
     def _payload(
         self,
@@ -224,12 +239,13 @@ class LLMClient:
         timeout: float | None,
     ) -> httpx.Response:
         """发送请求；连接失败、超时等传输层错误按 ``TRANSIENT_RETRY_DELAYS`` 重试。"""
+        headers = self._headers(config)
         attempts = len(TRANSIENT_RETRY_DELAYS) + 1
         for attempt in range(attempts):
             try:
                 response = await self._client().post(
                     url,
-                    headers=self._headers(config),
+                    headers=headers,
                     json=payload,
                     timeout=timeout or config.timeout or 60.0,
                 )
@@ -648,9 +664,13 @@ class LLMClient:
         base_url: str | None = None,
         api_key: str | None = None,
         cached: bool = False,
+        top_level: bool = False,
     ) -> list[dict[str, Any]]:
         """Discover using draft credentials without saving them or returning secrets."""
-        _, resolved = self.resolve(provider=provider)
+        if top_level:
+            _, resolved = self.config.model_copy(update={"providers": {}}).resolve()
+        else:
+            _, resolved = self.resolve(provider=provider)
         config = resolved.model_copy(
             update={
                 "base_url": base_url.strip() if base_url is not None else resolved.base_url,
@@ -658,6 +678,8 @@ class LLMClient:
             }
         )
         base = self.endpoint(config.base_url).removesuffix("/chat/completions")
+        if _opencode_go_path(config.base_url).startswith("/inference/go/"):
+            base = "https://opencode.ai/inference/go/v1"
         key = (base, self._api_key(config))
         previous = self._catalogs.get(key)
         if cached and previous and time.monotonic() - previous[0] < 300:

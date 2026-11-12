@@ -275,11 +275,18 @@ function loadProviders() {
     var form = h('form', {class:'settings-form'}), grid = h('div', {class:'form-grid'});
     var token = h('input', {type:'number', min:0, step:1, 'aria-label':'每群每日 Token 上限'}); token.value = config.group_daily_token_limit || 0;
     var cost = h('input', {type:'number', min:0, step:'any', 'aria-label':'每群每日费用上限'}); cost.value = config.group_daily_cost_limit || 0;
+    var defaultProvider = h('select', {'aria-label':'默认供应商'});
+    items.forEach(function (item) {
+      defaultProvider.appendChild(h('option', {value:item.name, text:item.name}));
+    });
+    defaultProvider.value = items.some(function (item) { return item.name === config.default; })
+      ? config.default : (items[0] || {}).name || '';
     var fallback = h('input', {type:'text', 'aria-label':'备用模型服务', placeholder:'按顺序填写服务名称，用逗号分隔'}); fallback.value = (config.fallback_providers || []).join(', ');
     grid.appendChild(h('label', {class:'setting-field'}, h('span', {text:'每群每日 Token 上限（0 为不限）'}), token));
     grid.appendChild(h('label', {class:'setting-field'}, h('span', {text:'每群每日费用上限（0 为不限）'}), cost));
+    grid.appendChild(h('label', {class:'setting-field'}, h('span', {text:'默认供应商'}), defaultProvider));
     grid.appendChild(h('label', {class:'setting-field'}, h('span', {text:'备用模型服务'}), fallback));
-    var save = h('button', {type:'submit',class:'btn primary',text:'保存额度与备用服务'}), note = h('p', {class:'settings-note',role:'status'});
+    var save = h('button', {type:'submit',class:'btn primary',text:'保存路由与额度'}), note = h('p', {class:'settings-note',role:'status'});
     form.appendChild(h('h3', {text:'额度与故障恢复'})); form.appendChild(grid);
     form.appendChild(h('p', {class:'settings-note',text:'额度对每个群分别累计，按服务器日期重置，并预留本轮回复预算。费用使用配置单价估算，需为主模型和备用模型填写单价。遇到临时服务故障才尝试备用模型。'}));
     form.appendChild(save); form.appendChild(note);
@@ -288,9 +295,18 @@ function loadProviders() {
       var names = fallback.value.split(/[,，]/).map(function (value) {return value.trim();}).filter(Boolean);
       if (names.some(function (name) {return !items.some(function (item) {return item.name === name;});})) { note.textContent = '备用服务名称必须是上面已有的模型服务'; return; }
       save.disabled = true;
-      request('/api/config', {method:'PATCH',headers:configRevision?{'If-Match':configRevision}:{},body:{llm:{group_daily_token_limit:Number(token.value),group_daily_cost_limit:Number(cost.value),fallback_providers:names}}}).then(function (result) {
-        configRevision=result.revision;
-        markSaved('models'); note.textContent = '额度与备用服务已保存'; toast('设置已保存');
+      request('/api/config', {method:'PATCH',headers:configRevision?{'If-Match':configRevision}:{},body:{llm:{default:defaultProvider.value,group_daily_token_limit:Number(token.value),group_daily_cost_limit:Number(cost.value),fallback_providers:names}}}).then(function (result) {
+        if (agentModelRevision === configRevision) {
+          agentModelRevision = result.revision;
+          modelProviderConfig.default = result.config.llm.default;
+          modelProviderConfig.fallback_providers = result.config.llm.fallback_providers;
+        }
+        configRevision = result.revision;
+        markSaved('models'); note.textContent = '路由与额度已保存'; toast('设置已保存');
+        items.forEach(function (item, index) {
+          node.children[index].firstChild.textContent = item.name + ' · ' + item.model
+            + (item.name === result.config.llm.default ? ' · 默认' : '');
+        });
       }).catch(function (error) {note.textContent = error.message;}).finally(function () {save.disabled = false;});
     });
     node.appendChild(form);
@@ -324,6 +340,122 @@ function loadResourceReferences(node,kind,name) {
   }).catch(function(error){if(node.dataset.requestId===requestId)node.textContent='读取引用失败：'+error.message;throw error;});
 }
 document.getElementById('persona-references-refresh').addEventListener('click',function(){loadResourceReferences(document.getElementById('persona-references'),'persona',personaEditingName).catch(function(){});});
+
+var modelProviderConfig = {};
+var modelProvidersBusy = false;
+var providerSelect = document.getElementById('provider-select');
+var providerNote = document.getElementById('provider-note');
+var providerName = document.getElementById('provider-name');
+var providerUrl = document.getElementById('provider-url');
+var providerModel = document.getElementById('provider-model');
+var providerKey = document.getElementById('provider-key');
+var providerKeyEnv = document.getElementById('provider-key-env');
+var providerTest = document.getElementById('provider-test');
+var providerDelete = document.getElementById('provider-delete');
+
+function editModelProvider() {
+  var name = providerSelect.value;
+  var saved = modelProviderConfig.providers[name];
+  document.getElementById('provider-name-field').hidden = Boolean(saved);
+  providerName.disabled = Boolean(saved);
+  providerName.value = name;
+  providerUrl.value = saved ? saved.base_url || modelProviderConfig.base_url : '';
+  providerModel.value = saved ? saved.model || modelProviderConfig.model : '';
+  providerKey.value = '';
+  providerKeyEnv.value = saved ? saved.api_key_env || '' : '';
+  providerTest.disabled = !saved;
+  providerDelete.disabled = !saved;
+}
+
+function renderModelProviders(llm, selected) {
+  modelProviderConfig = Object.assign({}, llm, { providers: Object.assign(Object.create(null), llm.providers) });
+  var names = Object.keys(modelProviderConfig.providers);
+  providerSelect.replaceChildren(h('option', { value: '', text: '新增供应商' }));
+  names.forEach(function (name) {
+    providerSelect.appendChild(h('option', { value: name, text: name }));
+  });
+  providerSelect.value = names.includes(selected) ? selected : names[0] || '';
+  document.getElementById('model-providers').hidden = false;
+  editModelProvider();
+}
+
+function saveModelProviders(patch, selected, message) {
+  if (!agentModelLoaded || modelProvidersBusy) return;
+  modelProvidersBusy = true;
+  providerNote.textContent = '正在保存…';
+  request('/api/config', {
+    method: 'PATCH', headers: agentModelRevision ? { 'If-Match': agentModelRevision } : {}, body: { llm: patch }
+  }).then(function (data) {
+    agentModelRevision = data.revision;
+    renderModelProviders(data.config.llm, selected);
+    providerNote.textContent = message;
+    markSaved('models');
+    return Promise.all([refresh(), loadProviders()]);
+  }).catch(function (error) {
+    providerNote.textContent = error.message;
+  }).finally(function () {
+    modelProvidersBusy = false;
+  });
+}
+
+providerSelect.addEventListener('change', function () {
+  providerNote.textContent = '';
+  editModelProvider();
+});
+
+document.getElementById('model-provider-form').addEventListener('submit', function (event) {
+  event.preventDefault();
+  var name = providerSelect.value || providerName.value.trim();
+  var saved = modelProviderConfig.providers[name];
+  var base = providerUrl.value.trim();
+  var model = providerModel.value.trim();
+  var key = providerKey.value.trim();
+  var env = providerKeyEnv.value.trim();
+  if (!name || (!providerSelect.value && saved) || !/^https?:\/\/\S+$/i.test(base) || !model) {
+    providerNote.textContent = '请填写唯一的供应商标识、HTTP(S) 服务地址和模型名称。';
+    return;
+  }
+  if ((!saved || base !== (saved.base_url || modelProviderConfig.base_url)) && !key && !env) {
+    providerNote.textContent = '新增供应商或更换服务地址时，请填写对应的 API Key 或密钥环境变量。';
+    return;
+  }
+  var patch = { base_url: base, model: model, api_key_env: env };
+  if (key || !saved || base !== (saved.base_url || modelProviderConfig.base_url)) {
+    patch.api_key = key;
+    patch.inherit_api_key = false;
+  }
+  var values = { providers: { [name]: patch } };
+  if (!Object.keys(modelProviderConfig.providers).length && name !== 'default') {
+    values.providers.default = {};
+    if (!modelProviderConfig.api_key) values.default = name;
+  }
+  saveModelProviders(values, name, '供应商已保存。');
+});
+
+providerDelete.addEventListener('click', function () {
+  var name = providerSelect.value;
+  if (!name || modelProvidersBusy || !window.confirm('删除供应商 ' + name + '？')) return;
+  var names = Object.keys(modelProviderConfig.providers).filter(function (item) { return item !== name; });
+  var patch = {
+    providers: { [name]: null },
+    default: names.includes(modelProviderConfig.default) ? modelProviderConfig.default : names[0] || 'default',
+    fallback_providers: (modelProviderConfig.fallback_providers || []).filter(function (item) { return item !== name; })
+  };
+  saveModelProviders(patch, '', '供应商已删除。');
+});
+
+providerTest.addEventListener('click', function () {
+  var name = providerSelect.value;
+  if (!name || modelProvidersBusy) return;
+  modelProvidersBusy = true;
+  providerTest.disabled = true;
+  providerNote.textContent = '正在测试 ' + name + '…';
+  request('/api/llm/test', { method: 'POST', body: { provider: name, prompt: '请简短回复：连接成功。' } })
+    .then(function (data) { providerNote.textContent = name + ' 连接成功 · ' + (data.latency_ms || 0) + ' ms'; })
+    .catch(function (error) { providerNote.textContent = name + ' 测试失败：' + error.message; })
+    .finally(function () { modelProvidersBusy = false; providerTest.disabled = !providerSelect.value; });
+});
+
 document.getElementById('model-test').addEventListener('click', function () {
   var button = this; button.disabled = true;
   document.getElementById('model-save-note').textContent = '正在请求已保存的模型…';

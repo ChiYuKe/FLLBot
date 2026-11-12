@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import logging
+import uuid
 from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
@@ -39,7 +40,8 @@ class ChatService:
     ) -> None:
         self.bot = bot
         self.logger = logging.getLogger("fllbot.llm")
-        self.client = LLMClient(lambda: self.execution_config.llm)
+        self.client = LLMClient(lambda: self.execution_config.llm, session_id=self._model_session_id)
+        self._model_session_namespace = uuid.uuid4()
         self._conversation_pool = ConversationLockPool()
         from .memory import GroupMemory
 
@@ -113,8 +115,16 @@ class ChatService:
             return copy.deepcopy(snapshot.agent)
         return agent_settings(self.bot,group_id,self_id)
 
+    def _model_session_id(self) -> str:
+        snapshot = current(self.bot)
+        if snapshot is None or snapshot.scene not in {"group", "private"} or not snapshot.scene_id:
+            return uuid.uuid4().hex
+        scope = f"{snapshot.self_id}:{snapshot.scene}:{snapshot.scene_id}:{snapshot.sender_id}"
+        return uuid.uuid5(self._model_session_namespace, scope).hex
+
     @contextmanager
-    def execution_scope(self, scene: str, scene_id: int, self_id: int | None = None, config: Any = None):
+    def execution_scope(self, scene: str, scene_id: int, self_id: int | None = None, config: Any = None, *,
+                        sender_id: int = 0):
         if current(self.bot) is not None:
             yield
             return
@@ -130,12 +140,15 @@ class ChatService:
             self.bot.bots.defaults(self_id).model_copy(deep=True),
             copy.deepcopy(self.bot.personas),
             copy.deepcopy(agent_settings(self.bot,scene_id,self_id)) if scene == 'group' else {},
+            self_id=self_id or 0,
+            sender_id=sender_id if scene == "group" else 0,
         )
         with execution_scope(snapshot):
             yield
 
     def scope_for_turn(self, ctx: Context, config: Any):
-        return self.execution_scope(ctx.event.scene, ctx.event.scene_id, ctx.self_id, config)
+        return self.execution_scope(ctx.event.scene, ctx.event.scene_id, ctx.self_id, config,
+                                    sender_id=ctx.user_id)
 
     def _group_config(self, scene_id: int) -> dict:
         snapshot = current(self.bot)
@@ -415,12 +428,15 @@ class ChatService:
     async def test(self, prompt: str, *, persona_name: str | None = None, provider: str | None = None) -> ChatReply:
         """管理端自测：不带历史，直接用默认人格回答。"""
         config = self.config
+        if provider and provider not in config.provider_names():
+            raise LLMError("模型服务不存在")
         system = {
             "role": "system",
             "content": self.system_prompt("private", 0, None, persona_name),
         }
         messages = [system, {"role": "user", "content": prompt}]
-        reply = await self.complete(messages, provider=provider, scene="test", task="chat")
+        reply = await self.complete(messages, provider=provider, scene="test", task="chat",
+                                    allow_fallback=provider is None)
         reply.persona = persona_name or config.persona
         return reply
 
