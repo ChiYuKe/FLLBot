@@ -16,6 +16,9 @@ logs/
 .test-*/
 .verify-*/
 
+# 本地临时数据：测试临时目录、一次性缓存统一收纳在此，不要堆在项目根目录
+.local/
+
 # 运行中的插件目录进程锁与升级备份
 plugins/.packages.lock
 plugins/.previous/
