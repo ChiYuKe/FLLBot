@@ -123,7 +123,7 @@ def test_repeated_code_glyphs_have_identical_pixel_shape_and_baseline():
 
 async def test_registration_and_loading(tmp_path):
     assert not plugin.handlers
-    assert len(plugin.ai_tools) == 9
+    assert len(plugin.ai_tools) == 10
     bot = build_bot(tmp_path)
     await bot.start()
     try:

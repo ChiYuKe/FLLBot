@@ -5,20 +5,21 @@ from __future__ import annotations
 import asyncio
 import base64
 
-from fllbot.llm.output import send_media_reply
-from fllbot.onebot.segments import MessageSegment
-from fllbot.plugin import Context, Plugin
-from fllbot.rendering.diagram_render import render_diagram as render_diagram_image
-from fllbot.rendering.text_image import join_pages as _join_pages
+from fllbot.plugin import Context, MessageSegment, Plugin, send_media_reply
+from fllbot.plugin.rendering import join_pages as _join_pages
+from fllbot.plugin.rendering import render_diagram as render_diagram_image
 
-from .file_export import export_file
+from .file_export import export_file, export_text_file
 from .service import MAX_CHARS, process, render
 
 plugin = Plugin.from_manifest(__file__)
 plugin.agent_instruction(
-    "file_delivery", tools=["send_html_file", "send_markdown_file"],
-    text="用户要求 HTML 或 Markdown/MD 文件时，先整理完整内容，再调用对应文件工具一次发送附件。"
-    "HTML 文件默认将 Markdown 排版成完整网页；MD 文件保留 Markdown 原文。"
+    "file_delivery", tools=["send_html_file", "send_markdown_file", "send_text_file"],
+    text="用户要求 HTML、Markdown 或代码/文本文件时，先整理完整内容，再调用对应文件工具一次发送附件。"
+    "HTML 文件默认将 Markdown 排版成完整网页；MD 文件保留 Markdown 原文；"
+    "代码/文本文件使用 send_text_file，文件名必须带支持的扩展名（如 main.py、app.js、config.json）。"
+    "用户要求“指定大小的文件”（如 1 MB 的 fault.cpp）时，传 target_bytes 让工具把文件补到该字节数，"
+    "不要拒绝或让用户自己执行命令；补的是注释或空行，需在回复中说明。"
     "不要把文件正文仅贴到聊天里代替附件；成功发送后只做简短提示，不重复全文。"
     "失败或送达不确定时如实说明，不声称文件已发送，不自动重发。",
 )
@@ -251,19 +252,28 @@ def file_parameters(*, html: bool = False) -> dict:
     return parameters
 
 
-async def send_document(ctx: Context, text: str, kind: str, filename: str, *, format: str = "markdown") -> dict:
+async def send_document(
+    ctx: Context, text: str, kind: str, filename: str, *, format: str = "markdown", target_bytes: int = 0
+) -> dict:
     try:
-        name, payload = await asyncio.to_thread(export_file, text, kind, filename, format=format)
+        if kind == "text":
+            name, payload = await asyncio.to_thread(export_text_file, text, filename, target_bytes)
+        else:
+            name, payload = await asyncio.to_thread(export_file, text, kind, filename, format=format)
     except (ValueError, ImportError) as exc:
         return {"error": "缺少 HTML 排版依赖，请更新安装 FLLBot" if isinstance(exc, ImportError) else str(exc)}
     segments = [MessageSegment.file("base64://" + base64.b64encode(payload).decode("ascii"), name=name)]
     sent = await send_media_reply(ctx, segments, text, require_ai=True)
-    return {"sent": sent, "files": 1 if sent else 0, "filename": name, "bytes": len(payload)}
+    result = {"sent": sent, "files": 1 if sent else 0, "filename": name, "bytes": len(payload)}
+    if kind == "text" and target_bytes:
+        result["target_bytes"] = target_bytes
+        result["padded"] = len(payload) >= target_bytes > len(text.encode("utf-8"))
+    return result
 
 
 @plugin.on_ai_tool(
     "send_html_file", title="文本转 HTML 文件", effect="side_effecting",
-    capabilities=("qq.send",), timeout=60,
+    capabilities=("qq.send_file",), timeout=60,
     description="将完整文本转成 UTF-8 HTML 附件，发送到当前群聊或私聊。"
     "默认将 Markdown 标题、列表、代码块和表格排版成可离线打开的完整网页；format=plain 原样显示文本。"
     "不执行原始 HTML，不加载图片或其他外部资源。filename 可选，默认 document.html。"
@@ -276,7 +286,7 @@ async def send_html_file(ctx: Context, text: str, filename: str = "document.html
 
 @plugin.on_ai_tool(
     "send_markdown_file", title="文本转 Markdown 文件", effect="side_effecting",
-    capabilities=("qq.send",), timeout=60,
+    capabilities=("qq.send_file",), timeout=60,
     description="将完整 Markdown 或纯文本原样保存为 UTF-8 .md 附件，发送到当前群聊或私聊。"
     "保留换行、代码和 Markdown 符号，不渲染、不摘要、不截断。filename 可选，默认 document.md。"
     "先整理完整内容再调用一次；成功后不要在聊天中重复文件全文。",
@@ -284,3 +294,42 @@ async def send_html_file(ctx: Context, text: str, filename: str = "document.html
 )
 async def send_markdown_file(ctx: Context, text: str, filename: str = "document.md") -> dict:
     return await send_document(ctx, text, "md", filename)
+
+
+text_file_parameters = {
+    "type": "object",
+    "properties": {
+        "text": {
+            "type": "string", "minLength": 1, "maxLength": 30000,
+            "description": "完整文件内容，原样保存，不渲染、不摘要",
+        },
+        "filename": {
+            "type": "string", "minLength": 1, "maxLength": 120,
+            "description": "必须带扩展名的文件名，例如 main.py、app.js、config.json",
+        },
+        "target_bytes": {
+            "type": "integer", "minimum": 1, "maximum": 2 * 1024 * 1024,
+            "description": "可选：把文件补足到指定字节数（末尾追加注释或空行），用于生成指定大小的测试文件"
+            "（1 MB 填 1048576）；不会改动原内容，超过目标大小的内容保持原样",
+        },
+    },
+    "required": ["text", "filename"],
+    "additionalProperties": False,
+}
+
+
+@plugin.on_ai_tool(
+    "send_text_file",
+    title="发送代码/文本文件",
+    effect="side_effecting",
+    capabilities=("qq.send_file",),
+    timeout=60,
+    description="把完整代码或文本原样保存为附件发送到当前会话，支持 .py/.js/.ts/.cs/.json/.yaml/.sh/.ps1 等源码和配置扩展名。"
+    "正文最多 30000 字符、文件最大 2 MiB；文件名必须带受支持的扩展名，不会自动改扩展名。"
+    "用户要求“生成指定大小的文件”（例如 1 MB 的 fault.cpp）时，传 target_bytes 把文件补到该字节数，"
+    "不要拒绝或让用户自己跑命令；补的是注释或空行，回复里要说明是填充内容。"
+    "仅在用户明确要求代码或文本文件时使用；不要把文件正文只贴在聊天里，成功后也不要重复全文。",
+    parameters=text_file_parameters,
+)
+async def send_text_file(ctx: Context, text: str, filename: str, target_bytes: int = 0) -> dict:
+    return await send_document(ctx, text, "text", filename, target_bytes=target_bytes)

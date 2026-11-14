@@ -9,6 +9,7 @@
 | `text__render_diagram` | 把 Mermaid flowchart 绘制成架构图/流程图 PNG 并发送到当前会话 |
 | `text__send_html_file` | 将 Markdown 排版为完整 HTML 网页，以 .html 附件发送；支持纯文本模式 |
 | `text__send_markdown_file` | 将原文保存为 UTF-8 .md 附件发送，保留换行、代码和 Markdown 符号 |
+| `text__send_text_file` | 将代码或文本原样保存为附件发送，支持 .py/.js/.ts/.cs/.json/.yaml 等源码和配置扩展名 |
 | `text__statistics` | 字符、非空白字符、行、汉字与英文单词统计 |
 | `text__transform` | 空白清理、删除空行、按行去重/排序、大小写、NFKC 规范化 |
 | `text__replace` | 全部字面值替换，返回匹配次数 |
@@ -16,7 +17,12 @@
 | `text__codec` | UTF-8 Base64、URL 百分号、HTML 实体编解码 |
 
 例如向智能体说“把这段说明做成图片发出来”“这些名单按行去重”“美化这段 JSON”。
-图片、架构图和两个文件工具会发送消息，其他工具仅返回处理结果给智能体。
+图片、架构图和三个文件工具会发送消息，其他工具仅返回处理结果给智能体。
+
+`send_text_file` 用于“生成代码并作为文件发我”：文件名必须带受支持的扩展名，内容原样保存，
+正文最多 30000 字符，文件最大 2 MiB；需要指定大小的测试文件时传 `target_bytes`，
+工具只用注释或空行补足到该字节数，不改动原内容；不会发送 .exe、.dll、.bat、.cmd、.zip 等非文本或启动器文件。
+三个文件工具都声明 `qq.send_file` 能力，自动参与时会被沙盒拒绝，需要群友明确请求。
 
 ### 结构树
 

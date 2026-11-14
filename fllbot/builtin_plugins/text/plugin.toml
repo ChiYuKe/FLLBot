@@ -1,7 +1,7 @@
 schema_version = 1
 api_version = 1
 name = "text"
-version = "0.9.0"
+version = "0.11.0"
 description = "智能体文本工具：文本转图片、Mermaid 架构图、统计、清理、替换、JSON 与编解码"
 author = ""
 category = "plugin"

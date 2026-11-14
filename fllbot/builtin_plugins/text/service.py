@@ -10,10 +10,10 @@ import re
 import unicodedata
 from urllib.parse import quote, unquote
 
-from fllbot.rendering.text_image import MAX_CHARS as MAX_CHARS
-from fllbot.rendering.text_image import load_font as load_font
-from fllbot.rendering.text_image import render as render
-from fllbot.rendering.text_image import validate as validate
+from fllbot.plugin.rendering import MAX_CHARS as MAX_CHARS
+from fllbot.plugin.rendering import load_font as load_font
+from fllbot.plugin.rendering import render as render
+from fllbot.plugin.rendering import validate as validate
 
 
 def process(operation: str, text: str, **options: str) -> dict:

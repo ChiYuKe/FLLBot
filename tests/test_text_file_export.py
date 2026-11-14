@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from fllbot.builtin_plugins.text.file_export import export_file
+from fllbot.builtin_plugins.text.file_export import MAX_FILE_BYTES, export_file, export_text_file
 from fllbot.onebot.connection import InvalidDeliveryReceipt
 from fllbot.onebot.models import parse_event
 from fllbot.plugin.context import Context
@@ -35,6 +35,34 @@ def test_html_document_formats_markdown_without_active_content():
     assert "[图片：外部图片]" in result and "Content-Security-Policy" in result
     _, plain = export_file("# <测试>", "html", "plain", format="plain")
     assert "<pre># &lt;测试&gt;</pre>" in plain.decode("utf-8")
+
+
+def test_text_file_can_be_padded_to_exact_size():
+    name, payload = export_text_file("int main(){return 0;}\n", "fault.cpp", 1024 * 1024)
+    assert name == "fault.cpp"
+    assert len(payload) == 1024 * 1024
+    assert payload.startswith(b"int main(){return 0;}")
+    assert b"// " in payload[len(b"int main(){return 0;}\n"):]
+    # 没有行注释的格式退回空行填充，仍然精确到字节。
+    _, blank = export_text_file("hello", "note.txt", 4096)
+    assert len(blank) == 4096 and blank.startswith(b"hello")
+    # 目标比原文小时不截断原内容。
+    assert export_text_file("abcdef", "a.txt", 3)[1] == b"abcdef"
+    with pytest.raises(ValueError):
+        export_text_file("x", "a.txt", MAX_FILE_BYTES + 1)
+
+
+async def test_send_text_file_pads_to_the_requested_size(tmp_path):
+    module = importlib.import_module("fllbot.builtin_plugins.text.plugin")
+    bot = await make_bot(tmp_path, builtin=False)
+    connection = FakeConnection()
+    ctx = Context(bot, connection, parse_event(group_message("生成 1MB 的 fault.cpp")))
+    try:
+        result = await module.send_text_file(ctx, "int main(){return 0;}\n", "fault.cpp", 1024 * 1024)
+        assert result["sent"] is True and result["bytes"] == 1024 * 1024
+        assert result["padded"] is True and result["target_bytes"] == 1024 * 1024
+    finally:
+        await bot.stop()
 
 
 @pytest.mark.parametrize("name", ["../test", "x/y", "x\\y", "x:ads", "CON", "a.exe", ".hidden", "x\x00", "x" * 121])
