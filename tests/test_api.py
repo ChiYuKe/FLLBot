@@ -27,7 +27,7 @@ def test_health_and_auth(tmp_path: Path) -> None:
         assert status.status_code == 200
         data = status.json()
         names = {item["name"] for item in data["plugins"]}
-        assert names == {"basic", "agent", "text", "github", "files", "oni_knowledge", "workspace"}
+        assert names == {"basic", "agent", "text", "github", "files", "oni_knowledge", "workspace", "screen"}
         assert data["storage"]["schema_version"] >= 1
         assert data["ws_path"] == "/onebot/v11/ws"
 

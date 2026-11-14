@@ -609,7 +609,9 @@
           title: tool.title || tool.name,
           description: tool.description || '',
           plugin: plugin.name,
-          pluginEnabled: Boolean(plugin.enabled)
+          pluginEnabled: Boolean(plugin.enabled),
+          risk: tool.risk || 'write',
+          capabilities: tool.capabilities || []
         });
       });
     });
@@ -646,7 +648,9 @@
       matches.slice((state.page-1)*8,state.page*8).forEach(function(t){
         var check=h('input',{type:'checkbox','aria-label':'允许 '+t.title});check.checked=values.has(t.id);check.disabled=Boolean(disabled);
         check.addEventListener('change',function(){toggle(t.id,check.checked);draw();});
-        rows.appendChild(h('div',{class:'picker-tool-row'},check,h('div',{},h('strong',{text:t.title}),h('small',{text:t.id+' · '+t.plugin+(t.pluginEnabled?'':' · 插件未启用')}),h('details',{},h('summary',{text:t.description||'暂无说明'}),h('p',{text:t.description||'暂无说明'})))));
+        var riskText={read:'只读',write:'写入',destructive:'高风险'}[t.risk]||t.risk;
+        var capabilityText=(t.capabilities||[]).join('、');
+        rows.appendChild(h('div',{class:'picker-tool-row'},check,h('div',{},h('strong',{text:t.title}),h('small',{text:t.id+' · '+t.plugin+' · '+riskText+(capabilityText?' · '+capabilityText:'')+(t.pluginEnabled?'':' · 插件未启用')}),h('details',{},h('summary',{text:t.description||'暂无说明'}),h('p',{text:t.description||'暂无说明'})))));
       });
       if(!matches.length)rows.appendChild(h('div',{class:'empty',text:'没有匹配的工具'}));
       pageNote.textContent=matches.length+' 条结果 · '+state.page+' / '+pages+' 页';prev.disabled=state.page<=1;next.disabled=state.page>=pages;

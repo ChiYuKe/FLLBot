@@ -31,29 +31,22 @@ class GroupPolicy(BaseModel):
     sandbox_write: bool | None = None
     sandbox_network: bool | None = None
     sandbox_private_network: bool | None = None
+    sandbox_email: bool | None = None
+    sandbox_screen: bool | None = None
     provider: str = Field(default="", max_length=80)
     system_extra: str = Field(default="", max_length=4000)
 
 
 def tool_index(bot: FLLBot) -> dict[str, dict[str, Any]]:
-    """当前所有插件显式开放的 AI 工具：工具 ID -> 展示信息。"""
+    """当前所有插件显式开放的 AI 工具：工具 ID -> 展示信息。
+
+    使用宿主工具目录快照，避免每次管理请求或策略解析都重新遍历插件和 Schema。
+    """
     result: dict[str, dict[str, Any]] = {}
-    for plugin in bot.plugins.loaded():
-        if plugin.name == "agent":
+    for entry in bot.tools.snapshot().entries.values():
+        if entry.plugin_name == "agent":
             continue
-        for spec in plugin.ai_tools:
-            result[spec.qualified_name] = {
-                "id": spec.qualified_name,
-                "title": spec.display_title,
-                "plugin": plugin.name,
-                "description": spec.description,
-                "permission": spec.permission,
-                "effect": spec.effect,
-                "risk": spec.risk,
-                "capabilities": list(spec.capabilities),
-                "timeout": spec.timeout,
-                "max_output_chars": spec.max_output_chars,
-            }
+        result[entry.name] = entry.describe()
     return result
 
 
@@ -207,7 +200,8 @@ def effective_policy(bot: FLLBot, group_id: int, self_id: int | None = None) -> 
         "sandbox": {
             "read": sandbox.allow_read, "write": sandbox.allow_write,
             "network": sandbox.allow_network, "private_network": sandbox.allow_private_network,
-            "destructive": sandbox.allow_destructive,
+            "email": sandbox.allow_email, "destructive": sandbox.allow_destructive,
+            "screen": sandbox.allow_screen,
         },
         "blocked_codes": [item["code"] for item in checks if not item["passed"]],
         "diagnostics": {

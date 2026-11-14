@@ -51,6 +51,7 @@ from .sandbox import SandboxService
 from .services import ServiceMonitor
 from .storage import Storage
 from .tool_executor import ToolExecutor
+from .tool_registry import ToolRegistry
 from .tracing import MessageTrace, TraceRecorder
 from .trigger_policy import TriggerPolicy
 from .webui import render_index
@@ -133,6 +134,8 @@ class FLLBot:
             hot_reload=config.plugin.hot_reload,
             watch_interval=config.plugin.watch_interval,
         )
+        # 工具目录在插件加载/卸载/热重载或 schema 变化后按签名自动重建。
+        self.tools = ToolRegistry(self.plugins)
 
         self.admin_token: str = ""
         self.started_at: float = 0.0
@@ -227,6 +230,7 @@ class FLLBot:
             if self.config.admin.enabled:
                 self._ensure_admin_token()
             self.personas.load()
+            self.sandbox.ensure_workspace()
             await self.permissions.load()
             await self.bots.load()
             self.capacity.open()
@@ -383,6 +387,7 @@ class FLLBot:
             "connections": self.manager.summaries(),
             "plugins": self.plugin_summaries(),
             "failed_plugins": dict(self.plugins.failed),
+            "tools": self.tools.status(),
             "dispatcher": self.dispatcher.summary(),
             "tool_executor": self.tool_executor.status(),
             "sandbox": {"enabled": self.sandbox.policy(None).enabled, "stats": dict(self.sandbox.stats)},

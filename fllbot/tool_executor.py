@@ -15,6 +15,9 @@ from jsonschema import Draft202012Validator, ValidationError
 
 from .plugin.agent import ToolContent, ToolEvent, ToolRejection
 
+# 只有纯读取类能力的结果才可复用；带 qq.send / fs.write 等能力的一律不缓存。
+CACHEABLE_CAPABILITIES = frozenset({"fs.read", "net.read", "memory.read", "system.read"})
+
 
 def parse_arguments(raw: Any, spec: Any) -> dict:
     if isinstance(raw, str):
@@ -84,19 +87,48 @@ class ToolExecutor:
         self.max_callbacks = 32
         self._callbacks: dict[asyncio.Task, Any] = {}
         self._executions: set[asyncio.Task] = set()
+        self.max_result_cache = 128
+        self.result_cache_seconds = 300.0
+        self._result_cache: dict[tuple, tuple[float, str, bool]] = {}
+        self.cache_hits = 0
 
     def status(self) -> dict:
         return {'callbacks':len(self._callbacks),'capacity':self.max_callbacks,
                 'expired_callbacks':sum(bool(ctx.execution_cancelled) for ctx in self._callbacks.values()),
-                'requests':len(self._executions),'closing':self.closing}
+                'requests':len(self._executions),'closing':self.closing,
+                'cache_entries':len(self._result_cache),'cache_hits':self.cache_hits}
+
+    @staticmethod
+    def _cacheable(spec: Any) -> bool:
+        capabilities = set(getattr(spec, 'capabilities', ()) or ())
+        return (getattr(spec, 'effect', '') == 'read_only' and bool(capabilities)
+                and capabilities <= CACHEABLE_CAPABILITIES)
+
+    def _cache_get(self, key: tuple) -> tuple[str, bool] | None:
+        record = self._result_cache.get(key)
+        if record is None:
+            return None
+        stored, output, silent = record
+        if time.monotonic() - stored > self.result_cache_seconds:
+            self._result_cache.pop(key, None)
+            return None
+        self.cache_hits += 1
+        return output, silent
+
+    def _cache_put(self, key: tuple, output: str, silent: bool) -> None:
+        if len(self._result_cache) >= self.max_result_cache:
+            self._result_cache.pop(next(iter(self._result_cache)), None)
+        self._result_cache[key] = (time.monotonic(), output, silent)
 
     def reopen(self) -> None:
         if self._executions:
             raise RuntimeError('Cannot reopen tools with active execution requests')
         self.closing = False
+        self._result_cache.clear()
 
     async def close(self) -> None:
         self.closing = True
+        self._result_cache.clear()
         tasks = [task for task in self._executions if task is not asyncio.current_task() and not task.done()]
         for task in tasks:
             task.cancel()
@@ -168,16 +200,16 @@ class ToolExecutor:
         return event
 
     async def execute(self, ctx: Any, name: str, raw: Any, registry: dict,
-                      refresh: Any = None) -> tuple[str, bool]:
+                      refresh: Any = None, resolve: Any = None) -> tuple[str, bool]:
         task = asyncio.current_task()
         self._executions.add(task)
         try:
-            return await self._execute(ctx,name,raw,registry,refresh)
+            return await self._execute(ctx,name,raw,registry,refresh,resolve)
         finally:
             self._executions.discard(task)
 
     async def _execute(self, ctx: Any, name: str, raw: Any, registry: dict,
-                      refresh: Any = None) -> tuple[str, bool]:
+                      refresh: Any = None, resolve: Any = None) -> tuple[str, bool]:
         def failure(code: str, details: dict | None = None) -> tuple[str, bool]:
             ctx.trace_event('tool', code, 'failed', name)
             payload = {'error': code}
@@ -197,7 +229,12 @@ class ToolExecutor:
         ingress_plugin = previous.name if previous else ''
         ingress_permission = ctx.handler.permission if ctx.handler else None
         def allowed() -> bool:
-            live = refresh(ctx)[1].get(name) if refresh is not None else (owner,spec)
+            if resolve is not None:
+                live = resolve(name)
+            elif refresh is not None:
+                live = refresh(ctx)[1].get(name)
+            else:
+                live = (owner, spec)
             if live is None:
                 return False
             live_owner, live_spec = live
@@ -256,10 +293,19 @@ class ToolExecutor:
             return failure('tool_rejected', {'reason': event.content})
         if not allowed():
             return failure('tool_permission_denied')
+        fingerprint = hashlib.sha256(json.dumps(arguments, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+        # 同一轮里重复的纯读取调用直接复用结果，避免重复 I/O、存储写入和钩子开销；
+        # 带钩子的工具不缓存，保持钩子对每次调用的裁决能力。
+        cache_key = None
+        if not hooks and self._cacheable(spec):
+            cache_key = (ctx.turn_id, ctx.self_id, name, fingerprint)
+            cached = self._cache_get(cache_key)
+            if cached is not None:
+                ctx.trace_event('tool', 'cache_hit', 'passed', name)
+                return cached
         execution_id = uuid.uuid4().hex
         scene = 'group' if ctx.is_group else 'private'
         call_id = ctx.tool_call_id or uuid.uuid4().hex
-        fingerprint = hashlib.sha256(json.dumps(arguments, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         claimed, record = await self.storage.claim_tool(
             execution_id, ctx.self_id, scene, ctx.group_id if ctx.is_group else ctx.user_id,
             ctx.message_id or 0, name, spec.effect, ctx.data_epoch, ctx.turn_id, call_id, fingerprint)
@@ -341,4 +387,6 @@ class ToolExecutor:
         await self.storage.finish_tool(execution_id, 'succeeded', output=output, silent=silent,
                                        generation=ctx.data_epoch, account_epoch=ctx.received.account_epoch, scope_epoch=ctx.received.scope_generation)
         await self._stage(ctx, hooks, 'completed', replace(event, status='succeeded', content=output, silent=silent))
+        if cache_key is not None:
+            self._cache_put(cache_key, output, silent)
         return output, silent

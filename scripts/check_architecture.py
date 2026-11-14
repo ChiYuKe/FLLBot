@@ -18,6 +18,7 @@ BOUNDARIES = {
     "policy": {"policy"},
     "history_images": set(),
     "sandbox": {"sandbox"},
+    "tool_registry": {"tool_registry"},
     "llm": {"llm", "config", "onebot", "policy", "tracing", "conversation", "delivery_policy", "history_images"},
     "plugin": {"plugin", "rules", "onebot", "tracing", "conversation", "sandbox"},
 }
@@ -87,13 +88,18 @@ def check(root: Path = ROOT) -> list[str]:
         if parts[-1] == "__init__":
             parts.pop()
         module = '.'.join(parts)
-        if layer not in BOUNDARIES and module not in MODULE_BOUNDARIES:
+        builtin_extension = layer == "builtin_plugins" and len(parts) > 1 and parts[1] != "agent"
+        if layer not in BOUNDARIES and module not in MODULE_BOUNDARIES and not builtin_extension:
             continue
         if module == 'builtin_plugins.agent.plugin':
             for node in ast.walk(ast.parse(path.read_text(encoding='utf-8-sig'))):
                 if isinstance(node,ast.Attribute) and node.attr in {'storage','db'}:
                     errors.append(f'{path.relative_to(root)}:{node.lineno}: agent 接入不能直接访问存储')
         for line, target in imports(path, ".".join(["fllbot", *parts])):
+            if builtin_extension and (target == "fllbot" or target.startswith("fllbot.")):
+                allowed = ("fllbot.plugin", ".".join(["fllbot", *parts[:2]]))
+                if not any(target == prefix or target.startswith(prefix + ".") for prefix in allowed):
+                    errors.append(f"{path.relative_to(root)}:{line}: use the plugin API instead of {target}")
             if module in MODULE_BOUNDARIES and target.startswith('fllbot.'):
                 dependency = target.removeprefix('fllbot.')
                 if not any(dependency == prefix or dependency.startswith(prefix+'.')
@@ -101,8 +107,13 @@ def check(root: Path = ROOT) -> list[str]:
                     errors.append(f'{path.relative_to(root)}:{line}: {module} 不能依赖 {target}')
             # Manifest compatibility checks read the host's stable version constant only.
             version_constant = layer == "plugin" and target == "fllbot.__version__"
+            public_rendering = module == "plugin.rendering" and target.startswith("fllbot.rendering.")
+            quoted_message = module == "plugin.context" and target in {
+                "fllbot.llm.quote", "fllbot.llm.quote.fetch_quoted"
+            }
             if (layer in BOUNDARIES and target.startswith("fllbot.")
-                    and target.split(".")[1] not in BOUNDARIES[layer] and not version_constant):
+                    and target.split(".")[1] not in BOUNDARIES[layer]
+                    and not (version_constant or public_rendering or quoted_message)):
                 errors.append(f"{path.relative_to(root)}:{line}: {layer} 不能反向依赖 {target}")
     packages = root / "plugins"
     if packages.is_dir():

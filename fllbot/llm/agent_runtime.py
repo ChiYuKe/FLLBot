@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 from dataclasses import dataclass
 from typing import Any
@@ -10,6 +11,7 @@ from .client import ContextOverflowError
 from .task_context import RepeatReminder, TaskContext
 from .tool_protocol import ToolProtocolError, contains_dsml, normalize_tool_calls
 
+MAX_PARALLEL_READ_ONLY = 4
 AGENT_RULES = (
     '\n\n以下是 QQ 群对话与工具执行规则，不是固定人格。身份、称呼、语气和表达风格以本系统消息中的当前人格设定为准；'
     '通用“助手”称呼不覆盖人格，普通聊天应体现当前人格。历史回答只提供事实背景，不延续与当前人格冲突的旧身份或语气。'
@@ -36,6 +38,19 @@ class AgentRuntime:
     def __init__(self, complete: Any, budget: Any = None) -> None:
         self.complete = complete
         self.budget = budget
+
+    @staticmethod
+    def _parallel_ready(jobs: list[tuple], registry: dict) -> bool:
+        """只有整批都是已注册的只读工具时才并发，任何写操作保持原有顺序。"""
+        if len(jobs) < 2:
+            return False
+        for _, name, _ in jobs:
+            if name == 'agent__stay_silent':
+                return False
+            entry = registry.get(name)
+            if entry is None or getattr(entry[1], 'effect', '') != 'read_only':
+                return False
+        return True
 
     @staticmethod
     def _assistant_message(response, calls=None):
@@ -137,21 +152,55 @@ class AgentRuntime:
             silent, spoken = False, ''
             batch_failed = False
             reminders = []
-            for call in calls:
-                ctx.tool_call_id = call['id']
-                function = call.get('function') or {}
-                name = str(function.get('name') or '')
-                await report('tool', 'running', name)
-                if pending is not None and pending():
-                    result, quiet = '{"error":"superseded_by_user_input","executed":false}', False
-                    await report('tool', 'skipped', name)
-                else:
+            jobs = [(call, str((call.get('function') or {}).get('name') or ''),
+                     (call.get('function') or {}).get('arguments', '{}')) for call in calls]
+            pending_now = pending is not None and pending()
+            results: list[tuple[str, bool] | None] = [None] * len(jobs)
+            parallel = not pending_now and self._parallel_ready(jobs, registry)
+            if parallel:
+                # 同一批只读工具互不依赖，可以并发执行；每个任务使用独立上下文副本，
+                # 避免共享 tool_call_id 等可变字段互相覆盖。
+                for _, name, _ in jobs:
+                    await report('tool', 'running', name)
+                slots = asyncio.Semaphore(MAX_PARALLEL_READ_ONLY)
+                async def run_read_only(job, slots=slots):
+                    call, name, arguments = job
+                    local = copy.copy(ctx) if ctx is not None else ctx
+                    if local is not None:
+                        local.tool_call_id = call['id']
+                    async with slots:
+                        if pending is not None and pending():
+                            await report('tool', 'skipped', name)
+                            return None
+                        return await execute(local, name, arguments, registry)
+                try:
+                    gathered = await asyncio.gather(*(run_read_only(job) for job in jobs))
+                except BaseException as exc:
+                    for _, name, _ in jobs:
+                        await report('tool', 'interrupted', name)
+                    await report('step', 'cancelled' if isinstance(exc, asyncio.CancelledError) else 'failed')
+                    raise
+                results = list(gathered)
+            else:
+                for index, (call, name, arguments) in enumerate(jobs):
+                    if ctx is not None:
+                        ctx.tool_call_id = call['id']
+                    await report('tool', 'running', name)
+                    if pending is not None and pending():
+                        await report('tool', 'skipped', name)
+                        continue
                     try:
-                        result, quiet = await execute(ctx, name, function.get('arguments', '{}'), registry)
+                        results[index] = await execute(ctx, name, arguments, registry)
                     except BaseException as exc:
                         await report('tool', 'interrupted', name)
                         await report('step', 'cancelled' if isinstance(exc, asyncio.CancelledError) else 'failed')
                         raise
+            for index, (call, name, arguments) in enumerate(jobs):
+                outcome = results[index]
+                if outcome is None:
+                    result, quiet = '{"error":"superseded_by_user_input","executed":false}', False
+                else:
+                    result, quiet = outcome
                     try:
                         payload = json.loads(result)
                         failed = isinstance(payload, dict) and (bool(payload.get('error')) or payload.get('sent') is False)
@@ -159,7 +208,7 @@ class AgentRuntime:
                         failed = False
                     await report('tool', 'failed' if failed else 'succeeded', name)
                     batch_failed = batch_failed or failed
-                    notice = reminder.observe(name, function.get('arguments', '{}'))
+                    notice = reminder.observe(name, arguments)
                     if notice:
                         reminders.append({'role': 'user', 'content': notice,
                                           '_fllbot_source': {'kind': 'task_reminder'}})

@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import copy
 from typing import Any
 
 from fllbot.plugin import Context, Plugin
@@ -70,7 +69,6 @@ plugin.setting(
 )
 
 
-
 async def _stay_silent(ctx: Context) -> dict:
     """Internal turn control; never sends a message or performs an external action."""
     return {'silent': True}
@@ -111,57 +109,95 @@ async def search_history(ctx: Context, query: str = '', message_id: int = 0,
     return await ctx.bot.chat.memory.search(ctx, query, message_id, start_date, end_date, offset)
 
 
+def _agent_settings(ctx: Context, *, live: bool = False) -> dict:
+    return ctx.bot.chat.turn_agent_settings(ctx.group_id, ctx.self_id, live=live)
+
+
+def _addressed(ctx: Context, settings: dict) -> bool:
+    wake_word = str(settings.get('trigger_prefix') or getattr(ctx.connection, 'nickname', '') or '').strip()
+    return ctx.to_me or bool(wake_word and ctx.text.startswith(wake_word))
+
+
+def _stay_silent_offered(ctx: Context, settings: dict) -> bool:
+    """自动参与且模型支持工具时才提供内部静默工具。"""
+    if 'all' not in settings.get('trigger_modes', ()) or _addressed(ctx, settings):
+        return False
+    provider_name = ctx.bot.chat.provider_name('group', ctx.group_id, 'agent', ctx.self_id)
+    _, provider = ctx.bot.chat.client.resolve(provider=provider_name)
+    return bool(provider.supports_tools)
+
+
 def _get_tools(ctx: Context, *, live: bool = False) -> tuple[list[dict[str, Any]], dict[str, tuple[Any, AIToolSpec]]]:
+    """从宿主工具目录快照中筛出本群可见工具；只为入选工具复制 Schema。"""
+    del live  # 兼容旧调用；目录快照自身会在插件或 Schema 变化后重建
     definitions: list[dict[str, Any]] = []
     registry: dict[str, tuple[Any, AIToolSpec]] = {}
-    settings = ctx.bot.chat.turn_agent_settings(ctx.group_id,ctx.self_id,live=live)
+    settings = _agent_settings(ctx)
     allowed_tools = {str(name) for name in (settings["allowed_tools"] or [])}
-    for owner in ctx.bot.plugins.loaded():
-        internal_memory = owner.name == plugin.name
-        if not ctx.bot.permissions.plugin_enabled(owner.name, ctx.group_id):
+    snapshot = ctx.bot.tools.snapshot()
+    ctx.tool_snapshot = snapshot
+    memory_available = ctx.bot.chat.memory.enabled(ctx) and ctx.bot.chat.memory.recall_requested(ctx)
+    for entry in snapshot.entries.values():
+        owner = entry.owner
+        if not ctx.bot.permissions.plugin_enabled(entry.plugin_name, ctx.group_id):
             continue
-        if internal_memory and not (ctx.bot.chat.memory.enabled(ctx) and ctx.bot.chat.memory.recall_requested(ctx)):
-            continue
-        for spec in owner.ai_tools:
-            spec = copy.copy(spec)
-            spec.parameters = copy.deepcopy(spec.parameters)
-            if not internal_memory and spec.qualified_name not in allowed_tools:
+        if entry.plugin_name == plugin.name:
+            # Agent 自有工具不走 allowed_tools；记忆回查只在确实提到过去时出现。
+            if entry.spec.name != 'search_history' or not memory_available:
                 continue
-            if not ctx.bot.permissions.check(spec.permission, ctx):
+        else:
+            if entry.name not in allowed_tools or not ctx.bot.permissions.check(entry.spec.permission, ctx):
                 continue
-            qualified = spec.qualified_name
-            registry[qualified] = (owner, spec)
-            definitions.append(
-                {
-                    "type": "function",
-                    "function": {
-                        "name": qualified,
-                        "description": spec.description,
-                        "parameters": spec.parameters,
-                    },
-                }
-            )
-    wake_word = str(settings.get('trigger_prefix') or getattr(ctx.connection,'nickname','') or '').strip()
-    addressed = ctx.to_me or bool(wake_word and ctx.text.startswith(wake_word))
-    if 'all' in settings['trigger_modes'] and not addressed:
-        provider_name = ctx.bot.chat.provider_name('group', ctx.group_id, 'agent', ctx.self_id)
-        _, provider = ctx.bot.chat.client.resolve(provider=provider_name)
-        if provider.supports_tools:
-            spec = _silence_spec
-            registry[spec.qualified_name] = (plugin, spec)
-            definitions.append({'type':'function', 'function': {
-                'name':spec.qualified_name, 'description':spec.description, 'parameters':spec.parameters,
-            }})
+        registry[entry.name] = (owner, entry.spec)
+        definitions.append(entry.definition_copy())
+    if _stay_silent_offered(ctx, settings):
+        spec = _silence_spec
+        registry[spec.qualified_name] = (plugin, spec)
+        definitions.append({'type': 'function', 'function': {
+            'name': spec.qualified_name, 'description': spec.description, 'parameters': spec.parameters,
+        }})
     definitions.sort(key=lambda item: item['function']['name'])
     return definitions, registry
 
 
+def _resolve_live(ctx: Context, name: str, registry: dict[str, tuple[Any, AIToolSpec]],
+                  snapshot: Any) -> tuple[Any, AIToolSpec] | None:
+    """执行前只解析目标工具，不再重建整份工具目录。"""
+    current = registry.get(name)
+    if current is None:
+        return None
+    settings = _agent_settings(ctx, live=True)
+    if name == _silence_spec.qualified_name:
+        return current if _stay_silent_offered(ctx, settings) else None
+    entry = snapshot.get(name)
+    if entry is None:
+        return None
+    owner = entry.owner
+    if owner is not current[0] or not any(item is owner for item in ctx.bot.plugins.loaded()):
+        return None
+    if not ctx.bot.permissions.plugin_enabled(entry.plugin_name, ctx.group_id):
+        return None
+    if entry.plugin_name == plugin.name:
+        if not (ctx.bot.chat.memory.enabled(ctx) and ctx.bot.chat.memory.recall_requested(ctx)):
+            return None
+    else:
+        allowed_tools = {str(item) for item in (settings.get('allowed_tools') or [])}
+        if name not in allowed_tools or not ctx.bot.permissions.check(entry.spec.permission, ctx):
+            return None
+    return owner, entry.spec
+
+
 async def _run_tool(ctx: Context, name: str, raw_arguments: Any,
                     registry: dict[str, tuple[Any, AIToolSpec]]) -> tuple[str, bool]:
-    refresh = (lambda context: _get_tools(context,live=True)) if ctx.plugin and ctx.plugin.name == plugin.name else None
-    return await ctx.bot.tool_executor.execute(ctx, name, raw_arguments, registry, refresh)
+    resolve = None
+    if ctx.plugin and ctx.plugin.name == plugin.name:
+        snapshot = getattr(ctx, 'tool_snapshot', None) or ctx.bot.tools.snapshot()
+        def resolve(tool_name: str) -> tuple[Any, AIToolSpec] | None:
+            return _resolve_live(ctx, tool_name, registry, snapshot)
+    return await ctx.bot.tool_executor.execute(ctx, name, raw_arguments, registry, resolve=resolve)
 
 
 @plugin.on_message(priority=90, name="natural_language_agent")
 async def respond_naturally(ctx: Context) -> None:
     await ctx.bot.agent_conversations.respond(ctx, _get_tools, _run_tool, instructions=instruction_sections)
+

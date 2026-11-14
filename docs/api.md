@@ -152,12 +152,14 @@ Invoke-RestMethod -Headers @{ Authorization = "Bearer $token" } http://127.0.0.1
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
-| GET | `/api/tools` | 工具目录：`id`（`插件名__工具名`）、`title`、说明、权限、`effect`、`risk`、`capabilities`、来源插件及其启用状态、`globally_allowed`、`group_count` |
-| GET | `/api/sandbox` | 沙盒策略摘要、能力开关、主机/大小/额度限制、允许/拒绝计数与最近 20 条裁决元数据；`?group_id=` 预览单群覆盖 |
+| GET | `/api/tools` | 工具目录：`id`（`插件名__工具名`）、`title`、说明、权限、`effect`、`risk`、`capabilities`、来源插件及其启用状态、`globally_allowed`、`group_count`；`registry` 返回快照版本、工具数、重建/复用次数 |
+| GET | `/api/sandbox` | 沙盒策略摘要、`workspace_scope`、能力开关、主机/大小/额度限制、允许/拒绝计数与最近 20 条裁决元数据；`?group_id=` 预览单群覆盖与该群实际工作区路径 |
 
 工具由插件通过 `on_ai_tool` 声明，属于插件能力而不是插件本身；`allowed_tools` 保存的是工具 `id`。
-`capabilities` 是 `fs.read`、`fs.write`、`net.read`、`net.write`、`qq.send`、`qq.manage`、`memory.read`、
-`system.read`、`process.exec` 的子集，`risk` 为 `read|write|destructive`。执行前由 `[sandbox]` 策略裁决；
+`registry` 是宿主工具目录快照信息：`revision` 在插件工具变化后递增，`rebuilds` / `reused` 分别表示重建与
+复用次数，`tools` 为登记工具数。目录契约见 [Agent 与插件](tool-registry.md)。
+`capabilities` 是 `fs.read`、`fs.write`、`net.read`、`net.write`、`email.send`、`qq.send`、`qq.manage`、`memory.read`、
+`system.read`、`qq.send_file`、`screen.capture`、`process.exec` 的子集，`risk` 为 `read|write|destructive`。执行前由 `[sandbox]` 策略裁决；
 被拒绝时工具结果返回 `{"error": "tool_blocked", "reason": ...}`，不产生外部动作。设计见
 [群聊智能体与执行沙盒](agent-sandbox.md)。
 
@@ -270,6 +272,7 @@ es.onmessage = (event) => console.log(JSON.parse(event.data));
     {"name": "ping", "version": "0.1.0", "enabled": true, "builtin": true, "handlers": [...]}
   ],
   "dispatcher": {"handlers": {"message": 5, "notice": 2}, "stats": {"message": 52}},
+  "tools": {"revision": 3, "tools": 32, "plugins": ["basic", "workspace"], "rebuilds": 3, "reused": 128},
   "sandbox": {"enabled": true, "stats": {"allowed": 4, "denied": 1, "denied:automatic_side_effect": 1}},
   "storage": {"path": "data/fllbot.db", "size_bytes": 40960, "schema_version": 1, "messages": 52},
   "llm": {"enabled": true, "available": true, "model": "deepseek-chat", "requests": 3, "failures": 0}
@@ -288,7 +291,7 @@ es.onmessage = (event) => console.log(JSON.parse(event.data));
 
 工具被沙盒拒绝不是 HTTP 错误：工具结果里是 `tool_blocked` 与原因码；管理接口只记录元数据。
 群策略新增 `participation_threshold`（自动参与评分阈值）与 `sandbox_write`、
-`sandbox_network`、`sandbox_private_network`（单群沙盒覆盖，`null` 跟随全局）。
+`sandbox_network`、`sandbox_private_network`、`sandbox_email`（单群沙盒覆盖，`null` 跟随全局）。
 
 
 ### 机器人与昵称唤醒

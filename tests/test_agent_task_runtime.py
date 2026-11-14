@@ -1,3 +1,4 @@
+import asyncio
 import copy
 import json
 from types import SimpleNamespace
@@ -126,6 +127,55 @@ async def test_steering_arriving_while_tool_start_is_recorded_prevents_execution
         agent=True, execute=execute, inbox=inbox, pending=lambda: bool(waiting), progress=progress)
     assert result.text == 'updated'
     execute.assert_not_awaited()
+
+
+async def test_read_only_batch_runs_in_parallel_without_reordering_results():
+    active = 0
+    maximum = 0
+
+    async def execute(tool_ctx, name, arguments, registry):
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        await asyncio.sleep(0.02)
+        active -= 1
+        return json.dumps({"tool": name, "call": tool_ctx.tool_call_id}), False
+
+    complete = AsyncMock(side_effect=[
+        reply(calls=[call(1, "first"), call(2, "second")]), reply("done")])
+    registry = {name: (SimpleNamespace(name="example"), SimpleNamespace(effect="read_only"))
+                for name in ("first", "second")}
+    entries = messages()
+    result = await AgentRuntime(complete).run(
+        entries, scene="group", scene_id=1, ctx=ctx(), execute=execute,
+        registry=registry, agent=True)
+    assert result.text == "done"
+    assert maximum == 2
+    assert [item["tool_call_id"] for item in entries if item["role"] == "tool"] == ["1", "2"]
+    assert [json.loads(item["content"])["tool"] for item in entries if item["role"] == "tool"] == [
+        "first", "second"]
+
+
+async def test_side_effecting_batch_stays_sequential():
+    active = 0
+    maximum = 0
+
+    async def execute(tool_ctx, name, arguments, registry):
+        nonlocal active, maximum
+        active += 1
+        maximum = max(maximum, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return json.dumps({"tool": name}), False
+
+    complete = AsyncMock(side_effect=[
+        reply(calls=[call(1, "write"), call(2, "write2")]), reply("done")])
+    registry = {name: (SimpleNamespace(name="example"), SimpleNamespace(effect="side_effecting"))
+                for name in ("write", "write2")}
+    await AgentRuntime(complete).run(
+        messages(), scene="group", scene_id=1, ctx=ctx(), execute=execute,
+        registry=registry, agent=True)
+    assert maximum == 1
 
 
 def long_history():

@@ -154,6 +154,7 @@ def create_api_router(bot: FLLBot) -> APIRouter:
             })
         tool_plugins = {info["plugin"] for info in tool_index(bot).values()}
         return {
+            "registry": bot.tools.status(),
             "items": items,
             "providers": [
                 item
@@ -175,8 +176,9 @@ def create_api_router(bot: FLLBot) -> APIRouter:
                 "capabilities": {
                     "read": policy.allow_read, "write": policy.allow_write,
                     "network": policy.allow_network, "private_network": policy.allow_private_network,
+                    "email": policy.allow_email,
                 },
-                "workspace": str(policy.workspace),
+                "workspace": str(policy.workspace_for("group", group_id)),
             }
         return data
 
