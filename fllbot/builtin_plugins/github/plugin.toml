@@ -1,11 +1,11 @@
 schema_version = 1
 api_version = 1
 name = "github"
-version = "0.2.0"
-description = "GitHub 仓库助手：检索仓库、读取概览/目录/源码/版本/提交，带缓存与速率提示"
+version = "0.5.0"
+description = "GitHub 仓库助手：检索仓库与代码，读取概览/目录/源码/版本/提交/贡献者/Issue/PR/分支，并渲染带头像与图标的图片卡片"
 author = ""
 category = "plugin"
 
 requires_fllbot = ">=0.2,<1"
 requires_python = ">=3.11"
-dependencies = ["httpx>=0.27,<1"]
+dependencies = ["httpx>=0.27,<1", "Pillow>=10.4,<13"]
