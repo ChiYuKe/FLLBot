@@ -1,7 +1,7 @@
 schema_version = 1
 api_version = 1
 name = "workspace"
-version = "0.1.0"
+version = "0.2.0"
 description = "沙盒工作区文件读写与受控网页读取"
 author = ""
 category = "plugin"

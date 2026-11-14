@@ -13,10 +13,13 @@ FS_READ = "fs.read"
 FS_WRITE = "fs.write"
 NET_READ = "net.read"
 NET_WRITE = "net.write"
+EMAIL_SEND = "email.send"
 QQ_SEND = "qq.send"
+QQ_SEND_FILE = "qq.send_file"
 QQ_MANAGE = "qq.manage"
 MEMORY_READ = "memory.read"
 SYSTEM_READ = "system.read"
+SCREEN_CAPTURE = "screen.capture"
 PROCESS_EXEC = "process.exec"
 
 Risk = Literal["read", "write", "destructive"]
@@ -29,10 +32,13 @@ CAPABILITY_TITLES: dict[str, str] = {
     FS_WRITE: "写入沙盒文件",
     NET_READ: "读取网络资源",
     NET_WRITE: "向网络提交数据",
+    EMAIL_SEND: "发送电子邮件",
     QQ_SEND: "发送 QQ 消息或媒体",
+    QQ_SEND_FILE: "发送文件附件",
     QQ_MANAGE: "管理群成员或群设置",
     MEMORY_READ: "读取本群记忆",
     SYSTEM_READ: "读取机器人运行状态",
+    SCREEN_CAPTURE: "截取当前屏幕",
     PROCESS_EXEC: "执行本机程序",
 }
 
@@ -41,10 +47,14 @@ RISK_BY_CAPABILITY: dict[str, Risk] = {
     FS_WRITE: "write",
     NET_READ: "read",
     NET_WRITE: "write",
+    EMAIL_SEND: "write",
     QQ_SEND: "write",
+    QQ_SEND_FILE: "write",
     QQ_MANAGE: "destructive",
     MEMORY_READ: "read",
     SYSTEM_READ: "read",
+    # 截屏可能暴露宿主桌面上的隐私信息，按高风险能力处理。
+    SCREEN_CAPTURE: "destructive",
     PROCESS_EXEC: "destructive",
 }
 

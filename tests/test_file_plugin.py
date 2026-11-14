@@ -43,6 +43,25 @@ def test_text_encodings_and_binary_limits():
         decode_text(b"a" * 1048577)
 
 
+async def test_napcat_file_segment_without_name_can_be_read(tmp_path):
+    """NapCat 收到的文件消息只有 file（文件名）、file_id、file_size，没有 name。"""
+    bot = await make_bot(tmp_path, builtin=False)
+    try:
+        file = {"type": "file", "data": {
+            "file": "BrewingTowerV2.cs", "file_id": "qq-file-uuid", "file_size": "120",
+        }}
+        payload = group_message("猫猫分析一下", message=[file])
+        connection = FakeConnection()
+        connection.call = AsyncMock(return_value={
+            "base64": base64.b64encode(b"class BrewingTowerMaster : KMonoBehaviour {}").decode(),
+        })
+        result = await read_file(Context(bot, connection, parse_event(payload)))
+        assert result["name"] == "BrewingTowerV2.cs"
+        assert "BrewingTowerMaster" in result["content"]
+    finally:
+        await bot.stop()
+
+
 async def test_attachment_read_has_pagination(tmp_path):
     bot = await make_bot(tmp_path, builtin=False)
     try:

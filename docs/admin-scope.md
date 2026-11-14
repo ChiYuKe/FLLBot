@@ -109,13 +109,16 @@
 | `chat.wake_only_replies` | `[]` | 聊天默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `sandbox.enabled` | `true` | 沙盒策略 | 后续工具调用；关闭后未声明能力的旧行为继续生效 |
 | `sandbox.workspace` | `"data/agent_workspace"` | 沙盒策略 | 后续工具调用；相对项目根目录解析 |
+| `sandbox.workspace_scope` | `"scene"` | 沙盒策略 | 后续工具调用；scene 按群/私聊分目录，shared 共用 |
 | `sandbox.allow_read` | `true` | 沙盒策略 | 后续工具调用；单群不可覆盖 |
 | `sandbox.allow_write` | `false` | 沙盒策略 | 后续工具调用；单群可用 sandbox_write 覆盖 |
 | `sandbox.allow_network` | `true` | 沙盒策略 | 后续工具调用；单群可用 sandbox_network 覆盖 |
 | `sandbox.allow_network_write` | `false` | 沙盒策略 | 后续工具调用；单群不可覆盖 |
 | `sandbox.allow_private_network` | `false` | 沙盒策略 | 后续工具调用；单群可用 sandbox_private_network 覆盖 |
+| `sandbox.allow_email` | `false` | 沙盒策略 | 后续工具调用；邮件发送默认关闭，单群可用 sandbox_email 覆盖 |
 | `sandbox.allow_qq_send` | `true` | 沙盒策略 | 后续工具调用；只影响显式声明 qq.send 的工具 |
 | `sandbox.allow_destructive` | `false` | 沙盒策略 | 后续工具调用；破坏性能力默认关闭 |
+| `sandbox.allow_screen` | `false` | 沙盒策略 | 后续工具调用；截屏默认关闭，开启后仍需超级管理员与明确请求 |
 | `sandbox.allow_process` | `false` | 沙盒策略 | 后续工具调用；当前没有本机程序执行器 |
 | `sandbox.destructive_requires_superuser` | `true` | 沙盒策略 | 后续工具调用；拒绝非超级管理员发起的破坏性操作 |
 | `sandbox.write_requires_addressed` | `true` | 沙盒策略 | 后续工具调用；自动参与时拒绝写入/管理类操作 |
@@ -124,10 +127,11 @@
 | `sandbox.deny_paths` | `[".env", ".env.*", "config.toml", "data/admin_token.txt", "data/fllbot.db", "data/backups", "data/backups/*", "logs", "logs/*", ".git", ".git/*", "*.pem", "*.key", "*.pfx"]` | 沙盒策略 | 后续工具调用；工作区内仍拒绝的敏感路径 |
 | `sandbox.max_read_bytes` | `200000` | 沙盒策略 | 后续工具调用；单次读取上限 |
 | `sandbox.max_write_bytes` | `200000` | 沙盒策略 | 后续工具调用；单次写入上限 |
+| `sandbox.max_file_bytes` | `5000000` | 沙盒策略 | 后续工具调用；发送/复制文件上限 |
 | `sandbox.max_fetch_bytes` | `2000000` | 沙盒策略 | 后续工具调用；单次抓取上限 |
 | `sandbox.request_timeout` | `10.0` | 沙盒策略 | 后续工具调用；单次联网超时秒数 |
 | `sandbox.max_redirects` | `3` | 沙盒策略 | 后续工具调用；每次跳转重新校验 |
-| `sandbox.max_calls_per_turn` | `16` | 沙盒策略 | 后续工具调用；按事件上下文计数 |
+| `sandbox.max_calls_per_turn` | `0` | 沙盒策略 | 后续工具调用；按事件上下文计数，0 表示不限 |
 | `sandbox.max_write_calls_per_turn` | `4` | 沙盒策略 | 后续工具调用；按事件上下文计数 |
 | `retention.enabled` | `false` | 数据维护 | 后续定时检查；保存不立即清理 |
 | `retention.interval_seconds` | `3600` | 数据维护 | 后续定时检查；调度器每 60 秒检查一次 |
@@ -189,6 +193,8 @@
 | `group_policy.sandbox_write` | `null` | 群单独配置 | 后续工具调用；null 跟随全局 sandbox.allow_write |
 | `group_policy.sandbox_network` | `null` | 群单独配置 | 后续工具调用；null 跟随全局 sandbox.allow_network |
 | `group_policy.sandbox_private_network` | `null` | 群单独配置 | 后续工具调用；null 跟随全局 sandbox.allow_private_network |
+| `group_policy.sandbox_email` | `null` | 群单独配置 | 后续工具调用；null 跟随全局 sandbox.allow_email |
+| `group_policy.sandbox_screen` | `null` | 群单独配置 | 后续工具调用；null 跟随全局 sandbox.allow_screen |
 | `group_policy.max_tool_rounds` | `null` | 旧版兼容字段 | 已停用，工具调用不限制轮数 |
 | `group_policy.allowed_tools` | `null` | 群单独配置 | 后续消息；同群多个 Bot 共享覆盖 |
 | `group_policy.provider` | `""` | 群单独配置 | 后续消息；同群多个 Bot 共享覆盖 |

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import time
 from collections import Counter, deque
 from collections.abc import Callable, Mapping
@@ -27,6 +28,17 @@ class SandboxService:
         self.transport = transport
         self.stats: Counter = Counter()
         self.recent: deque[dict[str, Any]] = deque(maxlen=100)
+        self.logger = logging.getLogger("fllbot.sandbox")
+
+    def ensure_workspace(self) -> Path | None:
+        """启动时创建一次工作区目录；失败只记录警告，不阻止机器人启动。"""
+        try:
+            workspace = self.policy(None).workspace
+            workspace.mkdir(parents=True, exist_ok=True)
+            return workspace
+        except OSError:
+            self.logger.warning("沙盒工作区创建失败，文件工具写入将不可用", exc_info=True)
+            return None
 
     def policy(self, group_id: int | None = None) -> SandboxPolicy:
         overrides = self._group_overrides(group_id) if group_id else {}
@@ -57,14 +69,17 @@ class SandboxService:
         return {
             "enabled": policy.enabled,
             "workspace": str(policy.workspace),
+            "workspace_scope": policy.workspace_scope,
             "capabilities": {
                 "read": policy.allow_read,
                 "write": policy.allow_write,
                 "network": policy.allow_network,
                 "network_write": policy.allow_network_write,
                 "private_network": policy.allow_private_network,
+                "email": policy.allow_email,
                 "qq_send": policy.allow_qq_send,
                 "destructive": policy.allow_destructive,
+                "screen": policy.allow_screen,
                 "process": policy.allow_process,
             },
             "network": {
@@ -74,6 +89,7 @@ class SandboxService:
             "limits": {
                 "max_read_bytes": policy.max_read_bytes,
                 "max_write_bytes": policy.max_write_bytes,
+                "max_file_bytes": policy.max_file_bytes,
                 "max_fetch_bytes": policy.max_fetch_bytes,
                 "max_calls_per_turn": policy.max_calls_per_turn,
                 "max_write_calls_per_turn": policy.max_write_calls_per_turn,
@@ -102,8 +118,16 @@ class SandboxRuntime:
         return self.service.policy(group_id if getattr(self.ctx, "is_group", False) else None)
 
     @property
+    def workspace_root(self) -> Path:
+        """当前会话实际可用的工作区；scene 模式下按群/私聊隔离。"""
+        event = getattr(self.ctx, "event", None)
+        scene = getattr(event, "scene", "")
+        scene_id = getattr(event, "scene_id", 0)
+        return self.policy.workspace_for(scene, scene_id)
+
+    @property
     def files(self) -> SandboxFiles:
-        return SandboxFiles(self.policy)
+        return SandboxFiles(self.policy, root=self.workspace_root)
 
     @property
     def network(self) -> SandboxNetwork:

@@ -288,13 +288,19 @@ class SandboxConfig(BaseModel):
     enabled: bool = True
     # 相对路径按项目根目录解析；工具只能读写这个目录内的文件。
     workspace: str = "data/agent_workspace"
+    # shared：所有会话共享一个工作区；scene：按群/私聊自动分目录，避免跨群读取。
+    workspace_scope: Literal["shared", "scene"] = "scene"
     allow_read: bool = True
     allow_write: bool = False
     allow_network: bool = True
     allow_network_write: bool = False
     allow_private_network: bool = False
+    # 发送电子邮件会从绑定账号的邮箱发出；默认关闭，需管理员显式开启。
+    allow_email: bool = False
     allow_qq_send: bool = True
     allow_destructive: bool = False
+    # 截屏会暴露宿主桌面内容，默认关闭；开启后仍受超级管理员与明确请求约束。
+    allow_screen: bool = False
     allow_process: bool = False
     destructive_requires_superuser: bool = True
     # 自动参与群聊时，写入/管理类操作必须由群友明确请求。
@@ -308,10 +314,12 @@ class SandboxConfig(BaseModel):
     ])
     max_read_bytes: int = Field(default=200_000, ge=1_000, le=20_000_000)
     max_write_bytes: int = Field(default=200_000, ge=1_000, le=20_000_000)
+    # 发送/复制工作区文件的上限；不受单次文本读取上限限制。
+    max_file_bytes: int = Field(default=5_000_000, ge=1_000, le=50_000_000)
     max_fetch_bytes: int = Field(default=2_000_000, ge=1_000, le=50_000_000)
     request_timeout: float = Field(default=10.0, gt=0, le=120)
     max_redirects: int = Field(default=3, ge=0, le=10)
-    max_calls_per_turn: int = Field(default=16, ge=1, le=200)
+    max_calls_per_turn: int = Field(default=0, ge=0, le=200)
     max_write_calls_per_turn: int = Field(default=4, ge=0, le=100)
 
 

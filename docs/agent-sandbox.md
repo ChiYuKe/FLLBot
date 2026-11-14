@@ -9,6 +9,8 @@ fllbot/trigger_policy.py  触发决策 + 参与度状态（最近回复、重复
 fllbot/sandbox/           能力声明、策略解析、操作裁决、工作区文件、受控联网
 fllbot/tool_executor.py   执行前裁决、拒绝回执、本轮额度与审计
 fllbot/builtin_plugins/workspace/  使用沙盒的示例工具包
+fllbot/builtin_plugins/screen/     默认关闭的宿主截屏工具（screen.capture）
+plugins/email/                     通过 QQ 邮箱发信的工具（email.send）
 ```
 
 ## 1. 为什么需要三层
@@ -76,10 +78,13 @@ fllbot/builtin_plugins/workspace/  使用沙盒的示例工具包
 | --- | --- | --- |
 | `fs.read` / `fs.write` | 读/写工作区文件 | read / write |
 | `net.read` / `net.write` | 读取/提交网络数据 | read / write |
+| `email.send` | 通过 SMTP 发送电子邮件 | write |
 | `qq.send` | 发送消息或媒体 | write |
+| `qq.send_file` | 发送文件附件（自动参与时拒绝） | write |
 | `qq.manage` | 群成员、群设置等管理动作 | destructive |
 | `memory.read` | 读取本群记忆 | read |
 | `system.read` | 读取机器人运行状态 | read |
+| `screen.capture` | 截取运行宿主的屏幕 | destructive |
 | `process.exec` | 执行本机程序（当前未提供执行器） | destructive |
 
 未声明能力的旧工具保持原有“插件权限 + 处理器权限”行为；声明后才会进入沙盒裁决。
@@ -94,13 +99,17 @@ fllbot/builtin_plugins/workspace/  使用沙盒的示例工具包
 | `sandbox_write` | 是否允许本群工具写工作区 |
 | `sandbox_network` | 是否允许本群联网 |
 | `sandbox_private_network` | 是否允许访问本机/局域网 |
+| `sandbox_email` | 是否允许本群发送邮件 |
 
 每次工具调用前重新解析，配置或群策略修改立即生效；单群覆盖只影响对应群。
 `workspace` 相对项目根目录解析，默认 `data/agent_workspace`（随 `data/` 忽略，不提交）。
 
 主要开关：`allow_read`、`allow_write`、`allow_network`、`allow_network_write`、
-`allow_private_network`、`allow_qq_send`、`allow_destructive`、`allow_process`、
-`destructive_requires_superuser`、`write_requires_addressed`。
+`allow_private_network`、`allow_email`、`allow_qq_send`、`allow_destructive`、`allow_screen`、`allow_process`、
+`destructive_requires_superuser`、`write_requires_addressed`；工作区隔离用 `workspace_scope`，
+附件大小用 `max_file_bytes`。截屏默认关闭，开启后仍按
+destructive 处理：自动参与不执行，且默认只允许超级管理员发起。邮件发送默认关闭：
+开启 `allow_email` 后仍要求 `allow_network`，自动参与不会发送。
 
 ## 5. 裁决顺序
 
@@ -120,7 +129,9 @@ fllbot/builtin_plugins/workspace/  使用沙盒的示例工具包
 | reason | 含义 |
 | --- | --- |
 | `write_disabled` / `read_disabled` | 对应能力未开放 |
+| `screen_disabled` | 截屏能力未开放（默认） |
 | `network_disabled` / `network_write_disabled` | 联网或提交未开放 |
+| `email_disabled` | 邮件发送能力未开放（默认） |
 | `network_host_not_allowed` / `network_host_denied` | 主机不在白名单/被黑名单命中 |
 | `network_private_denied` | 目标是本机、局域网或保留地址 |
 | `path_absolute` / `path_escape` / `path_denied` | 绝对路径、越界或敏感文件 |
@@ -131,10 +142,20 @@ fllbot/builtin_plugins/workspace/  使用沙盒的示例工具包
 
 ## 6. 工作区文件沙盒
 
-`ctx.sandbox.files` 提供 `read_text`、`write_text`、`list_dir`、`exists`：
+工作区默认是项目根目录下的 `data/agent_workspace/`（可用 `[sandbox].workspace` 修改），
+FLLBot 启动时自动创建；`GET /api/sandbox` 的 `workspace` 返回实际绝对路径。
+`workspace_scope = "scene"`（默认）会在其下按 `group_<群号>` / `private_<QQ>` 再分目录，
+不同群默认看不到彼此文件；设为 `shared` 才回到所有会话共用一个目录。
+`GET /api/sandbox?group_id=` 返回该群实际使用的工作区路径。
+
+`ctx.sandbox.files` 提供 `read_text`、`read_bytes`、`write_text`、`write_bytes`、`list_dir`、
+`stat`、`make_dir`、`move`、`copy`、`delete`、`exists`；
 
 - 路径必须是工作区相对路径；解析后再次做 `relative_to(root)` 检查，软链接逃逸会失败。
-- 每次读写都有字节上限；超限读取返回 `truncated`，超限写入直接拒绝。
+- 每次读写都有字节上限；超限读取返回 `truncated`，超限写入直接拒绝；复制/发送文件受
+  `max_file_bytes`（默认 5 MB）限制，超限直接报错而不是截断。
+- `send_file` 可把工作区文件作为附件发送，但拒绝 `.exe`、`.dll`、`.msi`、`.bat`、`.cmd`、`.jar`
+  等可执行/启动器类型；自动参与时被 `qq.send_file` 边界拒绝。
 - 敏感路径默认拒绝：`.env*`、`config.toml`、`data/admin_token.txt`、数据库、备份、日志、
   `.git`、`*.pem/*.key/*.pfx`，可按 `deny_paths` 调整。
 - 目录不存在时写入会自动创建（仍在工作区内）；读取不存在的文件返回 `not_found`。
@@ -153,6 +174,10 @@ fllbot/builtin_plugins/workspace/  使用沙盒的示例工具包
 - 代理环境变量由 httpx 默认读取；需要强制直连时在部署层关闭代理。
 
 DNS 检查降低但不能完全消除 DNS 重绑定风险；对不可信目标应同时使用主机白名单。
+
+邮件发送走 SMTP，不属于 `ctx.sandbox.network` 的 HTTP 客户端；插件必须声明 `email.send`，
+由宿主在发送前检查 `allow_email` 与 `allow_network`。`email` 插件把发件服务器限定为 QQ 邮箱
+（`smtp.qq.com` / `smtp.exmail.qq.com`），收件域名默认只允许 `qq.com`。
 
 ## 8. 观测与审计
 
@@ -182,11 +207,28 @@ allowed_hosts = ["docs.python.org", "*.github.com"]
 再在「智能体 → 允许调用的工具」中勾选 `workspace__read_file`、`workspace__write_file`；
 自动参与仍然不会写入，群友 @ 或使用唤醒词明确要求后才会执行。
 
-## 10. 边界
+## 10. 截屏（高风险示例）
+
+内置 `screen` 插件演示高风险能力如何被单独收口：
+
+```toml
+[sandbox]
+allow_screen = true       # 默认 false
+destructive_requires_superuser = true
+```
+
+- 工具：`screen__capture_screen`（截屏并发送）、`screen__capture_screen_file`（截屏并写入工作区）。
+- 两者都声明 `screen.capture`，按 destructive 处理：自动参与拒绝，默认只允许超级管理员明确请求；
+  即使关闭 `destructive_requires_superuser`，也至少要求群主/管理员，普通群成员不能截屏。
+- 保存文件还要 `allow_write = true`；单群可用 `sandbox_screen` 覆盖。
+- 截取的是**宿主电脑**屏幕，可能包含桌面隐私；插件只返回尺寸、字节数和发送结果，不把截图内容写入日志或追踪。
+
+## 11. 边界
 
 - 这是**进程内策略与资源围栏**，不是操作系统级沙箱。插件仍以宿主进程权限运行；
   只安装可信插件，`process.exec` 默认不提供执行器。
 - 沙盒只约束显式声明能力的 AI 工具；插件命令处理器直接操作文件或网络不属于本契约。
+- 工作区隔离是路径级，不是操作系统用户隔离；同一插件仍能访问其他路径，只应安装可信插件。
 - 文件检查与写入之间存在常规 TOCTOU 窗口；工作区由管理员控制，不存放对抗性内容。
 - 本轮额度保存在事件上下文内，进程重启或任务被取消后不保留；跨轮总量请使用群额度。
 - 沙盒拒绝是正常结果，不是系统错误：模型应说明受限部分，而不是反复换参数尝试。

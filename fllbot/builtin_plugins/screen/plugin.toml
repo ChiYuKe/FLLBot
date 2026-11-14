@@ -1,0 +1,11 @@
+schema_version = 1
+api_version = 1
+name = "screen"
+version = "0.1.0"
+description = "截取当前屏幕并发送或保存到沙盒工作区（默认关闭）"
+author = ""
+category = "plugin"
+
+requires_fllbot = ">=0.2,<1"
+requires_python = ">=3.11"
+dependencies = ["Pillow>=10.4,<13"]

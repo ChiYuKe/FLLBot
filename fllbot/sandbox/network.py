@@ -109,9 +109,24 @@ class SandboxNetwork:
 
     async def fetch(self, url: str, *, max_bytes: int | None = None,
                     headers: dict[str, str] | None = None, timeout: float | None = None) -> dict:
+        return await self._fetch(url, max_bytes=max_bytes, headers=headers, timeout=timeout,
+                                 text_only=True)
+
+    async def fetch_bytes(self, url: str, *, max_bytes: int | None = None,
+                          headers: dict[str, str] | None = None,
+                          timeout: float | None = None) -> dict:
+        """下载原始字节；仍执行同一套 URL、主机、DNS、重定向与大小检查。"""
+        return await self._fetch(url, max_bytes=max_bytes, headers=headers, timeout=timeout,
+                                 text_only=False)
+
+    async def _fetch(self, url: str, *, max_bytes: int | None = None,
+                     headers: dict[str, str] | None = None, timeout: float | None = None,
+                     text_only: bool = True) -> dict:
         if not self.policy.allow_network:
             raise SandboxError("network_disabled", "当前沙盒未开放联网")
-        limit = min(int(max_bytes or self.policy.max_fetch_bytes), self.policy.max_fetch_bytes)
+        # 文本读取受 max_fetch_bytes 约束；二进制下载用于保存文件，使用 max_file_bytes。
+        ceiling = self.policy.max_fetch_bytes if text_only else self.policy.max_file_bytes
+        limit = min(int(max_bytes or ceiling), ceiling)
         request_headers = {**DEFAULT_HEADERS, **(headers or {})}
         current = await self.validate(url)
         hops = 0
@@ -136,34 +151,41 @@ class SandboxNetwork:
                     if response.status_code >= 400:
                         raise SandboxError("network_http_error", f"目标站点返回 {response.status_code}")
                     content_type = response.headers.get("content-type", "")
-                    if not self._allowed_type(content_type):
+                    if text_only and not self._allowed_type(content_type):
                         raise SandboxError("network_content_type", "沙盒只读取文本类响应")
                     chunks, size = [], 0
+                    # 多读 1 字节用于区分“刚好等于上限”和“确实被截断”。
+                    cap = limit + 1
                     async for chunk in response.aiter_bytes():
                         if not chunk:
                             continue
-                        remaining = limit - size
+                        remaining = cap - size
                         if remaining <= 0:
                             break
                         chunks.append(chunk[:remaining])
                         size += min(len(chunk), remaining)
-                        if size >= limit:
+                        if size >= cap:
                             break
                     raw = b"".join(chunks)
+                    truncated = len(raw) > limit
+                    raw = raw[:limit]
                     encoding = response.encoding or "utf-8"
-                    try:
-                        text = raw.decode(encoding, errors="replace")
-                    except LookupError:
-                        text = raw.decode("utf-8", errors="replace")
-                    return {
+                    result = {
                         "url": current,
                         "status": response.status_code,
                         "content_type": content_type.split(";", 1)[0],
-                        "text": text,
                         "bytes": len(raw),
-                        "truncated": size >= limit,
-                        **({"notice": "响应超过沙盒单次读取上限，只返回开头部分。"} if size >= limit else {}),
+                        "truncated": truncated,
+                        **({"notice": "响应超过沙盒单次读取上限，只返回开头部分。"} if truncated else {}),
                     }
+                    if text_only:
+                        try:
+                            result["text"] = raw.decode(encoding, errors="replace")
+                        except LookupError:
+                            result["text"] = raw.decode("utf-8", errors="replace")
+                    else:
+                        result["data"] = raw
+                    return result
 
 
 __all__ = ["SandboxNetwork"]

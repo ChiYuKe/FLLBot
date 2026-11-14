@@ -120,6 +120,22 @@ def test_guard_denies_capability_path_url_and_authority(tmp_path):
     assert (manage.allowed, manage.reason) == (False, "authority_required")
 
 
+def test_file_sending_requires_an_explicit_request(tmp_path):
+    current = policy(tmp_path)
+    automatic = decide(tool="file", spec_capabilities=("qq.send_file",), spec_risk="write",
+                       arguments={}, policy=current, addressed=False, trigger_kind="automatic",
+                       superuser=False, group_admin=False)
+    assert (automatic.allowed, automatic.reason) == (False, "automatic_side_effect")
+    explicit = decide(tool="file", spec_capabilities=("qq.send_file",), spec_risk="write",
+                      arguments={}, policy=current, addressed=True, trigger_kind="at",
+                      superuser=False, group_admin=False)
+    assert explicit.allowed
+    disabled = decide(tool="file", spec_capabilities=("qq.send_file",), spec_risk="write",
+                      arguments={}, policy=policy(tmp_path, allow_qq_send=False), addressed=True,
+                      trigger_kind="at", superuser=False, group_admin=False)
+    assert (disabled.allowed, disabled.reason) == (False, "qq_send_disabled")
+
+
 def test_guard_quota_and_legacy_tools(tmp_path):
     current = policy(tmp_path)
     allowed = decide(tool="t", spec_capabilities=("net.read",), spec_risk="read",
@@ -186,6 +202,8 @@ async def test_network_revalidates_redirects_and_types(tmp_path):
     content = SandboxNetwork(policy(tmp_path), transport=transport, resolver=resolver)
     with pytest.raises(SandboxError):
         await content.fetch("http://example.com/binary")
+    binary = await content.fetch_bytes("http://example.com/binary")
+    assert binary["data"] == b"\x00" and binary["content_type"] == "application/octet-stream"
     with pytest.raises(SandboxError):
         await network.fetch("http://127.0.0.1/a")
     with pytest.raises(SandboxError):
@@ -255,10 +273,58 @@ async def test_tool_executor_allows_and_counts_explicit_write(tmp_path):
         output, _ = await bot.tool_executor.execute(ctx, spec.qualified_name, {"path": "n/a.txt"}, registry)
         assert "n/a.txt" in output
         assert ctx.sandbox_usage["writes"] == 1
-        assert (bot.sandbox.policy().workspace / "n" / "a.txt").read_text(encoding="utf-8") == "data"
+        scoped = bot.sandbox.policy().workspace_for("group", 20002)
+        assert (scoped / "n" / "a.txt").read_text(encoding="utf-8") == "data"
         status = bot.sandbox.status()
         assert status["stats"]["allowed"] >= 1
         assert status["recent"][-1]["tool"] == "example__write"
+    finally:
+        await bot.stop()
+
+
+def test_workspace_scope_isolates_groups(tmp_path):
+    scoped = policy(tmp_path)
+    first = scoped.workspace_for("group", 100)
+    second = scoped.workspace_for("group", 200)
+    assert first != second and first.name == "group_100" and second.name == "group_200"
+    assert scoped.workspace_for("private", 300).name == "private_300"
+    assert scoped.workspace_for("group", 0) == scoped.workspace
+
+    shared = resolve({"workspace_scope": "shared", "workspace": str(tmp_path / "shared")}, tmp_path)
+    assert shared.workspace_for("group", 100) == shared.workspace
+    fresh = SandboxFiles(resolve({"workspace": str(tmp_path / "fresh")}, tmp_path))
+    assert fresh.list_dir("")["entries"] == []
+
+
+def test_workspace_file_operations_stay_inside(tmp_path):
+    files = SandboxFiles(policy(tmp_path, allow_write=True))
+    files.write_text("src/main.py", "print(1)\n")
+    assert files.stat("src/main.py")["type"] == "file"
+    files.make_dir("build")
+    copied = files.copy("src/main.py", "build/main.py")
+    assert copied["destination"] == "build/main.py"
+    moved = files.move("build/main.py", "build/app.py")
+    assert moved["destination"] == "build/app.py"
+    assert not files.exists("build/main.py")
+    assert files.delete("build/app.py")["deleted"] is True
+    with pytest.raises(SandboxError):
+        files.delete("build")
+    assert files.delete("build", recursive=True)["deleted"] is True
+    files.write_text("src/b.py", "# TODO: fix\nprint(2)\n")
+    found = files.search("TODO")
+    assert found["results"][0]["path"] == "src/b.py" and found["results"][0]["line"] == 1
+    assert [item["path"] for item in files.search("", pattern="*.py")["results"]] == [
+        "src/b.py", "src/main.py"]
+    assert files.delete("src", recursive=True)["deleted"] is True
+    with pytest.raises(SandboxError):
+        files.move("../outside", "inside")
+
+
+async def test_start_creates_the_sandbox_workspace(tmp_path):
+    bot = await make_bot(tmp_path)
+    try:
+        assert (tmp_path / "data" / "agent_workspace").is_dir()
+        assert bot.sandbox.policy().workspace == (tmp_path / "data" / "agent_workspace").resolve()
     finally:
         await bot.stop()
 
@@ -270,7 +336,8 @@ def test_sandbox_api_is_protected_and_reports_policy(tmp_path):
         data = client.get("/api/sandbox?group_id=20002", headers=AUTH).json()
         assert data["enabled"] is True
         assert data["capabilities"]["write"] is False
-        assert data["limits"]["max_calls_per_turn"] == 16
+        assert data["capabilities"]["email"] is False
+        assert data["limits"]["max_calls_per_turn"] == 0
         assert data["group"]["group_id"] == 20002
 
 
@@ -280,13 +347,18 @@ def test_group_sandbox_overrides_survive_partial_policy_edits(tmp_path):
         payload = {"enabled": True, "policy": {
             "auto_group": True, "trigger_modes": ["all"],
             "participation_threshold": 5, "sandbox_write": True, "sandbox_network": False,
+            "sandbox_email": True, "sandbox_screen": True,
         }}
         assert client.patch("/api/console/groups/321", headers=AUTH, json=payload).status_code == 200
         assert bot.sandbox.policy(321).allow_write is True
         assert bot.sandbox.policy(321).allow_network is False
+        assert bot.sandbox.policy(321).allow_email is True
+        assert bot.sandbox.policy(321).allow_screen is True
         assert client.patch("/api/console/groups/321", headers=AUTH, json={
             "enabled": True, "policy": {"cooldown_seconds": 0}}).status_code == 200
         policy = client.get("/api/console/groups/321", headers=AUTH).json()["policy"]
         assert policy["sandbox_write"] is True
         assert policy["sandbox_network"] is False
+        assert policy["sandbox_email"] is True
+        assert policy["sandbox_screen"] is True
         assert policy["participation_threshold"] == 5

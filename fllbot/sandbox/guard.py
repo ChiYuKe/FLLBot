@@ -13,7 +13,17 @@ from pathlib import PurePosixPath, PureWindowsPath
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
-from .capabilities import FS_WRITE, NET_WRITE, PROCESS_EXEC, QQ_MANAGE, RANK, Risk
+from .capabilities import (
+    EMAIL_SEND,
+    FS_WRITE,
+    NET_WRITE,
+    PROCESS_EXEC,
+    QQ_MANAGE,
+    QQ_SEND_FILE,
+    RANK,
+    SCREEN_CAPTURE,
+    Risk,
+)
 from .policy import SandboxPolicy
 
 PATH_KEYS = {
@@ -182,7 +192,9 @@ def decide(*, tool: str, spec_capabilities: Iterable[str], spec_risk: str,
             return Verdict(False, verdict.reason, capability=capabilities[0], risk=risk,
                            denied_host=verdict.denied_host, hint=verdict.hint)
     if RANK[risk] >= RANK["write"]:
-        side_effect_caps = {FS_WRITE, NET_WRITE, QQ_MANAGE, PROCESS_EXEC}
+        side_effect_caps = {
+            FS_WRITE, NET_WRITE, EMAIL_SEND, QQ_SEND_FILE, QQ_MANAGE, SCREEN_CAPTURE, PROCESS_EXEC,
+        }
         if (policy.write_requires_addressed and not addressed
                 and side_effect_caps.intersection(capabilities)):
             return Verdict(False, "automatic_side_effect", capability=capabilities[0], risk=risk,
@@ -193,8 +205,12 @@ def decide(*, tool: str, spec_capabilities: Iterable[str], spec_risk: str,
         if QQ_MANAGE in capabilities and not (superuser or group_admin):
             return Verdict(False, "authority_required", capability=QQ_MANAGE, risk=risk,
                            hint="群管理操作只允许群主、管理员或机器人超级管理员发起。")
+        if SCREEN_CAPTURE in capabilities and not (superuser or group_admin):
+            # 即使关闭了“破坏性操作仅超级管理员”，截屏也至少要求群管理身份。
+            return Verdict(False, "authority_required", capability=SCREEN_CAPTURE, risk=risk,
+                           hint="截屏只允许群主、管理员或机器人超级管理员发起。")
     if usage is not None:
-        if int(usage.get("calls", 0)) >= policy.max_calls_per_turn:
+        if policy.max_calls_per_turn > 0 and int(usage.get("calls", 0)) >= policy.max_calls_per_turn:
             return Verdict(False, "turn_quota_exceeded", capability=capabilities[0], risk=risk,
                            hint="本轮沙盒操作次数已达上限，请使用已有结果收尾。")
         if RANK[risk] >= RANK["write"] and int(usage.get("writes", 0)) >= policy.max_write_calls_per_turn:

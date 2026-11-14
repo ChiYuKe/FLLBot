@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from .capabilities import (
+    EMAIL_SEND,
     FS_READ,
     FS_WRITE,
     MEMORY_READ,
@@ -17,6 +18,8 @@ from .capabilities import (
     PROCESS_EXEC,
     QQ_MANAGE,
     QQ_SEND,
+    QQ_SEND_FILE,
+    SCREEN_CAPTURE,
     SYSTEM_READ,
 )
 
@@ -60,13 +63,16 @@ class SandboxPolicy:
 
     enabled: bool = True
     workspace: Path = Path("data/agent_workspace")
+    workspace_scope: str = "scene"
     allow_read: bool = True
     allow_write: bool = False
     allow_network: bool = True
     allow_network_write: bool = False
     allow_private_network: bool = False
+    allow_email: bool = False
     allow_qq_send: bool = True
     allow_destructive: bool = False
+    allow_screen: bool = False
     allow_process: bool = False
     destructive_requires_superuser: bool = True
     write_requires_addressed: bool = True
@@ -75,10 +81,11 @@ class SandboxPolicy:
     deny_paths: tuple[str, ...] = DEFAULT_DENY_PATHS
     max_read_bytes: int = 200_000
     max_write_bytes: int = 200_000
+    max_file_bytes: int = 5_000_000
     max_fetch_bytes: int = 2_000_000
     request_timeout: float = 10.0
     max_redirects: int = 3
-    max_calls_per_turn: int = 16
+    max_calls_per_turn: int = 0
     max_write_calls_per_turn: int = 4
     group_id: int | None = None
 
@@ -94,15 +101,34 @@ class SandboxPolicy:
             return (self.allow_network, "network_disabled")
         if capability == NET_WRITE:
             return (self.allow_network and self.allow_network_write, "network_write_disabled")
-        if capability == QQ_SEND:
+        if capability == EMAIL_SEND:
+            if not self.allow_network:
+                return False, "network_disabled"
+            return (self.allow_email, "email_disabled")
+        if capability in (QQ_SEND, QQ_SEND_FILE):
             return (self.allow_qq_send, "qq_send_disabled")
         if capability == QQ_MANAGE:
             return (self.allow_destructive, "destructive_disabled")
+        if capability == SCREEN_CAPTURE:
+            return (self.allow_screen, "screen_disabled")
         if capability == PROCESS_EXEC:
             return (self.allow_process, "process_disabled")
         if capability in (MEMORY_READ, SYSTEM_READ):
             return True, ""
         return False, "capability_unknown"
+
+    def workspace_for(self, scene: str, scene_id: int) -> Path:
+        """按会话隔离工作区；shared 保持旧行为，scene 默认按群/私聊分目录。"""
+        if self.workspace_scope != "scene":
+            return self.workspace
+        try:
+            identifier = int(scene_id or 0)
+        except (TypeError, ValueError):
+            identifier = 0
+        if scene not in {"group", "private"} or identifier <= 0:
+            return self.workspace
+        prefix = "group" if scene == "group" else "private"
+        return self.workspace / f"{prefix}_{identifier}"
 
     # -- 路径 ------------------------------------------------------------- #
     def path_denied(self, relative: str) -> str:
@@ -161,17 +187,24 @@ def resolve(settings: Any, root: Path, overrides: Mapping[str, Any] | None = Non
     allow_private = bool(_value(settings, "allow_private_network", False))
     if overrides.get("sandbox_private_network") is not None:
         allow_private = bool(overrides["sandbox_private_network"])
+    allow_email = bool(_value(settings, "allow_email", False))
+    if overrides.get("sandbox_email") is not None:
+        allow_email = bool(overrides["sandbox_email"])
     deny = _tuple(_value(settings, "deny_paths", DEFAULT_DENY_PATHS))
     return SandboxPolicy(
         enabled=bool(_value(settings, "enabled", True)),
         workspace=workspace.resolve(strict=False),
+        workspace_scope=str(_value(settings, "workspace_scope", "scene")),
         allow_read=bool(_value(settings, "allow_read", True)),
         allow_write=allow_write,
         allow_network=allow_network,
         allow_network_write=bool(_value(settings, "allow_network_write", False)),
         allow_private_network=allow_private,
+        allow_email=allow_email,
         allow_qq_send=bool(_value(settings, "allow_qq_send", True)),
         allow_destructive=bool(_value(settings, "allow_destructive", False)),
+        allow_screen=bool(_value(settings, "allow_screen", False))
+        if overrides.get("sandbox_screen") is None else bool(overrides["sandbox_screen"]),
         allow_process=bool(_value(settings, "allow_process", False)),
         destructive_requires_superuser=bool(_value(settings, "destructive_requires_superuser", True)),
         write_requires_addressed=bool(_value(settings, "write_requires_addressed", True)),
@@ -180,10 +213,11 @@ def resolve(settings: Any, root: Path, overrides: Mapping[str, Any] | None = Non
         deny_paths=deny or DEFAULT_DENY_PATHS,
         max_read_bytes=int(_value(settings, "max_read_bytes", 200_000)),
         max_write_bytes=int(_value(settings, "max_write_bytes", 200_000)),
+        max_file_bytes=int(_value(settings, "max_file_bytes", 5_000_000)),
         max_fetch_bytes=int(_value(settings, "max_fetch_bytes", 2_000_000)),
         request_timeout=float(_value(settings, "request_timeout", 10.0)),
         max_redirects=int(_value(settings, "max_redirects", 3)),
-        max_calls_per_turn=int(_value(settings, "max_calls_per_turn", 16)),
+        max_calls_per_turn=int(_value(settings, "max_calls_per_turn", 0)),
         max_write_calls_per_turn=int(_value(settings, "max_write_calls_per_turn", 4)),
         group_id=group_id,
     )

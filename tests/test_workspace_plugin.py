@@ -27,10 +27,15 @@ async def test_workspace_tools_load_with_capabilities(tmp_path):
         workspace = bot.plugins.get("workspace")
         assert workspace is not None
         tools = {spec.qualified_name: spec for spec in workspace.ai_tools}
-        assert set(tools) == {"workspace__list_files", "workspace__read_file",
-                              "workspace__write_file", "workspace__fetch_url"}
+        assert set(tools) == {
+            "workspace__list_files", "workspace__read_file", "workspace__write_file",
+            "workspace__fetch_url", "workspace__stat", "workspace__search",
+            "workspace__make_dir", "workspace__move", "workspace__copy",
+            "workspace__delete", "workspace__download", "workspace__send_file",
+        }
         assert tools["workspace__write_file"].risk == "write"
         assert tools["workspace__read_file"].capabilities == ("fs.read",)
+        assert tools["workspace__send_file"].capabilities == ("fs.read", "qq.send_file")
         catalog = {item["name"]: item for item in bot.plugin_summaries()}
         exposed = {tool["name"]: tool for tool in catalog["workspace"]["ai_tools"]}
         assert exposed["workspace__write_file"]["risk"] == "write"
@@ -42,7 +47,7 @@ async def test_workspace_tools_load_with_capabilities(tmp_path):
 async def test_automatic_participation_cannot_write_but_explicit_request_can(tmp_path, monkeypatch):
     bot = await _prepare(tmp_path)
     try:
-        target = bot.sandbox.policy().workspace / "notes" / "a.txt"
+        target = bot.sandbox.policy().workspace_for("group", 20002) / "notes" / "a.txt"
         # 写入能力已开放，但自动参与没有明确请求，仍不能产生副作用。
         await bot.update_config({"sandbox": {"allow_write": True}})
         automatic = AsyncMock(side_effect=[

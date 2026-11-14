@@ -6,10 +6,9 @@ import asyncio
 
 import httpx
 
-from fllbot.llm.quote import fetch_quoted
 from fllbot.plugin import Context, Plugin
 
-from .service import read_attachment
+from .service import attachment_name, read_attachment
 
 plugin = Plugin.from_manifest(__file__)
 plugin.agent_instruction(
@@ -47,7 +46,7 @@ async def read_file(ctx: Context, source: str = "auto", file_index: int = 0, off
         return {"error": "无效的文件选择或读取位置"}
     segments = ctx.message
     if source == "quoted" or source == "auto" and ctx.reply_id:
-        quoted = await fetch_quoted(ctx)
+        quoted = await ctx.fetch_quoted()
         if quoted is None or quoted.error:
             return {"error": quoted.error if quoted else "当前消息没有直接引用文件消息"}
         segments = quoted.segments
@@ -55,7 +54,7 @@ async def read_file(ctx: Context, source: str = "auto", file_index: int = 0, off
     if file_index >= len(files):
         return {
             "error": "所选消息中没有该文件附件，请直接引用包含文件的消息",
-            "files": [str(item.get("name") or item.get("file_name") or "未命名") for item in files],
+            "files": [attachment_name(item) or "未命名" for item in files],
         }
     try:
         data = await asyncio.wait_for(read_attachment(ctx, files[file_index], offset), timeout=25)

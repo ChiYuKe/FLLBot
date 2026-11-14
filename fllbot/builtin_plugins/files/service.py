@@ -52,6 +52,15 @@ TEXT_EXTENSIONS = {
 }
 
 
+def attachment_name(segment) -> str:
+    """附件显示名。NapCat 收到的文件消息把文件名放在 ``file``，没有 ``name``/``file_name``。"""
+    for key in ("name", "file_name", "file"):
+        value = segment.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().replace("\\", "/").rsplit("/", 1)[-1][:120]
+    return ""
+
+
 def decode_text(raw: bytes) -> tuple[str, str]:
     if len(raw) > MAX_BYTES:
         raise ValueError("文件超过 1 MB，请拆分后发送")
@@ -106,7 +115,7 @@ async def _download(url: str) -> bytes:
 
 
 async def read_attachment(ctx, segment, offset: int) -> dict:
-    name = str(segment.get("name") or segment.get("file_name") or "")
+    name = attachment_name(segment)
     if Path(name).suffix.lower() not in TEXT_EXTENSIONS:
         raise ValueError("暂只支持文本/代码文件，如 .cs、.py、.txt、.md；不支持压缩包、PDF 或 Office 文件")
     if int(segment.get("size") or segment.get("file_size") or 0) > MAX_BYTES:
@@ -136,7 +145,7 @@ async def read_attachment(ctx, segment, offset: int) -> dict:
     text, encoding = decode_text(raw)
     end = min(offset + CHUNK_CHARS, len(text))
     return {
-        "name": Path(name).name,
+        "name": name,
         "encoding": encoding,
         "total_chars": len(text),
         "content": text[offset:end],
