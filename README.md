@@ -28,8 +28,9 @@
 - **LLM 子系统**：OpenAI 兼容接口、上下文与人格管理，可供管理 API 和自定义插件使用
 - **管理 API**：状态/连接/插件/群/配置/日志/统计/人格/插件配置、通用 OneBot 调用、KV 读写、SSE 实时事件流
 - **可靠性**：有界事件队列与溢出统计、分阶段关闭与任务排空、SQLite 在线备份和校验后恢复
-- **开箱内置插件**：`basic`（包含 `ping`、`echo`、`help`、`plugins` 命令）、`agent`（群级自然语言智能体）、`text`（智能体文本、图片与架构图排版工具）、`github`（公开仓库读取）、`files`（QQ 文本与代码附件读取）、`oni_knowledge`（本地缺氧源码检索与读取；工具需在后台授权）和 `workspace`（沙盒工作区文件读写与受控网页读取）
+- **开箱内置插件**：`basic`（包含 `ping`、`echo`、`help`、`plugins` 命令）、`agent`（群级自然语言智能体）、`text`（智能体文本、图片与架构图排版工具）、`github`（公开仓库读取）、`files`（QQ 文本与代码附件读取）、`oni_knowledge`（本地缺氧源码检索与读取；工具需在后台授权）、`workspace`（沙盒工作区文件读写与受控网页读取）和 `screen`（宿主截屏，默认关闭）
 - **群聊参与与执行沙盒**：自动参与先用确定性信号评分（@、唤醒词、提问、接话加分；纯语气词、复读、刷屏减分），通过后才请求模型；AI 工具声明能力与风险，执行前统一裁决能力开关、工作区路径、主机白名单、发起者权限与自动参与边界，拒绝不产生外部动作
+- **工具目录与执行效率**：宿主缓存插件工具快照和模型定义模板，插件/权限/Schema 变化后自动重建；执行期只解析目标工具并实时复核授权，同一轮内相同参数的纯读取调用复用结果，减少重复 I/O、存储写入和提示词开销
 
 ## 快速开始（Windows）
 
@@ -102,7 +103,7 @@ INFO  fllbot: FLLBot 0.1.0 已启动：WS /onebot/v11/ws | 插件 2 个 | LLM �
 | `storage` | `path` `backup_dir` | SQLite 路径只在启动来源修改；备份目录可在线更新 |
 | `logging` | `level` `dir` `json_lines` `ring_size` | 控制台 + JSONL 文件 + 内存环形缓冲 |
 | `llm` | `enabled` `base_url` `api_key` `model` `persona` ... | LLM 服务配置，供 API 与自定义插件使用 |
-| `sandbox` | `allow_write` `allow_network` `allowed_hosts` `workspace` `max_*` | 智能体工具的能力开关、工作区、主机范围与单轮额度 |
+| `sandbox` | `allow_write` `allow_network` `allow_email` `allowed_hosts` `workspace` `max_*` | 智能体工具的能力开关、工作区、主机范围与单轮额度 |
 
 > 运行时用 `PATCH /api/config` 修改的参数会保存到数据库并在重启后保留。监听、数据库位置、插件加载、日志文件和管理入口等启动参数必须在配置文件/启动命令中修改并重启；在线修改返回 409，整次请求不保存。旧版未生效的启动覆盖会归档保留，后台可只读查看。完整范围见 [配置与数据作用域](docs/admin-scope.md)。
 
@@ -124,12 +125,32 @@ LLM 客户端和管理 API 可供自定义插件调用。WebUI 将行为与群�
 | 命令 | 说明 |
 | --- | --- |
 | `/搜索 <关键词>`（`搜索` `联网`） | 网页搜索，返回标题、链接和摘要；默认必应，可切 Tavily / Serper / SearXNG |
-| `/天气 <城市>`（`天气`） | 实时天气 + 未来几天预报，数据来自 Open-Meteo，免密钥 |
+| `/天气 <城市>`（`天气`） | 实时天气 + 未来几天预报，默认腾讯 QQ 天气（国内直连、免密钥），可切 Open-Meteo；默认附天气卡片图 |
 | `/现在 [城市]`（`时间` `几点`） | 当前日期和时间，可指定城市时区 |
 
-智能体工具：`web__web_search`、`web__read_webpage`、`web__get_weather`、`web__get_current_time`。
-需要阅读指定链接时授权「读取网页」；在「智能体 → 允许调用的工具」（或单群详细设置的“可用工具”）里勾选对应工具后，模型才会看到它们；配置项（搜索后端、
-API Key、默认城市、预报天数、超时）都在插件配置里，详见 [plugins/web/README.md](plugins/web/README.md)。
+智能体工具：`web__web_search`、`web__read_webpage`、`web__get_weather`、`web__weather_card`、`web__get_current_time`。
+需要阅读指定链接时授权「读取网页」，需要天气图片时授权「天气图片」；在「智能体 → 允许调用的工具」（或单群详细设置的“可用工具”）里勾选对应工具后，模型才会看到它们；配置项（搜索后端、
+API Key、天气服务、默认城市、预报天数、超时）都在插件配置里，详见 [plugins/web/README.md](plugins/web/README.md)。
+
+## 邮件发送（email 插件）
+
+`plugins/email/` 让智能体通过 QQ 邮箱发纯文本邮件。群友邮箱通常就是 `QQ号@qq.com`，所以工具直接收 QQ 号，
+留空收件人时默认发给当前发言人自己的邮箱：
+
+- 智能体工具：`email__send_email`（主题、正文、可选收件人 `to`）；收件人可写 QQ 号或完整 QQ 邮箱，多个用逗号/空格/分号分隔；
+- 配置：发件邮箱、SMTP 授权码、服务器/端口/加密方式、允许的收件域名、单封收件人数与正文字数上限；
+- 凭据准备：在 QQ 邮箱「设置 → 账户」开启 SMTP 并生成授权码（不是登录密码）；
+- 默认 `[sandbox].allow_email = false`，需管理员开启；单群可用「沙盒邮件」覆盖；自动参与不会发邮件，必须由群友明确请求；
+- 邮件只能纯文本、无附件；默认只允许 `qq.com` 收件域名。完整说明见 [plugins/email/README.md](plugins/email/README.md)。
+
+## 戳一戳（poke 插件）
+
+`plugins/poke/` 让机器人回应群友的戳一戳（NapCat 的 `notice.notify.poke`）：
+
+- 别人在群里戳机器人时，默认先回戳发起者一次，再按当前人格回复一到两句；
+- 群级设置 `poke_reply`、`poke_back` 控制是否回应和回戳，`poke_reply_seconds` / `poke_back_seconds` 控制冷却（默认 10 秒）；
+- 智能体工具 `poke__poke` 需在「允许调用的工具」里勾选；只限当前会话，自动参与时拒绝执行；
+- 私聊戳、群友互戳不会触发；被戳回应走 `ctx.llm`，不依赖 `agent` 插件。完整说明见 [plugins/poke/README.md](plugins/poke/README.md)。
 
 ## 沙盒工作区（workspace 插件）
 
@@ -141,13 +162,42 @@ API Key、默认城市、预报天数、超时）都在插件配置里，详见 
 | `workspace__read_file` | `fs.read` | 读取工作区内文本文件 |
 | `workspace__write_file` | `fs.write` | 写入文本（默认关闭，需管理员开启；自动参与时不会执行） |
 | `workspace__fetch_url` | `net.read` | 抓取公开 http(s) 文本页面 |
+| `workspace__stat` / `search` / `make_dir` / `move` / `copy` / `delete` | `fs.read` / `fs.write` | 查看、搜索、建目录、移动、复制、删除工作区文件 |
+| `workspace__download` | `net.read` + `fs.write` | 从允许的 http(s) 地址下载文件到工作区 |
+| `workspace__send_file` | `fs.read` + `qq.send_file` | 把工作区文件作为附件发送到当前会话 |
 
-工作区默认 `data/agent_workspace/`；绝对路径、`..`、软链接逃逸和 `.env`、数据库、令牌、日志等
-敏感文件会被拒绝。联网受主机白/黑名单与内网地址检查约束，每次跳转重新校验。
+工作区默认 `data/agent_workspace/`，`workspace_scope = "scene"` 会按群/私聊分目录，避免跨群读取；
+绝对路径、`..`、软链接逃逸和 `.env`、数据库、令牌、日志等敏感文件会被拒绝。联网受主机白/黑名单
+与内网地址检查约束，每次跳转重新校验。
 
-策略在 `config.toml` 的 `[sandbox]`（`allow_write`、`allowed_hosts`、大小与额度等），
-单群可用 `sandbox_write` / `sandbox_network` 收紧或放宽。完整说明见
-[群聊智能体与执行沙盒](docs/agent-sandbox.md)。
+策略在 `config.toml` 的 `[sandbox]`（`allow_write`、`allow_email`、`allowed_hosts`、大小与额度等），
+单群可用 `sandbox_write` / `sandbox_network` / `sandbox_email` 收紧或放宽。完整说明见
+[群聊智能体与执行沙盒](docs/agent-sandbox.md)，全部能力与刻意不做的边界见
+[群聊 Agent 能力清单](docs/agent-capabilities.md)。
+
+## 生成并发送代码/文本文件
+
+`text` 插件新增 `text__send_text_file`：让智能体把生成的代码或文本原样保存为附件发到当前会话。
+
+- 支持 `.py`、`.js`、`.ts`、`.cs`、`.java`、`.go`、`.rs`、`.json`、`.yaml`、`.sh`、`.ps1`、`.md` 等源码/配置扩展名
+- 文件名必须带扩展名，不能包含路径；正文最多 30000 字符，文件最大 2 MiB
+- 需要“指定大小的测试文件”（如 1 MB 的 `fault.cpp`）时传 `target_bytes`，工具只用注释或空行补足到该字节数，不改动原内容
+- 拒绝 `.exe`、`.dll`、`.bat`、`.cmd`、`.zip` 等可执行文件、启动器、压缩包和隐藏文件名
+- 与另外两个文件工具一样声明 `qq.send_file`，自动参与时会被沙盒拒绝，需群友 @ 或唤醒词明确请求
+- 正文确实超过 30000 字符（真实内容，不是补大小）时，可先用 `workspace__write_file` 分段写入工作区，再用 `workspace__send_file` 发送（需开启沙盒写入）
+
+启用后在群里说“把这个写成 main.py 发我”即可；文件工具需要在「智能体 → 允许调用的工具」中授权。
+
+## 截屏（screen 插件，默认关闭）
+
+`screen` 提供 `screen__capture_screen`（截取宿主屏幕并发送）与 `screen__capture_screen_file`
+（截取并保存到沙盒工作区）。它声明高风险能力 `screen.capture`，默认**不可用**：
+
+- 需要 `[sandbox].allow_screen = true`；保存文件还需要 `allow_write = true`；
+- 默认要求超级管理员发起；关闭该限制后仍至少要求群主/管理员，普通成员不能截屏；必须是 @ 或唤醒词明确请求；自动参与不会截屏；
+- 单群可用 `sandbox_screen` 收紧或放开。
+
+截取的是运行 FLLBot 的电脑屏幕，不是提问者的设备；截图可能包含桌面隐私，开启前请确认使用场景。
 
 ## 写插件
 
@@ -293,10 +343,11 @@ fllbot/
 ├── trigger_policy.py   # 触发决策与自动参与状态
 ├── participation.py    # 自动参与评分（确定性、可解释）
 ├── sandbox/            # 能力声明、操作裁决、工作区文件与受控联网
+├── tool_registry.py    # 工具目录快照、定义模板与变更重建
 ├── storage/            # SQLite + 迁移 + 仓储
 ├── llm/                # 客户端、人格、多轮对话
 ├── api/                # 管理 REST + SSE
-├── builtin_plugins/    # basic、agent、text、github、files、oni_knowledge 与 workspace
+├── builtin_plugins/    # basic、agent、text、github、files、oni_knowledge、workspace 与 screen
 plugins/                # 用户插件（运行时加载，已 gitignore 之外）
 personas/               # 用户人格（全部由你创建，程序不内置人格）
 tools/                  # fake_napcat.py、smoke_test.py

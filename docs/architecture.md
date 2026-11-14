@@ -11,8 +11,10 @@ flowchart LR
     Dispatcher --> Sandbox[sandbox 能力 / 裁决 / 工作区]
     Dispatcher --> Packages[独立插件包]
     Packages --> SDK[plugin SDK / Context]
+    Packages --> Registry[tool_registry 工具目录快照]
+    Registry --> LLM[llm 模型与会话]
     SDK --> Storage[storage 持久化]
-    SDK --> LLM[llm 模型与会话]
+    SDK --> LLM
     SDK --> Sandbox
     UI[ui 管理界面] --> API[api 鉴权与管理接口]
     API --> App
@@ -48,7 +50,8 @@ flowchart LR
 | `permission.py` / `policy.py` | 开关、用户和群权限、策略解析；插件复用而非重复实现 |
 | `trigger_policy.py` / `participation.py` | 触发决策与自动参与评分；只读当前消息和短期状态，不请求模型 |
 | `sandbox/` | 工具能力声明、策略解析、操作裁决、工作区文件与受控联网；不导入插件、协议或存储 |
-| `tool_executor.py` | 工具校验、权限复核、沙盒裁决、执行事实与审计；拒绝不产生外部动作 |
+| `tool_registry.py` | 汇总插件 AI 工具、缓存模型定义模板、按签名重建；不处理群策略、权限或执行 |
+| `tool_executor.py` | 工具校验、单工具实时解析、权限复核、沙盒裁决、执行事实、同轮读取结果复用 |
 | `storage/` | SQLite 与迁移、消息和配置持久化，不导入 UI、插件或应用入口 |
 | `events.py` / `logging_setup.py` | 事件分发、去重、日志与观测 |
 | `llm/` | 模型客户端、会话、人设、输出与转发消息适配；不依赖具体插件或 API 页面 |
@@ -81,6 +84,8 @@ fllbot/plugin/
 协议、存储、基础配置、事件与规则层不反向依赖应用装配或插件实现。
 plugin SDK 可使用 rules、onebot 与 sandbox；通过 Context 和类型约定访问装配后的宿主，不运行时导入 app.py。
 sandbox 自身只依赖标准库与 httpx，不导入插件、协议、存储或管理接口，保证裁决层可以被独立测试。
+tool_registry 只依赖标准库，通过对象约定读取 `plugins.loaded()` 与 `ai_tools`，不导入 app、API 或具体插件；
+Agent 插件负责“本群可见工具”过滤，执行器负责实时复核，两者共享同一份目录快照。
 llm 使用配置、协议模型和策略解析，不导入插件包、管理 API 或页面。
 app、dispatcher 与 api 负责连接这些能力，用户插件不导入 app 或 api 的内部实现。
 
@@ -106,7 +111,25 @@ app、dispatcher 与 api 负责连接这些能力，用户插件不导入 app �
 
 统一脚本校验核心架构、标准插件包、`fllbot/plugins/tests/scripts` 的代码和项目回归测试。
 services 有独立运行环境和依赖，应单独验证；不随机器人框架测试启动真实 TTS、模型或 QQ 连接。
+
+测试临时目录统一落在 `.local/tmp-tests/`（已 gitignore），不再散落到项目根目录。手动排查需要独立基目录时，
+使用 `-m pytest --basetemp .local/tmp-tests/<名字>`；残留可用 `.\scripts\clean_test_tmp.ps1` 清理：
+
+```powershell
+.\scripts\clean_test_tmp.ps1 -List    # 查看残留目录与占用
+.\scripts\clean_test_tmp.ps1 -Days 3  # 删除 3 天前的残留
+```
+
 插件开发命令和文件头约定见 [插件包规范](plugin-packages.md)，具体 SDK 见 [插件 API](plugin-api.md)。
+
+### Agent 与插件：工具目录契约
+
+`ToolRegistry` 汇总插件 `on_ai_tool` 注册的工具，按插件/工具标识、权限、Schema 摘要等签名缓存不可变快照；
+没有变化时直接复用，变化后 revision 递增。Agent 插件每轮只从快照中过滤本群可见工具，并只为入选工具复制
+Schema；执行阶段通过单工具解析复用快照，不再重建目录。工具定义模板与同轮读取结果复用都属于纯优化，
+不扩大能力：实时权限、插件开关、沙盒裁决和钩子仍然逐次生效。完整契约见
+[Agent 与插件：工具目录、执行解析与结果复用](tool-registry.md)；群友可能提出的能力范围、
+默认开关和刻意不做的边界见 [群聊 Agent 能力清单](agent-capabilities.md)。
 
 ### 群聊智能体参与与执行沙盒
 
