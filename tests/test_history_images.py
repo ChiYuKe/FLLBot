@@ -12,7 +12,7 @@ from fllbot.history_images import MAX_IMAGE_BYTES, image_data_url, input_images,
 from fllbot.onebot.models import parse_event
 from fllbot.onebot.segments import MessageSegment
 from fllbot.plugin.context import Context
-from fllbot.storage import MIGRATIONS, Storage
+from fllbot.storage import MIGRATIONS, SCHEMA_VERSION, Storage
 from helpers import FakeConnection, group_message, make_bot
 
 
@@ -90,7 +90,7 @@ async def test_upgrade_preserves_text_and_defaults_images(tmp_path):
     try:
         row = (await storage.recent_chat('private', 1))[0]
         assert row.content == '旧消息' and row.images == []
-        assert await storage.schema_version() == 26
+        assert await storage.schema_version() == SCHEMA_VERSION
     finally:
         await storage.close()
 
@@ -126,5 +126,32 @@ async def test_incoming_and_sent_images_in_history_api_and_clear(tmp_path, pictu
             assert (await client.delete(path)).status_code == 200
             assert not (await client.get(path)).json()['messages']
             assert (await client.get(f'/api/chat/private/{private}?self_id={ctx.self_id}')).json()['messages']
+    finally:
+        await bot.stop()
+
+
+async def test_group_context_links_previous_image_to_its_sender(tmp_path, picture):
+    bot = await make_bot(tmp_path, llm={
+        "enabled": True, "api_key": "fake", "context_window": 100000,
+    }, overrides={"chat": {"allow_images": True}})
+    await bot.permissions.save_group(20002, enabled=True, config={"policy": {"auto_group": True}})
+    url = image_data_url(picture)
+    prior = group_message("", message_id=1, user_id=30004, nickname="星愿",
+                          message=[MessageSegment.image(url).to_dict()])
+    current = group_message("猫猫看楼上有条大肥鱼", message_id=2, nickname="衣食无忧")
+    ctx = Context(bot, FakeConnection(), parse_event(current))
+    try:
+        await bot.chat.memory.observe(Context(bot, FakeConnection(), parse_event(prior)))
+        await bot.chat.memory.observe(ctx)
+        messages = await bot.chat.build_messages("group", 20002, ctx.text, ctx=ctx)
+        history = messages[-2]["content"]
+        assert "星愿" in history[0]["text"]
+        assert history[1] == {"type": "image_url", "image_url": {"url": url}}
+        assert "衣食无忧" in messages[-1]["content"]
+
+        await bot.update_config({"chat": {"allow_images": False}})
+        messages = await bot.chat.build_messages("group", 20002, ctx.text, ctx=ctx)
+        assert isinstance(messages[-2]["content"], str)
+        assert "星愿" in messages[-2]["content"]
     finally:
         await bot.stop()

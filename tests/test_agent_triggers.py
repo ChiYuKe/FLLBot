@@ -195,7 +195,8 @@ async def test_agent_trigger_modes(
         assert complete.await_count == int(expected)
         assert bool(connection.texts()) is expected
         if expected:
-            assert complete.call_args.args[0][-1]["content"].startswith(expected_content)
+            content = complete.call_args.args[0][-1]["content"].replace("[QQ @ 目标：机器人自身]\n", "")
+            assert content.startswith(expected_content)
         if mode == "prefix" and text == "木鱼":
             # 内部提示只发给模型，历史里仍记录用户原话。
             rows = await bot.storage.recent_chat("group", 20002, self_id=10001)

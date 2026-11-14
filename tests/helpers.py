@@ -148,6 +148,17 @@ class FakeConnection:
     async def get_group_member_info(self, group_id: int, user_id: int, **_: Any) -> dict[str, Any]:
         return {"group_id": group_id, "user_id": user_id, "nickname": "测试成员", "role": "member"}
 
+    async def group_poke(self, group_id: int, user_id: int) -> dict[str, Any]:
+        return await self.call("group_poke", {"group_id": int(group_id), "user_id": int(user_id)})
+
+    async def friend_poke(self, user_id: int) -> dict[str, Any]:
+        return await self.call("friend_poke", {"user_id": int(user_id)})
+
+    async def send_poke(self, user_id: int, *, group_id: int | None = None) -> dict[str, Any]:
+        if group_id is not None:
+            return await self.group_poke(group_id, user_id)
+        return await self.friend_poke(user_id)
+
     async def get_forward_msg(self, message_id: str) -> Any:
         self.calls.append(("get_forward_msg", {"message_id": str(message_id)}))
         if self.forward_error is not None:
@@ -255,6 +266,29 @@ def private_message(
         "message": [{"type": "text", "data": {"text": text}}],
         "sender": {"user_id": user_id, "nickname": "私聊用户", "card": "", "role": "member"},
     }
+
+
+def poke_notice(
+    *,
+    self_id: int = 10001,
+    group_id: int | None = 20002,
+    user_id: int = 30003,
+    target_id: int = 10001,
+    sub_type: str = "poke",
+) -> dict[str, Any]:
+    """构造 NapCat 的戳一戳通知（notice.notify.poke）。"""
+    payload: dict[str, Any] = {
+        "time": int(time.time()),
+        "self_id": self_id,
+        "post_type": "notice",
+        "notice_type": "notify",
+        "sub_type": sub_type,
+        "user_id": user_id,
+        "target_id": target_id,
+    }
+    if group_id is not None:
+        payload["group_id"] = group_id
+    return payload
 
 
 def heartbeat(self_id: int = 10001) -> dict[str, Any]:

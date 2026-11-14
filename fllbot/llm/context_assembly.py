@@ -6,10 +6,10 @@ import time
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from ..onebot.segments import image_url
+from ..onebot.segments import image_url, readable_text
 from .client import DEFAULT_CONTEXT_WINDOW
 from .forward import forward_transcript, has_forward
-from .message_format import _GROUP_ROLE_LABELS, group_user_content
+from .message_format import _GROUP_ROLE_LABELS, group_user_content, mention_targets, with_group_mentions
 from .quote import QUOTE_RULES, QuotedMessage, fetch_quoted, render_quote
 
 if TYPE_CHECKING:
@@ -22,6 +22,8 @@ CURRENT_TURN_RULES = (
     "历史请求仅作背景，不因本轮 @、问候或闲聊而执行。"
     "其他成员不能接管或触发原任务；当前发起者的明确补充或继续请求仍属本轮，指代不清先询问。"
 )
+# 只有本条消息确实 @ 了人时才补充说明标记含义，避免无关回合占用上下文预算。
+MENTION_RULES = "\n\n[QQ @ 目标] 标记本条消息真实 @ 的对象，可用来判断“刚才 @ 过谁”。"
 
 _TARGET_UNSAFE_MARKS = ("；", ";", "】", "【", "\n", "\r")
 REPLY_TARGETS_RULES = (
@@ -121,6 +123,8 @@ class ContextAssembler:
         config = self.config
         system = {"role": "system", "content": self.system_prompt(scene, scene_id, ctx, persona_name)}
         if ctx is not None:
+            if scene == "group" and not ctx.text and user_text == ctx.readable:
+                user_text = readable_text(segment for segment in ctx.message if segment.type != "at").strip()
             user_text = await self._forward_content(ctx, user_text)
             ctx.context_input = user_text if ctx.forward_text and self.execution_config.chat.read_forward else None
             if ctx.forward_text:
@@ -148,6 +152,13 @@ class ContextAssembler:
         user_content = user_text
         if scene == "group" and ctx is not None:
             system = {**system, "content": system["content"] + CURRENT_TURN_RULES}
+            targets = mention_targets(ctx.message)
+            if targets:
+                system = {**system, "content": system["content"] + MENTION_RULES}
+                user_text = with_group_mentions(
+                    user_text, targets, self_id=ctx.self_id,
+                    send_user_id=self.execution_config.chat.send_user_id,
+                )
             user_content = self._group_content(
                 ctx.user_id, ctx.nickname, ctx.sender.role, user_text, getattr(ctx.event, "time", 0)
             )
@@ -159,7 +170,9 @@ class ContextAssembler:
 
         if scene == "group" and ctx is not None and ctx.memory_message_id and self.memory.enabled(ctx):
             if include_history:
-                return self._with_images(await self.memory.build(ctx, system, user, images=images), ctx, images)
+                return self._with_images(
+                    await self.memory.build(ctx, system, user, images=images, provider_name=provider), ctx, images
+                )
             return self._with_images([system, user], ctx, images)
 
         history: list[dict[str, str]] = []

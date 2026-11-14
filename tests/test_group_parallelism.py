@@ -53,8 +53,9 @@ async def test_six_group_members_reach_real_model_concurrently_and_replies_are_t
     try:
         for index in range(1, 8):
             await bot.on_raw_event(connection, payload(index))
-        # A second request by member 1 must remain behind that member's first request.
-        await bot.on_raw_event(connection, payload(8, user=30001))
+        # 同一发起者的第二条 @ 消息现在按“追问”并入原任务；这里换一位成员验证
+        # 第 7 个并发任务仍要等本群并发额度释放。
+        await bot.on_raw_event(connection, payload(8, user=30009))
         await asyncio.wait_for(asyncio.gather(*(entered[i].wait() for i in range(1, 7))), 3)
         assert maximum == 6 and len(bot.agent_tasks.active) == 6
         assert not entered[7].is_set() and not entered[8].is_set()
@@ -80,7 +81,7 @@ async def test_six_group_members_reach_real_model_concurrently_and_replies_are_t
         for row in history:
             if row.role == 'assistant':
                 index = int(re.search(r'ANSWER_(\d+)', row.content)[1])
-                assert row.user_id == (30001 if index == 8 else 30000 + index)
+                assert row.user_id == (30009 if index == 8 else 30000 + index)
                 # 回复对象只作为元数据保存；正文里既不带昵称也不带 QQ 号，免得模型学着在回答里报出来。
                 entry = bot.chat._history_entry('group', row)['content']
                 assert entry == row.content

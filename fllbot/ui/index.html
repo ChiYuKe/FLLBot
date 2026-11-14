@@ -62,7 +62,7 @@
         <label><input id="chat-send_role" type="checkbox"> 群内身份</label>
         <label><input id="chat-send_time" type="checkbox"> 消息时间</label>
       </div><small>昵称优先使用群名片；时间开关同时控制人格中的日期、时间变量。</small></div>
-      <div class="setting-field is-check"><input id="chat-allow_images" type="checkbox"><label for="chat-allow_images">允许发送图片给模型</label><small>当前消息最多 4 张，需模型支持识图；关闭时仅发送图片占位文字。</small></div>
+      <div class="setting-field is-check"><input id="chat-allow_images" type="checkbox"><label for="chat-allow_images">允许发送图片给模型</label><small>需模型支持识图。开启后可读取当前消息、引用或「看楼上」所指的近期群聊图片，单轮最多 4 张。</small></div>
       <div class="setting-field is-check"><input id="chat-read_forward" type="checkbox"><label for="chat-read_forward">读取合并转发内容</label><small>开启后展开聊天记录随消息发送，最多约 4000 字、2 层嵌套；读取失败时只保留占位文字。</small></div>
     </div></section>
     <section class="chat-settings-group chat-settings-wake" aria-labelledby="chat-heading-wake"><div class="chat-section-heading"><h3 id="chat-heading-wake">唤醒处理</h3><p>设置唤醒词，以及只叫名字时的回应。</p></div><div class="chat-field-grid">

@@ -15,9 +15,10 @@ from .backup import DatabaseFileLock, create_backup
 from .locking import SettingsLock
 from .memory import GroupMemoryStore
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 
 MIGRATIONS: dict[int, list[str]] = {
+    27: ["ALTER TABLE group_memory_messages ADD COLUMN mentions TEXT NOT NULL DEFAULT '[]'"],
     26: [
         "ALTER TABLE chat_messages ADD COLUMN images TEXT NOT NULL DEFAULT '[]'",
         "ALTER TABLE group_memory_messages ADD COLUMN images TEXT NOT NULL DEFAULT '[]'",

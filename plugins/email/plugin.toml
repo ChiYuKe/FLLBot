@@ -1,0 +1,11 @@
+schema_version = 1
+api_version = 1
+name = "email"
+version = "0.1.0"
+description = "QQ 邮箱发送：让智能体按 QQ 号给群友发纯文本邮件"
+author = ""
+category = "plugin"
+
+requires_fllbot = ">=0.2,<1"
+requires_python = ">=3.11"
+dependencies = []

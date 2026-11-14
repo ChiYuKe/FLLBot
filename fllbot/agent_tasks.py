@@ -7,6 +7,15 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+TASK_PHASES = {
+    'preparing': '准备上下文',
+    'model': '等待模型响应',
+    'tool': '执行工具',
+    'step': '处理步骤',
+    'compaction': '整理任务上下文',
+    'finished': '准备发送结果',
+}
+
 
 @dataclass
 class ActiveTask:
@@ -104,9 +113,19 @@ class AgentTasks:
                 if text.startswith(prefix):
                     action, content = 'steer', text[len(prefix):].strip()
                     break
-        if not action:
-            return False
+        follow_up = not action
+        if follow_up:
+            if not ctx.to_me or not text or text.startswith('/'):
+                return False
+            if any(
+                segment.type not in {'text', 'at', 'reply'}
+                or (segment.type == 'at' and str(segment.get('qq')) != str(ctx.self_id))
+                for segment in ctx.message
+            ):
+                return False
         for segment in ctx.message:
+            if segment.type == 'reply':
+                continue
             if segment.type == 'at':
                 if str(segment.get('qq')) not in {str(ctx.self_id), 'all'}:
                     return False
@@ -120,6 +139,10 @@ class AgentTasks:
                 or not self.scene_enabled(ctx.event.scene, ctx.event.scene_id)):
             return False
         state = self.state(ctx)
+        if follow_up:
+            if state is None or not state.accepting:
+                return False
+            action, content = 'steer', text
         if state is None:
             if not text.startswith('/') and not ctx.to_me:
                 return False
@@ -133,11 +156,8 @@ class AgentTasks:
             accepted = self.conversations.cancel(state.ctx.turn_id, 'user_cancelled')
             await reply('已取消后续处理，已经执行的操作不会撤回。' if accepted else '任务已经结束。')
         elif action == 'status':
-            phases = {'preparing': '准备上下文', 'model': '请求模型', 'tool': '执行工具',
-                      'step': '处理步骤', 'compaction': '整理任务上下文', 'finished': '准备发送结果',
-                      'steering': '等待应用补充要求'}
             await reply(f'任务 {state.ctx.turn_id[:8]}：第 {state.step} 步，'
-                        f'{phases.get(state.phase, "处理中")}。')
+                        f'{TASK_PHASES.get(state.phase, "处理中")}。')
         elif not state.accepting:
             await reply('当前任务已进入结果发送阶段，请等结果发送后再提出新要求。')
         elif not content or len(content) > 4000 or len(state.pending) >= 8:
@@ -145,6 +165,11 @@ class AgentTasks:
         else:
             state.pending.append({'role': 'user', 'content': content,
                 '_fllbot_source': {'kind': 'task_steering', 'message_id': ctx.message_id}})
-            await self.progress(state.ctx, state.step, 'steering', 'queued', details={'message_id': ctx.message_id})
-            await reply('已收到补充，将在下一个安全步骤应用；已经执行的操作不会重做。')
+            phase = TASK_PHASES.get(state.phase, '处理中')
+            await self.storage.record_agent_progress(state.ctx, state.step, 'steering', 'queued',
+                                                     details={'message_id': ctx.message_id})
+            if follow_up:
+                await reply(f'还在处理，当前阶段是{phase}。收到你的追问，当前步骤结束后会接着处理。')
+            else:
+                await reply('已收到补充，将在下一个安全步骤应用；已经执行的操作不会重做。')
         return True

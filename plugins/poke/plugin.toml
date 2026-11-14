@@ -1,0 +1,11 @@
+schema_version = 1
+api_version = 1
+name = "poke"
+version = "0.1.0"
+description = "QQ 戳一戳：被戳时按人格回应、自动回戳，并允许智能体主动戳人"
+author = ""
+category = "plugin"
+
+requires_fllbot = ">=0.2,<1"
+requires_python = ">=3.11"
+dependencies = []

@@ -183,12 +183,17 @@ async def write_note(ctx: Context, path: str, content: str) -> dict:
     return ctx.sandbox.files.write_text(path, content)
 ```
 
-能力取值为 `fs.read`、`fs.write`、`net.read`、`net.write`、`qq.send`、`qq.manage`、`memory.read`、
-`system.read`、`process.exec`；`risk` 为 `read`、`write`、`destructive`。未声明能力的旧工具保持原有权限行为。
+能力取值为 `fs.read`、`fs.write`、`net.read`、`net.write`、`email.send`、`qq.send`、`qq.send_file`、`qq.manage`、
+`memory.read`、`system.read`、`screen.capture`、`process.exec`；`risk` 为 `read`、`write`、`destructive`。未声明能力的旧工具保持原有权限行为。
 声明后，宿主按 `[sandbox]` 策略检查能力开关、参数中的路径与链接、发起者权限、自动参与边界和本轮额度；
 被拒绝时回调不会执行，模型收到 `{"error": "tool_blocked", "reason": ...}`。文件与联网应通过
 `ctx.sandbox.files` / `ctx.sandbox.network`，不要自行打开路径或创建 HTTP 客户端。详见
 [群聊智能体与执行沙盒](agent-sandbox.md)。能力与风险也会出现在 `GET /api/tools` 和插件元数据里。
+
+工具声明会被宿主目录快照缓存：插件加载、卸载、热重载或原地修改权限/Schema 后自动重建，读取工具不会
+执行插件代码；`effect="read_only"` 且能力只包含读取类的工具，同一轮内相同参数的重复调用会复用结果。
+因此不要把读写混合在同一个工具里，也不要依赖缓存关闭；需要每次刷新时请声明写能力或换用参数。
+详见 [Agent 与插件契约](tool-registry.md)。
 
 ## 声明式配置
 
@@ -299,6 +304,21 @@ from fllbot.onebot import MessageSegment
 await ctx.reply([MessageSegment.at(123456), MessageSegment.text(" 看这里")])
 await ctx.reply([MessageSegment.image("https://example.com/a.png")])
 ```
+
+### 通知事件
+
+通知事件没有 `message_id`，直接调用 `ctx.llm.respond()` 会被拒绝。需要像普通消息一样跑一轮模型时，
+用 `notice_turn_context()` 派生一个消息上下文再交给 `ctx.llm`：
+
+```python
+from fllbot.plugin.context import notice_turn_context
+
+poke_ctx = notice_turn_context(ctx, "戳了你一下", nickname="小明", user_id=123456)
+poke_ctx.plugin = plugin  # 送达时按插件开关与场景开关复核
+await ctx.llm.respond(poke_ctx, "戳了你一下")
+```
+
+派生出的 `MessageEvent` 不会重新入队、去重或写入消息入口事实，但会正常参与会话锁、轮次、历史投影和送达。
 
 ## 规则
 
@@ -437,7 +457,8 @@ await ctx.connection.call("get_status")        # 任意接口
 
 新增接口对照 [NapCat 官方 API](https://napneko.github.io/onebot/api)。所有方法均为异步，
 返回 NapCat 的 `data`；失败抛 `ActionError`，不会自动重试写操作。实际权限和支持情况由 NapCat/QQ 决定。
-这些接口供插件使用，不会自动注册聊天命令或向智能体开放工具。
+这些 `ctx.connection` 方法本身不会自动注册聊天命令，也不会自动变成智能体工具；需要时由插件用
+`on_command` / `on_ai_tool` 显式暴露（仓库自带的 `poke` 插件见下）。
 
 | 类别 | `ctx.connection` 方法 |
 | --- | --- |
@@ -455,6 +476,12 @@ await ctx.connection.call("get_status")        # 任意接口
 表中的可选参数如 `no_cache`、`group_id`、`image`、`folder` 使用关键字传递。
 公告方法自动映射 NapCat 的 `_send_group_notice` / `_get_group_notice` / `_del_group_notice`。
 主动戳人推荐使用 `ctx.poke()` 或专用接口，而非旧的 `MessageSegment.poke()` 消息段。
+
+戳一戳通知为 `notice_type="notify"`、`sub_type="poke"`：`user_id` 是戳人者，`target_id` 是被戳者，
+没有 `message_id`；可用 `NoticeEvent.is_poke` 判断，并注册 `@plugin.on_notice("notify")` 处理。
+仓库自带的 [`poke` 插件](../plugins/poke/README.md) 已经实现：被戳时按人格回应、可选自动回戳
+（`poke_reply` / `poke_back` / `poke_reply_seconds` / `poke_back_seconds`，均支持群级覆盖），
+并提供需要授权的 `poke__poke` 工具让智能体主动戳人；私聊戳和群友互戳不会触发。
 
 ```python
 members = await ctx.get_members(no_cache=True)  # 当前群完整成员列表；私聊调用会报错

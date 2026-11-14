@@ -152,6 +152,14 @@ class NoticeEvent(EventBase):
     def _zero_to_none(cls, value: Any) -> Any:
         return None if value in (0, "0", "") else value
 
+    @property
+    def is_poke(self) -> bool:
+        """NapCat 的戳一戳通知：``notice_type=notify``、``sub_type=poke``。
+
+        ``user_id`` 是戳人者，``target_id`` 是被戳者；事件不带 message_id。
+        """
+        return self.notice_type == "notify" and self.sub_type == "poke"
+
     def to_summary(self) -> dict[str, Any]:
         data = super().to_summary()
         data.update(

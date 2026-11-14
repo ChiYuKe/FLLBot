@@ -135,6 +135,35 @@ async def test_unanswered_background_is_seen_once_and_silent_input_is_kept(memor
     assert len(await bot.chat.memory.store.recent(10001, 20002, 9999)) == 2
 
 
+async def test_group_context_preserves_real_mentions_and_respects_qq_visibility(memory_bot):
+    bot = memory_bot
+    history = make_context(bot, "来聊一会儿", message_id=1, at=10001, nickname="衣食无忧")
+    await bot.chat.memory.observe(history)
+    current = make_context(bot, message_id=2, message=[
+        {"type": "at", "data": {"qq": "10001"}},
+        {"type": "text", "data": {"text": "给"}},
+        {"type": "at", "data": {"qq": "543210"}},
+        {"type": "text", "data": {"text": "发邮件"}},
+    ])
+    await bot.chat.memory.observe(current)
+    rows = await bot.chat.memory.store.recent(10001, 20002, current.memory_message_id + 1)
+    assert rows[0]["content"] == "来聊一会儿"
+    assert json.loads(rows[0]["mentions"]) == ["10001"]
+    assert "衣食无忧" in bot.chat.memory.entry(rows[0])["content"]
+    assert "[QQ @ 目标：机器人自身、QQ 543210]" in bot.chat.memory.entry(rows[1])["content"]
+    messages = await bot.chat.build_messages("group", 20002, current.text, ctx=current)
+    assert any("衣食无忧" in m["content"] and "机器人自身" in m["content"] for m in messages[1:-1])
+    assert "[QQ @ 目标：机器人自身、QQ 543210]" in messages[-1]["content"]
+
+    await bot.update_config({"chat": {"send_user_id": False}})
+    content = bot.chat.memory.entry(rows[1])["content"]
+    assert "[QQ @ 目标：机器人自身、其他成员]" in content
+    assert "543210" not in content
+    messages = await bot.chat.build_messages("group", 20002, current.text, ctx=current)
+    assert "[QQ @ 目标：机器人自身、其他成员]" in messages[-1]["content"]
+    assert "543210" not in messages[-1]["content"]
+
+
 async def test_inactive_groups_and_disabled_memory_are_not_observed(memory_bot):
     bot = memory_bot
     await bot.chat.memory.observe(make_context(bot, group_id=90009))

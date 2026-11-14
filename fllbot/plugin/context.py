@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+import time
 import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
@@ -24,6 +25,7 @@ from ..onebot.segments import (
 from ..tracing import record, span
 
 if TYPE_CHECKING:  # pragma: no cover
+    from ..llm.quote import QuotedMessage
     from ..onebot.connection import OneBotConnection
     from .base import HandlerSpec, Plugin
 
@@ -245,10 +247,10 @@ class Context:
         return self.sender.role in {"owner", "admin"}
 
     # -- 发送 ------------------------------------------------------------- #
-    def targeted_segments(self, message, *, group_id=None, user_id=None):
-        """Attribute every group-task message, including chunks and tool media."""
+    def targeted_segments(self, message, *, group_id=None, user_id=None, attribute=True):
+        """给群任务消息补上引用；多段回复只在首条补，续条不重复引用。"""
         segments = as_segments(message)
-        if (self.entrypoint != 'qq' or not self.is_group or self.turn_input is None
+        if (not attribute or self.entrypoint != 'qq' or not self.is_group or self.turn_input is None
                 or user_id is not None or group_id is not None and int(group_id) != self.group_id):
             return segments
         if any(segment.type == 'reply' for segment in segments):
@@ -272,13 +274,16 @@ class Context:
         *,
         group_id: int | None = None,
         user_id: int | None = None,
+        attribute: bool = True,
     ) -> Any:
-        """发送消息；不带目标时回到当前会话。"""
+        """发送消息；不带目标时回到当前会话。attribute=False 表示消息段已带好引用/@。"""
         if not self.data_current:
             self.trace_event('trigger', 'context_cleared', 'skipped')
             return None
         with span('send'):
-            segments = self.targeted_segments(message, group_id=group_id, user_id=user_id)
+            segments = self.targeted_segments(
+                message, group_id=group_id, user_id=user_id, attribute=attribute
+            )
             if group_id is not None:
                 receipt = await self.connection.send_group_msg(int(group_id), segments)
             elif user_id is not None:
@@ -291,6 +296,33 @@ class Context:
                 raise ValueError("无法推断发送目标：既不是群聊也不是私聊")
             confirmed_message_id(receipt)
             return receipt
+
+    def plugin_commands(self) -> list[tuple[str, str, str]]:
+        """Return the loaded plugin name, description and usage for each command."""
+        commands = []
+        for spec in self.bot.dispatcher.command_handlers():
+            owner = self.bot.plugins.get(spec.plugin_name)
+            if owner is not None:
+                commands.append((owner.name, owner.description, spec.usage))
+        return commands
+
+    @property
+    def command_prefix(self) -> str:
+        return next((prefix for prefix in self.config.bot.command_prefix if prefix), "")
+
+    def plugin_summaries(self) -> list[dict[str, Any]]:
+        """Return the current plugin metadata for the management commands."""
+        return self.bot.plugin_summaries()
+
+    @property
+    def host_online(self) -> bool:
+        return bool(self.bot.started)
+
+    async def fetch_quoted(self) -> QuotedMessage | None:
+        """Read the quoted message through the host's scoped lookup."""
+        from ..llm.quote import fetch_quoted
+
+        return await fetch_quoted(self)
 
     async def reply(
         self,
@@ -357,4 +389,46 @@ class Context:
         await asyncio.sleep(seconds)
 
 
-__all__ = ["Context"]
+def notice_turn_context(
+    ctx: Context,
+    text: str,
+    *,
+    nickname: str = "",
+    user_id: int | None = None,
+) -> Context:
+    """把没有 message_id 的互动（如戳一戳）包装成一轮消息上下文。
+
+    只用于智能体回合：派生事件不会重新入队、去重或写入消息入口事实，但会像普通群消息
+    一样参与会话锁、轮次、历史投影和送达。``user_id`` 默认取通知的发起者。
+    """
+    sender_id = int(user_id if user_id is not None else ctx.user_id or 0)
+    group_id = int(ctx.group_id) if ctx.is_group and ctx.group_id is not None else None
+    event = MessageEvent(
+        self_id=ctx.self_id,
+        message_type="group" if group_id is not None else "private",
+        group_id=group_id,
+        user_id=sender_id,
+        message=[MessageSegment.text(text)],
+        raw_message=text,
+        sender=Sender(user_id=sender_id, nickname=nickname or None),
+        time=int(getattr(ctx.event, "time", 0) or time.time()),
+    )
+    derived = Context(ctx.bot, ctx.connection, event, entrypoint=ctx.entrypoint)
+    storage = getattr(ctx.bot, "storage", None)
+    if storage is not None:
+        bots = getattr(ctx.bot, "bots", None)
+        account_epoch = bots.epoch(ctx.self_id) if bots is not None else 0
+        config = getattr(ctx.bot, "config", None)
+        options = getattr(config, "plugin", config)
+        derived.received = ReceiveSnapshot.capture(
+            storage.conversation_generation,
+            options,
+            account_epoch,
+            turn_id=derived.turn_id,
+            scope_generation=storage.scope_generation(ctx.self_id, event.scene, event.scene_id),
+        )
+        derived.data_epoch = derived.received.data_epoch
+    return derived
+
+
+__all__ = ["Context", "notice_turn_context"]

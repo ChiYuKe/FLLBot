@@ -5,6 +5,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from fllbot.onebot.models import parse_event
+from fllbot.plugin import Context
 from helpers import FakeConnection, group_message, make_bot
 
 
@@ -22,7 +24,7 @@ async def running_bot(tmp_path, monkeypatch):
         if len(requests) == 1:
             entered.set()
             await release.wait()
-        return SimpleNamespace(text='answer', tool_calls=[])
+        return SimpleNamespace(text=f'answer {len(requests)}', tool_calls=[])
     monkeypatch.setattr(bot.chat, 'complete', complete)
     connection = FakeConnection()
     try:
@@ -67,6 +69,35 @@ async def test_raw_steering_applies_to_next_step_and_is_not_a_second_task(runnin
     detail = await bot.storage.turn_detail(turns['items'][0]['turn_id'])
     assert any(item['phase'] == 'steering' for item in detail['progress'])
     assert '只分析配置文件' not in str(detail['progress'])
+
+
+async def test_mentioned_follow_up_gets_live_status_and_continues_same_turn(running_bot):
+    bot, connection, requests, release = running_bot
+    active = next(iter(bot.agent_tasks.active.values()))
+    other = group_message('其他人问的', message_id=2, at=connection.self_id, user_id=54321)
+    assert not await bot.agent_tasks.handle(Context(bot, connection, parse_event(other)))
+    unaddressed = group_message('普通群聊', message_id=3)
+    assert not await bot.agent_tasks.handle(Context(bot, connection, parse_event(unaddressed)))
+    mixed = group_message('同时问其他人', message_id=5, at=connection.self_id)
+    mixed['message'].append({'type': 'at', 'data': {'qq': '54321'}})
+    assert not await bot.agent_tasks.handle(Context(bot, connection, parse_event(mixed)))
+    assert not active.pending
+
+    question = '不会真执行了吧？'
+    await bot.on_raw_event(connection, group_message(question, message_id=4, at=connection.self_id))
+    if bot.agent_tasks.acknowledgements:
+        await asyncio.wait_for(asyncio.gather(*bot.agent_tasks.acknowledgements), 2)
+    assert '等待模型响应' in str(connection.sent)
+    assert len(requests) == 1
+    assert [item['content'] for item in active.pending] == [question]
+
+    release.set()
+    await settle(bot)
+    assert len(requests) == 2
+    assert requests[1][-1]['content'] == question
+    assert 'answer 2' in str(connection.sent)
+    assert 'answer 1' not in str(connection.sent)
+    assert len((await bot.storage.list_turns())['items']) == 1
 
 
 async def test_other_sender_or_account_cannot_cancel_task(running_bot):

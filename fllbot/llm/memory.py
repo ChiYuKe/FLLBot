@@ -13,8 +13,10 @@ from datetime import date, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
+from ..onebot.segments import readable_text
 from ..policy import agent_settings
 from .client import DEFAULT_CONTEXT_WINDOW
+from .message_format import mention_targets, with_group_mentions
 from .summary_protocol import SummaryFormatError, parse_summary, source_excerpts
 
 logger = logging.getLogger(__name__)
@@ -136,14 +138,17 @@ class GroupMemory:
         if not self.eligible(ctx):
             return
         images = await input_images(ctx)
+        content = ctx.text or readable_text(segment for segment in ctx.message if segment.type != "at").strip()
         async with self.bot.storage.settings_lock:
             async with self.bot.storage.data_lock:
                 if not self.eligible(ctx):
                     return
                 ctx.memory_message_id = await self.store.append(
-                    ctx.self_id,ctx.group_id,'user',ctx.text or ctx.readable,created_at=time.time(),
+                    ctx.self_id,ctx.group_id,'user',content,
+                    created_at=time.time(),
                     user_id=ctx.user_id,nickname=ctx.nickname,sender_role=ctx.sender.role,source_id=ctx.message_id,
                     images=images,
+                    mentions=mention_targets(ctx.message),
                     generation=ctx.data_epoch,account_epoch=ctx.received.account_epoch,scope_epoch=ctx.received.scope_generation)
 
     async def reply(self, ctx: Any, text: str, *, images: list[str] | None = None) -> None:
@@ -164,10 +169,17 @@ class GroupMemory:
                         generation=ctx.data_epoch,account_epoch=ctx.received.account_epoch,scope_epoch=ctx.received.scope_generation)
 
     def entry(self, row: dict, *, current_user_id: int | None = None) -> dict[str, str]:
+        row = {**row, "content": with_group_mentions(
+            row["content"], json.loads(row.get("mentions", "[]")), self_id=row.get("self_id", 0),
+            send_user_id=self.config.send_user_id,
+        )}
         return self.bot.chat.context_assembler._history_entry(
             "group", SimpleNamespace(**row), current_user_id=current_user_id)
 
-    async def build(self, ctx: Any, system: dict, user: dict, *, images: list[str] | None = None) -> list[dict]:
+    async def build(
+        self, ctx: Any, system: dict, user: dict, *,
+        images: list[str] | None = None, provider_name: str | None = None,
+    ) -> list[dict]:
         now = time.time()
         rows = await self.store.recent(ctx.self_id, ctx.group_id, ctx.memory_message_id)
         gap = self.config.memory_session_gap_minutes * 60
@@ -177,12 +189,13 @@ class GroupMemory:
                 break
             session_start = row["created_at"]
         recent = [r for r in rows if r["created_at"] >= session_start][-self.config.memory_recent_messages :]
-        provider_name = self.bot.chat.provider_name("group", ctx.group_id, "agent", ctx.self_id)
+        provider_name = provider_name or self.bot.chat.provider_name("group", ctx.group_id, "agent", ctx.self_id)
         _, provider = self.bot.chat.client.resolve(provider=provider_name)
         # Explicit configured window wins; fallback is conservative and never inferred from a model name.
         window = await self.bot.chat.client.context_window(provider=provider_name) or DEFAULT_CONTEXT_WINDOW
         # Reserve space for tool definitions, later Agent instructions, images and output.
-        reserve = 4096 + len(self.bot.chat._turn_images(ctx, images)) * 2048
+        current_images = self.bot.chat._turn_images(ctx, images)
+        reserve = 4096 + len(current_images) * provider.image_token_budget
         budget = min(self.config.memory_context_chars * 3, max(0, window - (provider.max_tokens or 4000) - reserve))
         system = {
             **system,
@@ -221,6 +234,26 @@ class GroupMemory:
             char_remaining -= len(entry["content"])
             raw_chars -= len(entry["content"])
         selected.reverse()
+        if (
+            self.config.allow_images and provider.supports_images and not current_images
+            and ctx.quoted_message is None
+            and re.search(r"楼上|上面|前面|刚才|刚刚|上一张|上张|那张图|那张表情", ctx.text)
+        ):
+            for row, entry in reversed(selected):
+                if row["role"] != "user":
+                    continue
+                urls = json.loads(row.get("images") or "[]")
+                if not urls:
+                    continue
+                image_cost = provider.image_token_budget + 128
+                urls = urls[:min(4, remaining // image_cost)]
+                if urls:
+                    entry["content"] = [
+                        {"type": "text", "text": entry["content"]},
+                        *[{"type": "image_url", "image_url": {"url": url}} for url in urls],
+                    ]
+                    remaining -= len(urls) * image_cost
+                break
         first_id = selected[0][0]["id"] if selected else ctx.memory_message_id
         # Schedule only after the foreground turn has completed.
         ctx.memory_summary_before = first_id
