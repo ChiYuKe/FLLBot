@@ -4,20 +4,22 @@
 同时提供命令和智能体工具（插件名 ``web``）：
 
     /搜索 武汉 天气            → 搜索结果（默认必应，可换 Tavily / Serper / SearXNG）
-    /天气 武汉                 → 实时天气 + 未来几天预报（Open-Meteo，免密钥）
+    /天气 武汉                 → 实时天气 + 未来几天预报（默认腾讯 QQ 天气，可切 Open-Meteo），默认附天气卡片图
     /现在 [城市]               → 当前日期与时间
 
-智能体工具：``web__web_search`` / ``web__read_webpage`` / ``web__get_weather`` / ``web__get_current_time``。
+智能体工具：``web__web_search`` / ``web__read_webpage`` / ``web__get_weather`` /
+``web__weather_card`` / ``web__get_current_time``。
 在“工具”或智能体设置中分别选择具体能力，模型只会看到已授权的工具。
 """
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import ipaddress
 import re
 import socket
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from html import unescape
 from html.parser import HTMLParser
 from typing import Any
@@ -25,7 +27,14 @@ from urllib.parse import parse_qs, urljoin, urlsplit
 
 import httpx
 
+from fllbot.llm.output import send_media_reply
+from fllbot.onebot.segments import MessageSegment
 from fllbot.plugin import Context, Plugin
+
+from .qq_weather import CityNotFound
+from .qq_weather import resolve as resolve_qq_city
+from .qq_weather import run as run_qq_weather
+from .weather_card import render as render_weather_card
 
 plugin = Plugin.from_manifest(__file__)
 
@@ -69,7 +78,38 @@ plugin.setting(
     default="",
     description="天气命令/工具没写城市时使用，例如「武汉」；留空则要求用户说明地点。",
 )
+plugin.setting(
+    "weather_backend",
+    type="select",
+    label="天气服务",
+    default="qq",
+    options=("qq", "open-meteo"),
+    description=(
+        "qq 为腾讯天气（QQ 天气）：国内直连、免密钥，只覆盖国内城市；"
+        "open-meteo 覆盖全球，但部分网络环境访问不了。"
+    ),
+)
 plugin.setting("weather_days", type="int", label="天气预报天数", default=3, min=1, max=7)
+plugin.setting(
+    "weather_image",
+    type="bool",
+    label="天气卡片图片",
+    default=True,
+    description="打开后 /天气 直接回复一张天气卡片图；关闭则只回文字。",
+)
+plugin.setting(
+    "weather_font",
+    type="string",
+    label="天气卡片字体",
+    default="",
+    description="留空自动查找系统中文字体；Linux 等环境可填写 TTF/OTF/TTC 文件的绝对路径。",
+)
+plugin.agent_instruction(
+    "weather_card",
+    tools=["weather_card"],
+    text="用户想直接看到天气、要天气图片或天气卡片时调用 weather_card，卡片会自动发送到当前会话；"
+    "只要数据、准备自己总结时用 get_weather。图片发送成功后不要重复图内的完整数据，只补一句简短说明。",
+)
 
 _USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
@@ -505,6 +545,13 @@ def _weather_name(code: Any) -> str:
         return "未知"
 
 
+def _weather_code(value: Any) -> int | None:
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _number(value: Any, digits: int = 1) -> Any:
     try:
         return round(float(value), digits)
@@ -512,34 +559,44 @@ def _number(value: Any, digits: int = 1) -> Any:
         return None
 
 
-async def run_weather(city: str, *, days: int = 1, timeout: float = 12.0) -> dict[str, Any]:
+async def run_weather(
+    city: str, *, days: int = 1, timeout: float = 12.0, backend: str = "qq"
+) -> dict[str, Any]:
     city = (city or "").strip()
     if not city:
         return {"error": "请提供城市名"}
     days = max(1, min(int(days or 1), 7))
     try:
         async with _new_client(timeout) as client:
-            place = await _geocode(client, city)
-            if place is None:
-                return {"error": f"找不到城市：{city}；国外城市请改用英文名（如 Tokyo、New York）"}
-            response = await client.get(
-                _FORECAST_URL,
-                params={
-                    "latitude": place["latitude"],
-                    "longitude": place["longitude"],
-                    "current": (
-                        "temperature_2m,apparent_temperature,relative_humidity_2m,"
-                        "precipitation,weather_code,wind_speed_10m,is_day"
-                    ),
-                    "daily": ("weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"),
-                    "timezone": "auto",
-                    "forecast_days": days,
-                },
-            )
-            response.raise_for_status()
-            payload = response.json() or {}
+            if backend == "open-meteo":
+                return await _open_meteo_weather(client, city, days)
+            return await run_qq_weather(client, city, days)
+    except CityNotFound as exc:
+        return {"error": str(exc)}
     except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
         return {"error": f"查询天气失败：{type(exc).__name__} {exc}".strip()}
+
+
+async def _open_meteo_weather(client: httpx.AsyncClient, city: str, days: int) -> dict[str, Any]:
+    place = await _geocode(client, city)
+    if place is None:
+        return {"error": f"找不到城市：{city}；国外城市请改用英文名（如 Tokyo、New York）"}
+    response = await client.get(
+        _FORECAST_URL,
+        params={
+            "latitude": place["latitude"],
+            "longitude": place["longitude"],
+            "current": (
+                "temperature_2m,apparent_temperature,relative_humidity_2m,"
+                "precipitation,weather_code,wind_speed_10m,is_day"
+            ),
+            "daily": ("weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"),
+            "timezone": "auto",
+            "forecast_days": days,
+        },
+    )
+    response.raise_for_status()
+    payload = response.json() or {}
 
     current = payload.get("current") or {}
     daily_raw = payload.get("daily") or {}
@@ -554,6 +611,7 @@ async def run_weather(city: str, *, days: int = 1, timeout: float = 12.0) -> dic
                 "date": date_text,
                 "weekday": _weekday(date_text),
                 "weather": _weather_name(code[0] if code else None),
+                "code": _weather_code(code[0] if code else None),
                 "temp_max_c": _number(highs[0] if highs else None),
                 "temp_min_c": _number(lows[0] if lows else None),
                 "precip_prob_percent": _number(rains[0] if rains else None, 0),
@@ -565,9 +623,11 @@ async def run_weather(city: str, *, days: int = 1, timeout: float = 12.0) -> dic
         "region": "，".join(part for part in (place.get("admin1"), place.get("country")) if part),
         "timezone": payload.get("timezone") or place.get("timezone") or "",
         "utc_offset": _offset_text(payload.get("utc_offset_seconds")),
+        "source": "Open-Meteo",
         "observed_at": current.get("time") or "",
         "current": {
             "weather": _weather_name(current.get("weather_code")),
+            "code": _weather_code(current.get("weather_code")),
             "temperature_c": _number(current.get("temperature_2m")),
             "apparent_c": _number(current.get("apparent_temperature")),
             "humidity_percent": _number(current.get("relative_humidity_2m"), 0),
@@ -588,22 +648,71 @@ def format_weather(data: dict[str, Any]) -> str:
         where = f"{where}（{data['region']}）"
     observed = str(data.get("observed_at") or "").replace("T", " ")
     head = f"{where} {observed}".strip()
-    lines = [
-        f"{head}：{current.get('weather', '未知')}，{current.get('temperature_c')}°C"
-        f"（体感 {current.get('apparent_c')}°C）",
-        f"湿度 {current.get('humidity_percent')}%｜降水 {current.get('precipitation_mm')} mm"
-        f"｜风速 {current.get('wind_kmh')} km/h",
-    ]
+    current_line = f"{head}：{current.get('weather', '未知')}，{current.get('temperature_c')}°C"
+    if current.get("apparent_c") is not None:
+        current_line += f"（体感 {current.get('apparent_c')}°C）"
+    details: list[str] = []
+    if current.get("humidity_percent") is not None:
+        details.append(f"湿度 {current.get('humidity_percent')}%")
+    if current.get("precipitation_mm") is not None:
+        details.append(f"降水 {current.get('precipitation_mm')} mm")
+    if current.get("wind_kmh") is not None:
+        details.append(f"风速 {current.get('wind_kmh')} km/h")
+    elif current.get("wind_text"):
+        details.append(str(current["wind_text"]))
+    if current.get("pressure_hpa") is not None:
+        details.append(f"气压 {current.get('pressure_hpa')} hPa")
+    lines = [current_line]
+    if details:
+        lines.append("｜".join(details))
+    air = data.get("air") or {}
+    if air.get("aqi") is not None:
+        lines.append(f"空气质量：{air.get('name') or '未知'}（AQI {air['aqi']}）")
+    indices = data.get("index") or []
+    if indices:
+        summary = "｜".join(f"{item.get('name')} {item.get('info')}" for item in indices[:8] if item.get("info"))
+        if summary:
+            lines.append(f"生活指数：{summary}")
     daily = data.get("daily") or []
     if daily:
         lines.append("预报：")
         for item in daily:
+            rain = item.get("precip_prob_percent")
+            suffix = f"，降水概率 {rain}%" if rain is not None else ""
             lines.append(
                 f"{item.get('date')} {item.get('weekday', '')} {item.get('weather')} "
-                f"{item.get('temp_min_c')}~{item.get('temp_max_c')}°C，"
-                f"降水概率 {item.get('precip_prob_percent')}%"
+                f"{item.get('temp_min_c')}~{item.get('temp_max_c')}°C{suffix}"
             )
     return "\n".join(lines)
+
+
+def weather_caption(data: dict[str, Any]) -> str:
+    """图片下方的一句话摘要；图片本身已包含全部数据。"""
+    if data.get("error"):
+        return str(data["error"])
+    current = data.get("current") or {}
+    city = data.get("city") or "当前城市"
+    caption = f"{city} {current.get('weather', '未知')} {current.get('temperature_c')}°C"
+    if current.get("apparent_c") is not None:
+        caption += f"（体感 {current.get('apparent_c')}°C）"
+    return caption
+
+
+async def render_weather_image(ctx: Context, data: dict[str, Any]) -> bytes:
+    """渲染天气卡片；失败时返回空字节，由调用方退回文字。"""
+    try:
+        return await asyncio.to_thread(
+            render_weather_card,
+            data,
+            font_path=str(ctx.settings.get("weather_font") or ""),
+        )
+    except Exception as exc:  # 渲染失败不能影响天气查询本身
+        ctx.logger.warning("天气卡片渲染失败：%s %s", type(exc).__name__, exc)
+        return b""
+
+
+def image_segment(image: bytes) -> MessageSegment:
+    return MessageSegment.image("base64://" + base64.b64encode(image).decode("ascii"))
 
 
 # --------------------------------------------------------------------------- #
@@ -623,10 +732,14 @@ def local_time() -> dict[str, Any]:
     }
 
 
-async def run_time(city: str = "", *, timeout: float = 12.0) -> dict[str, Any]:
+async def run_time(
+    city: str = "", *, timeout: float = 12.0, backend: str = "qq"
+) -> dict[str, Any]:
     city = (city or "").strip()
     if not city:
         return local_time()
+    if backend != "open-meteo":
+        return await _qq_time(city, timeout)
     try:
         async with _new_client(timeout) as client:
             place = await _geocode(client, city)
@@ -662,6 +775,26 @@ async def run_time(city: str = "", *, timeout: float = 12.0) -> dict[str, Any]:
     }
 
 
+async def _qq_time(city: str, timeout: float) -> dict[str, Any]:
+    """QQ 天气只覆盖国内城市，统一按北京时间返回；先解析城市名确认存在。"""
+    try:
+        async with _new_client(timeout) as client:
+            place = await resolve_qq_city(client, city)
+    except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+        return {"error": f"查询时间失败：{type(exc).__name__} {exc}".strip()}
+    if place is None:
+        return {"error": f"找不到城市：{city}；QQ 天气只覆盖国内城市，请用中文城市名（如 武汉、杭州）。"}
+    moment = datetime.now(timezone(timedelta(hours=8)))
+    return {
+        "city": place["name"],
+        "time": moment.strftime("%Y-%m-%d %H:%M:%S"),
+        "date": moment.strftime("%Y-%m-%d"),
+        "weekday": "星期" + _WEEKDAYS[moment.weekday()],
+        "timezone": "Asia/Shanghai",
+        "utc_offset": "UTC+08:00",
+    }
+
+
 def format_time(data: dict[str, Any]) -> str:
     if data.get("error"):
         return str(data["error"])
@@ -694,6 +827,14 @@ def _timeout(ctx: Context) -> float:
     return float(ctx.settings.get("timeout") or 12)
 
 
+def _weather_options(ctx: Context) -> dict[str, Any]:
+    return {
+        "days": int(ctx.settings.get("weather_days") or 1),
+        "timeout": _timeout(ctx),
+        "backend": str(ctx.settings.get("weather_backend") or "qq"),
+    }
+
+
 def _city_or_default(ctx: Context) -> str:
     return (ctx.args or "").strip() or str(ctx.settings.get("default_city") or "").strip()
 
@@ -711,23 +852,31 @@ async def search_command(ctx: Context) -> None:
 
 @plugin.on_command("weather", aliases=("天气",), cooldown=3.0)
 async def weather_command(ctx: Context) -> None:
-    """天气：/天气 武汉"""
+    """天气：/天气 武汉（默认发送天气卡片图，可配置关闭）"""
     city = _city_or_default(ctx)
     if not city:
         await ctx.reply("用法：/天气 城市名，例如 /天气 武汉；国外城市用英文，例如 /天气 Tokyo")
         return
-    data = await run_weather(
-        city,
-        days=int(ctx.settings.get("weather_days") or 1),
-        timeout=_timeout(ctx),
-    )
+    data = await run_weather(city, **_weather_options(ctx))
+    if not data.get("error") and bool(ctx.settings.get("weather_image", True)):
+        image = await render_weather_image(ctx, data)
+        if image:
+            await ctx.reply(
+                [image_segment(image), MessageSegment.text("\n" + weather_caption(data))],
+                quote=True,
+            )
+            return
     await ctx.reply(format_weather(data), quote=True)
 
 
 @plugin.on_command("now", aliases=("时间", "几点"), cooldown=3.0)
 async def now_command(ctx: Context) -> None:
     """当前时间：/现在 [城市]"""
-    data = await run_time(_city_or_default(ctx), timeout=_timeout(ctx))
+    data = await run_time(
+        _city_or_default(ctx),
+        timeout=_timeout(ctx),
+        backend=str(ctx.settings.get("weather_backend") or "qq"),
+    )
     await ctx.reply(format_time(data), quote=True)
 
 
@@ -795,8 +944,9 @@ async def read_webpage(ctx: Context, url: str, offset: int = 0) -> dict[str, Any
     capabilities=("net.read",),
     title="天气查询",
     description=(
-        "查询城市的实时天气和未来几天预报（Open-Meteo）。回答天气、气温、下雨、穿衣等问题前必须调用，"
-        "不要凭记忆或常识回答；用户没写城市时用插件配置的默认城市。"
+        "查询城市的实时天气和未来几天预报（默认腾讯 QQ 天气，可配置为 Open-Meteo），只返回结构化文字数据。"
+        "回答天气、气温、下雨、穿衣等问题前必须调用，不要凭记忆或常识回答；"
+        "用户没写城市时用插件配置的默认城市。用户想直接看到天气图片时改用 weather_card。"
     ),
     parameters={
         "type": "object",
@@ -814,11 +964,62 @@ async def get_weather(ctx: Context, city: str = "", days: int | None = None) -> 
     target = (city or "").strip() or str(ctx.settings.get("default_city") or "").strip()
     if not target:
         return {"error": "用户没有说明城市，也没有配置默认城市；请先问清楚城市。"}
-    return await run_weather(
-        target,
-        days=days or int(ctx.settings.get("weather_days") or 1),
-        timeout=_timeout(ctx),
-    )
+    options = _weather_options(ctx)
+    if days:
+        options["days"] = max(1, min(int(days), 7))
+    return await run_weather(target, **options)
+
+
+@plugin.on_ai_tool(
+    "weather_card",
+    effect="side_effecting",
+    capabilities=("net.read", "qq.send"),
+    title="天气图片",
+    timeout=40,
+    max_output_chars=2400,
+    description=(
+        "查询城市天气并直接发送一张天气卡片图到当前会话，同时返回结构化摘要。"
+        "用户要求看天气图片、天气卡片，或希望天气结果更直观时调用；只要文字数据时用 get_weather。"
+        "图片已包含实时天气和未来几天预报，发送成功后只补一句简短说明，不要重复图片里的数据。"
+        "被沙盒拒绝（qq_send_disabled 等）时如实说明，不要改用其他工具绕过。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "city": {
+                "type": "string",
+                "description": "城市名：国内用中文（武汉、北京），国外用英文（Tokyo、New York）；留空则用默认城市",
+            },
+            "days": {"type": "integer", "minimum": 1, "maximum": 7, "description": "预报天数，默认按插件配置"},
+        },
+        "additionalProperties": False,
+    },
+)
+async def weather_card(ctx: Context, city: str = "", days: int | None = None) -> dict[str, Any]:
+    target = (city or "").strip() or str(ctx.settings.get("default_city") or "").strip()
+    if not target:
+        return {"error": "用户没有说明城市，也没有配置默认城市；请先问清楚城市。"}
+    if not bool(ctx.settings.get("weather_image", True)):
+        return {"error": "天气卡片图片已在插件配置中关闭，请改用 get_weather 的文字结果回答。"}
+    options = _weather_options(ctx)
+    if days:
+        options["days"] = max(1, min(int(days), 7))
+    data = await run_weather(target, **options)
+    if data.get("error"):
+        return data
+    image = await render_weather_image(ctx, data)
+    if not image:
+        return {"error": "天气卡片渲染失败，请改用 get_weather 的文字结果回答。"}
+    sent = await send_media_reply(ctx, [image_segment(image)], weather_caption(data), require_ai=True)
+    return {
+        "sent": bool(sent),
+        "city": data.get("city"),
+        "observed_at": data.get("observed_at"),
+        "current": data.get("current"),
+        "daily": data.get("daily"),
+        "note": "天气卡片已发送；不要在聊天里重复图内数据，只补一句简短说明。",
+        **({} if sent else {"error": "send_failed", "message": "天气卡片已生成，但未能确认发送"}),
+    }
 
 
 @plugin.on_ai_tool(
@@ -841,4 +1042,8 @@ async def get_weather(ctx: Context, city: str = "", days: int | None = None) -> 
     },
 )
 async def get_current_time(ctx: Context, city: str = "") -> dict[str, Any]:
-    return await run_time((city or "").strip(), timeout=_timeout(ctx))
+    return await run_time(
+        (city or "").strip(),
+        timeout=_timeout(ctx),
+        backend=str(ctx.settings.get("weather_backend") or "qq"),
+    )
