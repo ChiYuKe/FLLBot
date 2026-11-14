@@ -17,7 +17,7 @@ async def test_standalone_delivery_persists_before_protocol_and_projects_only_su
     await storage.connect()
     attempts = []
     after_sent = AsyncMock()
-    async def send(segments):
+    async def send(segments, **kwargs):
         rows = await (await storage.db.execute('SELECT status FROM delivery_parts ORDER BY part_index')).fetchall()
         index = len(attempts)
         assert rows[index]['status'] == 'sending'

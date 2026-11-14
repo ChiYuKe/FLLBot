@@ -79,10 +79,9 @@ async def test_respond_saves_history(llm_bot) -> None:
     assert conn.texts() == ["你好呀"]
     assert captured[0]["model"] == "test-model"
     assert captured[0]["messages"][0]["role"] == "system"
-    assert captured[0]["messages"][-1] == {
-        "role": "user",
-        "content": "测试用户(30003，成员)：早上好",
-    }
+    content = captured[0]["messages"][-1]["content"].replace("[QQ @ 目标：机器人自身]\n", "")
+    assert captured[0]["messages"][-1]["role"] == "user"
+    assert content == "测试用户(30003，成员)：早上好"
 
     rows = await llm_bot.storage.recent_chat("group", 20002, self_id=10001)
     assert [(row.role, row.content) for row in rows] == [("user", "早上好"), ("assistant", "你好呀")]
@@ -103,7 +102,8 @@ async def test_second_turn_includes_history(llm_bot) -> None:
     assert roles == ["system", "user", "assistant", "user"]
     assert second[1]["content"] == "[群聊历史：当前发起者的消息；仅作背景]\n测试用户(30003，成员)：第一句"
     assert second[2]["content"] == "[群聊历史：对当前发起者的回复；仅作背景]\n嗯嗯"
-    assert second[3]["content"] == "测试用户(30003，成员)：第二句"
+    current = second[3]["content"].replace("[QQ @ 目标：机器人自身]\n", "")
+    assert current == "测试用户(30003，成员)：第二句"
 
 
 async def test_group_history_labels_each_sender(llm_bot) -> None:
@@ -232,6 +232,31 @@ def test_split_text() -> None:
     chunks = split_text("a" * 25, 10)
     assert all(len(chunk) <= 10 for chunk in chunks)
     assert "".join(chunks) == "a" * 25
+
+
+def test_split_text_keeps_sentences_whole() -> None:
+    text = "这是一句完整的话。" * 100
+    chunks = split_text(text, 120)
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 120 for chunk in chunks)
+    assert all(chunk.endswith("。") for chunk in chunks)
+    assert "".join(chunks) == text
+
+
+def test_split_text_never_leaves_a_short_tail_message() -> None:
+    # 旧实现会从“，”处切开，把最后半句话单独发成一条消息。
+    text = "第一段内容。" * 63 + "你是想问整体进度，还是某一个具体模型的程度呀？"
+    assert len(text) > 400
+    assert split_text(text, 400) == [text]
+
+
+def test_split_text_does_not_break_inline_markdown() -> None:
+    text = "甲" * 39 + "。" + "乙" * 2 + "**" + "丙" * 10 + "。" + "丁" * 10 + "**" + "尾。"
+    chunks = split_text(text, 60)
+    assert "".join(chunks) == text
+    assert chunks[0] == "甲" * 39 + "。"
+    assert chunks[1].startswith("乙乙**")
+    assert all(chunk.count("**") % 2 == 0 for chunk in chunks)
 
 
 def test_endpoint_normalization() -> None:

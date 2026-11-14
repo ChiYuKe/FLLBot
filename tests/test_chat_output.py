@@ -152,3 +152,21 @@ async def test_group_disabled_between_parts_stops_delivery(tmp_path: Path):
         assert [row['status'] for row in statuses] == ['sent', 'cancelled']
     finally:
         await bot.stop()
+
+
+async def test_split_reply_attributes_trigger_only_to_first_message(tmp_path: Path):
+    bot = await make_bot(tmp_path, builtin=False, overrides={'chat': {
+        'reply_mode': 'split', 'reply_chunk_size': 50, 'reply_interval_ms': 0}})
+    try:
+        connection = FakeConnection()
+        ctx = Context(bot=bot, connection=connection, event=parse_event(group_message('hello')))
+        ctx.turn_input = 'hello'  # chat.respond 标记模型回复轮次后才会补引用
+        await send_chat_reply(ctx, '每一句都是完整的话。' * 12)
+        assert len(connection.sent) > 1
+        replies = [segment for _, _, segments in connection.sent for segment in segments if segment.type == 'reply']
+        assert len(replies) == 1
+        assert connection.sent[0][2][0].type == 'reply'
+        assert connection.sent[0][2][0].get('id') == str(ctx.message_id)
+        assert all(segment.type != 'reply' for _, _, segments in connection.sent[1:] for segment in segments)
+    finally:
+        await bot.stop()

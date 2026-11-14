@@ -13,6 +13,10 @@ from ..tracing import record, span
 from .budget import request_tokens
 from .client import DEFAULT_CONTEXT_WINDOW, LLMError
 
+# 输出被截断且模型正在调用工具时，允许一次更大上限的重试。
+TRUNCATED_TOOL_RETRY_MIN_TOKENS = 2048
+TRUNCATED_TOOL_RETRY_MAX_TOKENS = 8192
+
 
 @dataclass
 class ChatReply:
@@ -156,6 +160,22 @@ class ModelGateway:
                     raise LLMError("本群今日费用额度不足，已暂停本次模型调用")
             return await self._complete(prepared, **options)
 
+    def _truncated_tool_retry_cap(
+        self, result, *, name: str, max_tokens: int | None, tools, unbounded_output: bool, attempt: int
+    ) -> int | None:
+        """输出被截断且正在调用工具时，给出一次更大的输出上限；其余情况返回 ``None``。"""
+        if attempt or unbounded_output or not tools:
+            return None
+        if result.finish_reason != "length" or not result.tool_calls:
+            return None
+        current = int(max_tokens or 0)
+        if not current:
+            _, resolved = self.config.resolve(name)
+            current = int(resolved.max_tokens or 0)
+        current = current or 4000
+        cap = min(TRUNCATED_TOOL_RETRY_MAX_TOKENS, max(current * 2, TRUNCATED_TOOL_RETRY_MIN_TOKENS))
+        return cap if cap > current else None
+
     async def _complete(
         self,
         messages: list[dict[str, Any]],
@@ -174,37 +194,62 @@ class ModelGateway:
         self.requests += 1
         name = provider or self.provider_name(scene, scene_id, task, self_id)
         record("model", "provider_selected", component=name)
-        try:
-            result = await self.client.chat_result(
-                messages,
+        usage: dict[str, int] = {}
+        previous = None
+        attempt = 0
+        while True:
+            try:
+                result = await self.client.chat_result(
+                    messages,
+                    max_tokens=max_tokens,
+                    unbounded_output=unbounded_output,
+                    provider=name,
+                    scene=scene,
+                    task=task,
+                    tools=tools,
+                    allow_fallback=allow_fallback,
+                )
+            except LLMError as exc:
+                if previous is not None:
+                    # 重试失败时退回第一次结果，至少把“截断未执行”的说明交付出去。
+                    self.logger.warning("输出上限重试失败，沿用上一次结果: %s", exc)
+                    result = previous
+                    break
+                self.failures += 1
+                self.last_error = str(exc)
+                self.logger.warning("模型调用失败: %s", exc)
+                await self._record_usage(
+                    scene or "",
+                    scene_id,
+                    name,
+                    "",
+                    usage,
+                    (time.perf_counter() - started) * 1000,
+                    ok=False,
+                    error=str(exc),
+                )
+                raise
+            for key, value in (result.usage or {}).items():
+                usage[key] = usage.get(key, 0) + int(value)
+            retry_cap = self._truncated_tool_retry_cap(
+                result,
+                name=name,
                 max_tokens=max_tokens,
-                unbounded_output=unbounded_output,
-                provider=name,
-                scene=scene,
-                task=task,
                 tools=tools,
-                allow_fallback=allow_fallback,
+                unbounded_output=unbounded_output,
+                attempt=attempt,
             )
-        except LLMError as exc:
-            self.failures += 1
-            self.last_error = str(exc)
-            self.logger.warning("模型调用失败: %s", exc)
-            await self._record_usage(
-                scene or "",
-                scene_id,
-                name,
-                "",
-                {},
-                (time.perf_counter() - started) * 1000,
-                ok=False,
-                error=str(exc),
-            )
-            raise
+            if retry_cap is None:
+                break
+            previous = result
+            attempt += 1
+            max_tokens = retry_cap
+            record("model", "truncated_retry", component=name)
         latency = (time.perf_counter() - started) * 1000
         record("model", "response_received", component=result.provider)
         self.last_latency_ms = latency
         self.last_error = None
-        await self._record_usage(scene or "", scene_id, result.provider, result.model, result.usage, latency, ok=True)
+        await self._record_usage(scene or "", scene_id, result.provider, result.model, usage, latency, ok=True)
         text = result.text
         tool_calls = result.tool_calls
         if result.finish_reason == "length":
@@ -213,7 +258,7 @@ class ModelGateway:
             text = (
                 text + "\n\n[回复已达到长度上限，可发送“继续”接着回答。]"
                 if not result.tool_calls
-                else "工具调用参数未生成完整，本次未执行工具，请缩短请求或提高回复长度上限。"
+                else "工具调用参数超过输出上限，自动重试仍未完成，本次未执行工具；请调大该模型的输出上限，或把任务拆小一点。"
             )
         return ChatReply(
             text=text,

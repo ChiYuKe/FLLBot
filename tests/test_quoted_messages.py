@@ -123,6 +123,28 @@ async def test_quoted_text_and_image_reach_the_model(tmp_path):
         await bot.stop()
 
 
+async def test_quoted_file_segment_shows_the_napcat_file_name(tmp_path):
+    """NapCat 的 file 段把文件名放在 file 字段，引用块不能显示“未命名文件”。"""
+    bot = await make_bot(tmp_path, builtin=False, llm={'context_mode': 'custom'}, overrides={
+        'chat': {'allow_images': False, 'send_time': False},
+    })
+    try:
+        connection = FakeConnection()
+        connection.get_msg_results[777] = _quoted(message=[
+            {'type': 'file', 'data': {
+                'file': 'BrewingTowerV2.cs', 'file_id': 'qq-file-uuid', 'file_size': '120',
+            }},
+        ])
+        ctx = Context(bot=bot, connection=connection, event=parse_event(_reply_message()))
+        messages = await bot.chat.build_messages('group', 20002, ctx.text, ctx=ctx)
+
+        text = _text_of(messages[-1])
+        assert '[文件附件：BrewingTowerV2.cs]' in text
+        assert '未命名文件' not in text
+    finally:
+        await bot.stop()
+
+
 async def test_quote_from_another_group_is_never_leaked(tmp_path):
     bot = await make_bot(tmp_path, builtin=False, llm={'context_mode': 'custom'}, overrides={
         'chat': {'allow_images': True, 'send_time': False},

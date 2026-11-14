@@ -125,8 +125,14 @@ def render_quote(quoted: QuotedMessage, *, with_images: bool) -> tuple[str, list
         if segment.type == "reply":
             continue
         if segment.type == "file":
-            name = str(segment.get("name") or segment.get("file_name") or "未命名文件")
-            name = name.replace("\\", "/").rsplit("/", 1)[-1][:120]
+            # NapCat 收到的文件把文件名放在 file 字段；name/file_name 只有自己发送时才有。
+            name = ""
+            for key in ("name", "file_name", "file"):
+                value = segment.get(key)
+                if isinstance(value, str) and value.strip():
+                    name = value.strip()
+                    break
+            name = (name or "未命名文件").replace("\\", "/").rsplit("/", 1)[-1][:120]
             parts.append(f"[文件附件：{name}]")
             continue
         if has_forward([segment]):

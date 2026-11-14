@@ -18,6 +18,14 @@ if TYPE_CHECKING:
     from .plugin.context import Context
 
 
+def _attach_trigger(ctx: Any, segments: list[MessageSegment], *, attribute: bool = True) -> list[MessageSegment]:
+    """群任务引用只补在首条消息上，续条按已持久化的消息段原样发送。"""
+    target = getattr(ctx, 'targeted_segments', None)
+    if target is None:
+        return as_segments(segments)
+    return target(segments, attribute=attribute)
+
+
 class DeliveryService:
     def __init__(
         self,
@@ -91,7 +99,7 @@ class DeliveryService:
                                         break
                                     try:
                                         segments = plan["metadata"]["part_segments"][str(part["part_index"])]
-                                        receipt = await ctx.send(as_segments(segments))
+                                        receipt = await ctx.send(as_segments(segments), attribute=False)
                                         message_id = confirmed_message_id(receipt)
                                     except BaseException as exc:
                                         rejected = isinstance(exc, ActionError) and exc.retcode is not None
@@ -166,7 +174,7 @@ class DeliveryService:
             return False
         if self.project_input is not None:
             await self.project_input(ctx)
-        segments = getattr(ctx, 'targeted_segments', as_segments)(segments)
+        segments = _attach_trigger(ctx, segments)
         images = await snapshot_images(segments)
         delivery_id = uuid.uuid4().hex
         store = self.storage
@@ -290,7 +298,6 @@ class DeliveryService:
             if not chunks:
                 return
         use_forward = plan.mode == "forward"
-        target_segments = getattr(ctx, 'targeted_segments', as_segments)
         delivery_id = uuid.uuid4().hex
         store = self.storage
         parts = plan.persisted_parts()
@@ -313,7 +320,8 @@ class DeliveryService:
                 "require_ai": require_ai,
                 "memory_message_id": ctx.memory_message_id,
                 **plan.formatting(),
-                'part_segments': {str(part.index): [segment.to_dict() for segment in target_segments(part.segments())]
+                'part_segments': {str(part.index): [segment.to_dict() for segment in _attach_trigger(
+                                      ctx, part.segments(), attribute=not use_forward and part.index == 0)]
                                   for part in plan.parts},
             },
         ):
@@ -391,7 +399,7 @@ class DeliveryService:
                 await store.update_delivery(delivery_id, part_index, "cancelled")
                 break
             try:
-                receipt = await ctx.send(plan.parts[index].segments())
+                receipt = await ctx.send(plan.parts[index].segments(), attribute=index == 0)
                 message_id = confirmed_message_id(receipt)
             except BaseException as exc:
                 rejected = isinstance(exc, ActionError) and exc.retcode is not None

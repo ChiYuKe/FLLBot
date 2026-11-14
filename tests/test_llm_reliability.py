@@ -262,6 +262,34 @@ async def test_truncated_tool_call_never_executes(tmp_path):
         await bot.stop()
 
 
+async def test_truncated_tool_call_retries_once_with_larger_output_cap(tmp_path):
+    bot = await make_bot(tmp_path, llm={"enabled": True, "api_key": "k", "context_window": 32000, "max_tokens": 1024})
+    try:
+        limits: list[int] = []
+
+        def handler(req):
+            limits.append(json.loads(req.content)["max_tokens"])
+            if len(limits) == 1:
+                return response("", calls=[{"id": "c1", "type": "function", "function": {
+                    "name": "echo", "arguments": '{"text": "被截断'
+                }}], finish="length")
+            return response("", calls=[{"id": "c2", "type": "function", "function": {
+                "name": "echo", "arguments": '{"text": "完整"}'
+            }}], finish="tool_calls")
+
+        tools = [{"type": "function", "function": {
+            "name": "echo", "description": "echo", "parameters": {"type": "object", "properties": {}},
+        }}]
+        bot.chat.client._http = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        reply = await bot.chat.complete(MESSAGES, max_tokens=1024, tools=tools)
+
+        assert limits == [1024, 2048]
+        assert reply.finish_reason == "tool_calls"
+        assert [call["function"]["name"] for call in reply.tool_calls] == ["echo"]
+    finally:
+        await bot.stop()
+
+
 def test_diagnostic_api_validates_functions_without_qq_actions(tmp_path):
     bot = build_bot(tmp_path, builtin=False, llm={"enabled": True, "api_key": "k", "context_window": 16000})
     captured = []
