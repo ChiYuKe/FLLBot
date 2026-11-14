@@ -26,7 +26,7 @@ plugins/
 插件目录的直接子文件夹就是安装单元，不再嵌套“分类/插件”目录。文件夹名称与清单 `name` 一致，
 以小写字母开头，只含小写字母、数字和下划线，最长 64 字符，不能是 Windows 保留名。
 复制、安装、更新、移除均以完整目录包为单位，宿主源码不放用户插件实现。
-`fllbot/builtin_plugins/` 下的 `basic/`、`agent/`、`text/`、`github/`、`files/`、`oni_knowledge/` 与 `workspace/` 使用同一包结构，只是跟随 FLLBot 一起发行。
+`fllbot/builtin_plugins/` 下的 `basic/`、`agent/`、`text/`、`github/`、`files/`、`oni_knowledge/`、`workspace/` 与 `screen/` 使用同一包结构，只是跟随 FLLBot 一起发行。
 
 ## 包头与稳定标识
 
@@ -91,7 +91,19 @@ dependencies = ["httpx>=0.27,<1"]
 install 的两个示例二选一。来源为完整本地包目录或 ZIP；ZIP 可直接包含包文件，也可有唯一顶层目录。
 下载目录名可以不同，安装名取自清单。Git 仓库请先克隆到本地后安装；不自动运行仓库安装脚本。
 自定义位置沿用 `--root`、`--directory`，并确保 directory 对应配置中的 `plugin.dirs`。
-内置插件随宿主发行，不能用这些命令覆盖。安装器不会导入插件源码，但插件运行时拥有宿主进程权限，只安装可信代码。
+随 FLLBot 发布的插件可通过同名插件包独立更新。已安装版本优先加载，沿用原有插件 ID、配置、权限和数据目录。移除已安装版本后，开启 `plugin.builtin` 的实例会恢复加载随附版本。
+安装器不会导入插件源码，但插件运行时拥有宿主进程权限，只安装可信代码。
+
+例如，GitHub 插件可直接从仓库中的插件目录安装，之后用更高版本的目录或 ZIP 更新：
+
+```powershell
+.venv/Scripts/python.exe -m fllbot plugin install fllbot/builtin_plugins/github
+.venv/Scripts/python.exe -m fllbot plugin upgrade E:/Downloads/github-new.zip
+.venv/Scripts/python.exe -m fllbot plugin remove github
+```
+
+`basic`、`files`、`github`、`oni_knowledge`、`screen`、`text` 和 `workspace` 使用公开插件接口。宿主提供消息发送、引用查询、命令列表和渲染接口。插件可以独立更新发行版本，仍通过其清单声明兼容的 FLLBot 版本。
+`agent` 负责模型会话编排、工具筛选和权限复核，当前仍随宿主维护。
 
 安装器先在隐藏临时目录检查完整包、Python 语法、静态导入边界和环境兼容，再替换目标目录。
 拒绝 ZIP 路径越界、符号链接、目录联接、重复文件与超过 100 MiB / 10000 个文件的包。
@@ -143,6 +155,8 @@ README 开头标明包名并链接包头，正文包含用途、安装使用、�
 
 热重载监测用户包中的 Python、Markdown、TOML、JSON、YAML 文件，能识别新增、删除、文档与包头变化，
 而不只比较目录中最大的修改时间。内置插件通过管理 API 手动重载或重启更新。
+重载成功后，宿主工具目录会按新的插件对象与工具 Schema 自动重建；旧工具授权仍按工具 ID 保留，
+新增工具需要重新授权后才对模型可见。
 辅助模块缓存会一并刷新，语法错误或初始化失败不会卸载工作中的旧版。
 
 ## 配置、运行数据与外部服务

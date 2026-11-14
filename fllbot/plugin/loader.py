@@ -99,7 +99,7 @@ class PluginLoader:
         if self.load_builtin:
             await self._load_builtin()
 
-    async def _load_builtin(self) -> None:
+    async def _load_builtin(self, names: set[str] | None = None) -> None:
         try:
             package = importlib.import_module(BUILTIN_PACKAGE)
         except ImportError:  # pragma: no cover
@@ -111,6 +111,8 @@ class PluginLoader:
             if path.name.startswith("_") or not (path / "__init__.py").is_file():
                 continue
             if not (path / "plugin.py").is_file() and not self._has_plugin_attribute(path / "__init__.py"):
+                continue
+            if path.name in self._loaded or (names is not None and path.name not in names):
                 continue
             try:
                 await self.load_path(path, builtin=True)
@@ -154,7 +156,11 @@ class PluginLoader:
                     if getattr(plugin, key) != getattr(manifest, key):
                         raise ValueError(f"插件 {key} 与 plugin.toml 不一致，请使用 Plugin.from_manifest(__file__)")
             existing = self._loaded.get(plugin.name)
-            if existing is not None and existing.source != path:
+            if (
+                existing is not None
+                and existing.source != path
+                and not (existing.builtin and not builtin and manifest is not None)
+            ):
                 raise ValueError(f"插件名重复：{plugin.name} 已由 {existing.source} 提供")
             plugin.bot, plugin.module, plugin.path = self.bot, module, path
             if not plugin.readme:
@@ -378,10 +384,15 @@ class PluginLoader:
                 if plugin is not None:
                     changed.append(plugin.name)
 
+        removed_names: set[str] = set()
         for path, entry in known_sources.items():
             if path not in current:
                 await self.unload(entry.plugin.name)
                 changed.append(entry.plugin.name)
+                removed_names.add(entry.plugin.name)
+
+        if self.load_builtin and removed_names:
+            await self._load_builtin(removed_names)
 
         for failed_path in list(self.failed):
             if not Path(failed_path).exists():

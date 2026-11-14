@@ -148,9 +148,6 @@ class PackageStore:
             package.rename(staged)
             manifest = check_package(staged)
             manifest.check_environment()
-            builtin = Path(__file__).resolve().parents[1] / "builtin_plugins" / name
-            if builtin.exists():
-                raise ValueError(f"不能覆盖内置插件：{name}")
             target = self._target(name)
             if (self.directory / f"{name}.py").exists():
                 raise ValueError(f"同名旧式单文件插件已存在：{name}")
