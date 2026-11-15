@@ -413,6 +413,7 @@ class FLLBot:
                     "package": bool(entry and entry.source.is_dir()),
                     "manifest": bool(entry and entry.source.is_dir() and (entry.source / "plugin.toml").is_file()),
                     "folder": entry.source.name if entry and entry.source.is_dir() else "",
+                    "data": f"data/plugins/{plugin.name}",
                 }
             )
             result.append(metadata)

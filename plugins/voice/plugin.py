@@ -200,6 +200,10 @@ plugin.setting(
     "qwen_idle_minutes", type="int", label="Qwen 空闲停止时间（分钟）", default=60,
     min=1, max=1440, description="语音服务由 FLLBot 启动后，空闲达到此时长将自动停止。",
 )
+plugin.setting(
+    "audio_keep_days", type="int", label="语音缓存保留天数", default=7,
+    min=0, max=90, description="合成出的 WAV 超过此时长后自动清理；0 表示保留不清理。",
+)
 plugin.setting("with_text", type="bool", label="同时发送文字", default=True, group_scoped=True)
 plugin.setting(
     "use_emotion",
@@ -318,6 +322,30 @@ def _audio_dir() -> Path:
     return directory
 
 
+_AUDIO_PRUNED_AT = 0.0
+
+
+def _prune_audio(days: int) -> None:
+    """Remove cached WAV files older than the configured retention; best effort."""
+    global _AUDIO_PRUNED_AT
+    if days <= 0:
+        return
+    now = time.time()
+    if now - _AUDIO_PRUNED_AT < 3600:
+        return
+    _AUDIO_PRUNED_AT = now
+    cutoff = now - days * 86400
+    try:
+        for path in _audio_dir().glob("*.wav"):
+            try:
+                if path.stat().st_mtime < cutoff:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                continue
+    except OSError:
+        log.warning("清理语音缓存失败", exc_info=False)
+
+
 async def _request_tts(
     ctx: Context,
     text: str,
@@ -378,10 +406,14 @@ async def _request_tts(
     ).hexdigest()[:24]
     path = _audio_dir() / f"{digest}.wav"
     path.write_bytes(audio)
+    _prune_audio(int(settings.get("audio_keep_days", 7) or 0))
     return path
 
 
-_SETTING_KEYS = ("enabled", "backend", "qwen_voice", "tts_voice", "qwen_idle_minutes", "with_text", "use_emotion", "emotion")
+_SETTING_KEYS = (
+    "enabled", "backend", "qwen_voice", "tts_voice", "qwen_idle_minutes",
+    "audio_keep_days", "with_text", "use_emotion", "emotion",
+)
 # 语音任务串行队列：全局 FIFO，保证不同请求之间也不会交错、乱序
 _QUEUE: asyncio.Queue | None = None
 _WORKER: asyncio.Task | None = None
@@ -554,6 +586,7 @@ def _save_audio(ctx: Context, audio: bytes, text: str, settings: dict) -> Path:
     ).hexdigest()[:24]
     path = _audio_dir() / f"{digest}.wav"
     path.write_bytes(audio)
+    _prune_audio(int(settings.get("audio_keep_days", 7) or 0))
     return path
 
 

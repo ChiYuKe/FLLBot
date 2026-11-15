@@ -50,6 +50,7 @@ async def test_generated_package_dispatch_settings_and_metadata(tmp_path, templa
         assert plugin.data_dir == tmp_path / "data/plugins/demo"
         summary = bot.plugin_summaries()[0]
         assert summary["package"] and summary["manifest"] and summary["folder"] == "demo"
+        assert summary["data"] == "data/plugins/demo"
         await bot.plugins.reload("demo")
         assert "欢迎" in (await dispatch(bot))[0]
     finally:

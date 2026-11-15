@@ -1,8 +1,10 @@
 """Voice tasks use simulated synthesis and OneBot; no network or real messages."""
 import asyncio
 import json
+import os
 import shutil
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -54,6 +56,39 @@ def test_voice_audio_uses_instance_plugin_data_directory(tmp_path, monkeypatch):
     assert written.parent == instance / 'data' / 'plugins' / 'voice' / 'audio'
     assert written.read_bytes() == b'generated-wave'
     assert not (instance / 'data' / 'tts').exists()
+
+
+def test_voice_audio_cache_follows_retention_setting(tmp_path, monkeypatch):
+    from fllbot.plugin.imports import import_plugin, module_name_for, purge_modules
+
+    source = tmp_path / 'external' / 'packages' / 'voice'
+    shutil.copytree(Path(__file__).resolve().parents[1] / 'plugins' / 'voice', source)
+    instance = tmp_path / 'instance'
+    name = module_name_for(source, builtin=False)
+    try:
+        package = import_plugin(source, name, builtin=False)
+        module = sys.modules[package.plugin.ai_tools[0].callback.__module__]
+        monkeypatch.setattr(package.plugin, 'bot', SimpleNamespace(root=instance))
+        monkeypatch.setattr(module, '_require_current', lambda ctx: None)
+        audio = instance / 'data' / 'plugins' / 'voice' / 'audio'
+        audio.mkdir(parents=True)
+        stale = time.time() - 8 * 86400
+        old = audio / 'old.wav'
+        fresh = audio / 'fresh.wav'
+        old.write_bytes(b'old')
+        fresh.write_bytes(b'fresh')
+        os.utime(old, (stale, stale))
+
+        module._save_audio(None, b'new', '第一段', {'backend': 'qwen', 'audio_keep_days': 7})
+        assert not old.exists()
+        assert fresh.exists()
+
+        old.write_bytes(b'old')
+        os.utime(old, (stale, stale))
+        module._save_audio(None, b'new', '第二段', {'backend': 'qwen', 'audio_keep_days': 0})
+        assert old.exists()
+    finally:
+        purge_modules(name)
 
 
 async def test_tts_management_requires_configured_admin_qq(voice_bot,monkeypatch):

@@ -15,6 +15,7 @@
 - 统一外置插件的源码与运行数据目录约定，架构检查要求仓库内外置插件从 `fllbot.plugin` 导入宿主接口。
   插件安装与 `plugin check` 同样拒绝 `fllbot.app`、`fllbot.onebot` 等内部模块，只放行公开插件接口。
 - 语音插件将新生成的 WAV 写入 `data/plugins/voice/audio/`，从 FLLBot 实例根目录定位 Qwen 服务，支持在自定义插件目录部署。
+  新增 `audio_keep_days`（默认 7 天，0 表示不清理），在每次合成后按修改时间清理超期缓存，避免插件数据目录无限增长。
 
 ### 新增
 

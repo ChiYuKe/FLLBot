@@ -4,7 +4,7 @@
 
 依赖本地 TTS 服务：见 `services/tts/README.md`。
 
-生成的 WAV 统一保存在 FLLBot 实例的 `data/plugins/voice/audio/`。旧版 WAV 保留在原来的 `data/tts/`（自定义数据库路径时在数据库同级的 `tts/`），可按需归档。
+生成的 WAV 统一保存在 FLLBot 实例的 `data/plugins/voice/audio/`，超过保留天数会在下次合成时自动清理。旧版 WAV 保留在原来的 `data/tts/`（自定义数据库路径时在数据库同级的 `tts/`），可按需归档。
 Qwen 按需启动使用实例目录下的 `services/qwen-tts/`，插件源码可以装在其他位置。
 
 ## 命令
@@ -28,6 +28,7 @@ Qwen 按需启动使用实例目录下的 `services/qwen-tts/`，插件源码可
 | `backend` | `qwen` | `qwen`：描述固定、稳定；`indextts`：参考音频克隆 |
 | `qwen_voice` | `04-奶音` | 试听页里选中的编号（01–10） |
 | `qwen_idle_minutes` | `60` | Qwen 由插件启动后，空闲多久自动停止（1–1440 分钟） |
+| `audio_keep_days` | `7` | 生成 WAV 的保留天数，超期后自动清理（0–90，0 表示不清理） |
 | `tts_voice` | `dongxuelian-soft` | 仅 indextts 后端使用 |
 | `with_text` | 开 | 是否同时发文字 |
 | `use_emotion` | 开 | 允许智能体 / `/say` 控制语气；关闭后固定使用默认情绪，音色最稳 |

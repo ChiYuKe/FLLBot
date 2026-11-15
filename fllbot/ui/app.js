@@ -578,7 +578,8 @@
             h('span', { text: plugin.name === 'agent' ? '独立配置页' : (plugin.settings || []).length + ' 项配置' }),
             h('span', { text: (plugin.handlers || []).length + ' 个处理器' }),
             (plugin.ai_tools || []).length ? h('span', { text: (plugin.ai_tools || []).length + ' 个工具' }) : null,
-            plugin.has_readme ? h('span', { text: '有 README' }) : null
+            plugin.has_readme ? h('span', { text: '有 README' }) : null,
+            plugin.data ? h('span', { text: '数据 ' + plugin.data }) : null
           ),
         h('div', { class: 'plugin-actions' },
           (plugin.settings || []).length && plugin.name !== 'agent' ? h('button', {
