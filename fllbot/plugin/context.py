@@ -207,6 +207,11 @@ class Context:
         return self.bot.storage
 
     @property
+    def instance_root(self) -> Path:
+        """Instance root for locating external service installations."""
+        return self.bot.root
+
+    @property
     def data_dir(self) -> Path:
         """当前插件的文件数据目录；源码目录不用于保存运行数据。"""
         if self.plugin is None:

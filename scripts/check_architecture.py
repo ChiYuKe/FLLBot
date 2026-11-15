@@ -20,7 +20,7 @@ BOUNDARIES = {
     "sandbox": {"sandbox"},
     "tool_registry": {"tool_registry"},
     "llm": {"llm", "config", "onebot", "policy", "tracing", "conversation", "delivery_policy", "history_images"},
-    "plugin": {"plugin", "rules", "onebot", "tracing", "conversation", "sandbox"},
+    "plugin": {"plugin", "rules", "onebot", "tracing", "conversation", "sandbox", "delivery_policy"},
 }
 
 # Keep the extracted services independent of the compatibility facade and ingress.
@@ -128,8 +128,10 @@ def check(root: Path = ROOT) -> list[str]:
                 module = ".".join(["plugins", package.name, *parts])
                 for line, target in imports(path, module):
                     cross_package = target.startswith("plugins.") and target.split(".")[1] != package.name
-                    internal_host = target.startswith(
-                        ("fllbot.app", "fllbot.api", "fllbot.builtin_plugins", "fllbot_user_plugins")
+                    host_module = target.split(".")[:2]
+                    internal_host = (
+                        host_module[0] == "fllbot_user_plugins"
+                        or host_module[0] == "fllbot" and host_module != ["fllbot", "plugin"]
                     )
                     if cross_package or internal_host:
                         errors.append(

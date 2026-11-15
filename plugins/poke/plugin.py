@@ -7,8 +7,7 @@ import asyncio
 import time
 from typing import Any
 
-from fllbot.plugin import Context, Plugin
-from fllbot.plugin.context import notice_turn_context
+from fllbot.plugin import Context, Plugin, notice_turn_context
 
 plugin = Plugin.from_manifest(__file__)
 plugin.setting(

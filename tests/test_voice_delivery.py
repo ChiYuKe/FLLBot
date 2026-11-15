@@ -33,6 +33,29 @@ def context(bot, owner, connection=None, message_id=1):
     return Context(bot,connection or FakeConnection(),parse_event(group_message('念出来',message_id=message_id)),plugin=owner)
 
 
+def test_voice_audio_uses_instance_plugin_data_directory(tmp_path, monkeypatch):
+    from fllbot.plugin.imports import import_plugin, module_name_for, purge_modules
+
+    source = tmp_path / 'external' / 'packages' / 'voice'
+    shutil.copytree(Path(__file__).resolve().parents[1] / 'plugins' / 'voice', source)
+    instance = tmp_path / 'instance'
+    name = module_name_for(source, builtin=False)
+    try:
+        package = import_plugin(source, name, builtin=False)
+        module = sys.modules[package.plugin.ai_tools[0].callback.__module__]
+        bot = SimpleNamespace(root=instance)
+        monkeypatch.setattr(package.plugin, 'bot', bot)
+        monkeypatch.setattr(module, '_require_current', lambda ctx: None)
+
+        written = module._save_audio(None, b'generated-wave', 'test', {'backend': 'qwen'})
+    finally:
+        purge_modules(name)
+
+    assert written.parent == instance / 'data' / 'plugins' / 'voice' / 'audio'
+    assert written.read_bytes() == b'generated-wave'
+    assert not (instance / 'data' / 'tts').exists()
+
+
 async def test_tts_management_requires_configured_admin_qq(voice_bot,monkeypatch):
     bot,owner,_,module = voice_bot
     stop = AsyncMock()
@@ -153,7 +176,7 @@ async def test_voice_rechecks_after_synthesis_before_cache_and_send(voice_bot,tm
         release.set()
         await asyncio.wait_for(asyncio.gather(task,return_exceptions=True),2)
         assert not ctx.connection.sent
-        assert not (tmp_path/'data'/'tts').exists()
+        assert not (tmp_path/'data'/'plugins'/'voice'/'audio').exists()
         count = await (await bot.storage.db.execute('SELECT count(*) FROM delivery_parts')).fetchone()
         assert count[0] == 0
         detail = await bot.storage.turn_detail(ctx.turn_id)

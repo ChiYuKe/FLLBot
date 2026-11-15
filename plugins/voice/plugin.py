@@ -27,9 +27,7 @@ from pathlib import Path
 
 import httpx
 
-from fllbot.llm.output import delivery_allowed, send_media_reply
-from fllbot.onebot.segments import MessageSegment
-from fllbot.plugin import Context, Plugin
+from fllbot.plugin import Context, MessageSegment, Plugin, delivery_allowed, send_media_reply
 
 log = logging.getLogger(__name__)
 
@@ -128,7 +126,7 @@ async def _qwen_idle_reaper(minutes: int) -> None:
             _QWEN_IDLE_TASK = None
 
 
-async def _ensure_qwen_started(settings: dict) -> None:
+async def _ensure_qwen_started(ctx: Context, settings: dict) -> None:
     """Check Qwen on demand; only stop the process this plugin itself launched."""
     global _QWEN_PROCESS, _QWEN_IDLE_TASK, _QWEN_LAST_USE
     minutes = int(settings.get("qwen_idle_minutes", 60) or 60)
@@ -138,8 +136,7 @@ async def _ensure_qwen_started(settings: dict) -> None:
         health = await _service_health(QWEN_SERVER)
         if health.get("state") not in ("ready", "idle", "loading"):
             if _QWEN_PROCESS is None or _QWEN_PROCESS.returncode is not None:
-                root = Path(__file__).resolve().parents[2]
-                service_dir = root / "services" / "qwen-tts"
+                service_dir = ctx.instance_root / "services" / "qwen-tts"
                 python = service_dir / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
                 server = service_dir / "server.py"
                 if not python.is_file() or not server.is_file():
@@ -315,14 +312,10 @@ def _split_text(text: str, limit: int) -> list[str]:
     return [bucket.strip() for bucket in buckets if bucket.strip()][:MAX_CHUNKS]
 
 
-def _data_dir(ctx: Context) -> Path:
-    try:
-        root = Path(ctx.config.storage.path).parent
-    except Exception:  # noqa: BLE001
-        root = Path("data")
-    path = root / "tts"
-    path.mkdir(parents=True, exist_ok=True)
-    return path.resolve()
+def _audio_dir() -> Path:
+    directory = plugin.data_dir / "audio"
+    directory.mkdir(exist_ok=True)
+    return directory
 
 
 async def _request_tts(
@@ -358,7 +351,7 @@ async def _request_tts(
             "fx": INDEXTTS_FX,
         }
     else:
-        await _ensure_qwen_started(settings)
+        await _ensure_qwen_started(ctx, settings)
         url = QWEN_SERVER + "/tts"
         voice = settings.get("qwen_voice")
         payload = {
@@ -383,7 +376,7 @@ async def _request_tts(
     digest = hashlib.sha256(
         (text + backend + str(voice) + str(payload.get("emotion")) + str(emotion_text)).encode("utf-8")
     ).hexdigest()[:24]
-    path = _data_dir(ctx) / f"{digest}.wav"
+    path = _audio_dir() / f"{digest}.wav"
     path.write_bytes(audio)
     return path
 
@@ -539,7 +532,7 @@ async def _request_tts_batch(
 ) -> list[bytes] | None:
     """一次请求合成多段，服务端批量解码；不支持时返回 None 走逐条。"""
     _require_current(ctx)
-    await _ensure_qwen_started(settings)
+    await _ensure_qwen_started(ctx, settings)
     common = _payload_common(settings, emotion, emotion_text, emo_alpha, speed)
     voice = settings.get("qwen_voice")
     items = [{"text": text, "voice": voice, **common} for text in texts]
@@ -559,7 +552,7 @@ def _save_audio(ctx: Context, audio: bytes, text: str, settings: dict) -> Path:
     digest = hashlib.sha256(
         (text + str(settings.get("qwen_voice")) + str(settings.get("backend"))).encode("utf-8")
     ).hexdigest()[:24]
-    path = _data_dir(ctx) / f"{digest}.wav"
+    path = _audio_dir() / f"{digest}.wav"
     path.write_bytes(audio)
     return path
 
@@ -856,7 +849,7 @@ async def speak(
 )
 async def set_service_enabled(ctx: Context, enabled: bool) -> dict:
     # Check live configured QQ identities again, including direct callback calls.
-    if not ctx.bot.permissions.is_superuser(ctx.user_id):
+    if not ctx.is_superuser:
         return {"error":"permission_denied", "message":"仅配置中的管理员 QQ 可以启停语音服务"}
     if not ctx.data_current:
         return {"error":"context_expired"}

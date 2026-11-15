@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from ..onebot.segments import MessageSegment
+from ..delivery_policy import delivery_allowed
+from ..onebot.segments import MessageSegment, as_segments, readable_text
 from ..rules import (
     all_rules,
     any_rule,
@@ -19,7 +20,7 @@ from ..rules import (
 )
 from .agent import ToolContent, ToolEvent, ToolRejection
 from .base import AIToolSpec, HandlerKind, HandlerSpec, LoopSpec, Plugin, ServiceCheckSpec, TaskSourceSpec
-from .context import Context
+from .context import Context, notice_turn_context
 from .rendering import load_font
 from .settings import MASK, PluginSettings, SettingField, SettingsView
 
@@ -50,14 +51,18 @@ __all__ = [
     "SettingsView",
     "all_rules",
     "any_rule",
+    "as_segments",
     "command",
+    "delivery_allowed",
     "endswith",
     "fullmatch",
     "in_group",
     "in_private",
     "keyword",
     "load_font",
+    "notice_turn_context",
     "not_rule",
+    "readable_text",
     "regex",
     "send_media_reply",
     "startswith",

@@ -4,8 +4,7 @@ import asyncio
 import time
 from datetime import datetime, timedelta, timezone
 
-from fllbot.onebot.segments import MessageSegment, as_segments, readable_text
-from fllbot.plugin import Context, Plugin
+from fllbot.plugin import Context, MessageSegment, Plugin, as_segments, readable_text
 
 from . import tasks as task_store
 from .store import database, scope

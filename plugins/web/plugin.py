@@ -27,9 +27,7 @@ from urllib.parse import parse_qs, urljoin, urlsplit
 
 import httpx
 
-from fllbot.llm.output import send_media_reply
-from fllbot.onebot.segments import MessageSegment
-from fllbot.plugin import Context, Plugin
+from fllbot.plugin import Context, MessageSegment, Plugin, send_media_reply
 
 from .qq_weather import CityNotFound
 from .qq_weather import resolve as resolve_qq_city

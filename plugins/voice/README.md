@@ -4,6 +4,9 @@
 
 依赖本地 TTS 服务：见 `services/tts/README.md`。
 
+生成的 WAV 统一保存在 FLLBot 实例的 `data/plugins/voice/audio/`。旧版 WAV 保留在原来的 `data/tts/`（自定义数据库路径时在数据库同级的 `tts/`），可按需归档。
+Qwen 按需启动使用实例目录下的 `services/qwen-tts/`，插件源码可以装在其他位置。
+
 ## 命令
 
 后台“系统设置 → 外部服务”提供 Qwen 与 IndexTTS 的只读健康检查，并标记当前选用的后端。语音调用时会检查 Qwen 服务；未运行时由插件启动本仓库的服务，空闲达到配置时长后只停止插件自己启动的进程。健康检查本身不会启动服务或加载模型。
