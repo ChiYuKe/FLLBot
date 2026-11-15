@@ -20,7 +20,7 @@
 ## 功能
 
 - **反向 WebSocket 服务端**：任意路径接入、Token 鉴权、多账号连接、心跳超时清理、`echo` 关联的 API 调用
-- **插件系统**：`plugins/*.py` 或 `plugins/<包>/__init__.py` 自动扫描、装饰器注册命令/消息/通知/请求、优先级与阻断、文件改动热重载、周期任务
+- **插件系统**：自动扫描 `plugins/<插件名>/`，支持独立安装、升级和回滚，提供命令、事件、AI 工具、周期任务和热重载
 - **插件声明式配置**：`plugin.setting(...)` 声明 schema（bool/int/float/select/list/secret），支持全局值与按群覆盖，管理端可直接渲染成表单（`/api/plugins/{name}/settings`）
 - **插件 README**：支持 `plugins/<name>/README.md`、单文件插件同名 `.md` 或 `plugin.readme`，管理端用 `/api/plugins/{name}/readme` 读取（Markdown）
 - **权限**：超管、群主/管理员、私聊开关、群白名单/黑名单、按群启用或停用某个插件、每用户冷却
@@ -87,6 +87,21 @@ INFO  fllbot: FLLBot 0.1.0 已启动：WS /onebot/v11/ws | 插件 2 个 | LLM �
 .\.venv\Scripts\python.exe tools\fake_napcat.py --token <可选>
 # 然后输入：/ping、at 你好、p hello、q 退出
 ```
+
+## 项目目录
+
+| 路径 | 用途 |
+| --- | --- |
+| `fllbot/` | 框架、管理 API、WebUI 和插件 SDK。随附插件放在 `fllbot/builtin_plugins/`。 |
+| `plugins/<插件名>/` | 外置插件的清单、功能代码、文档和静态资源。可通过 `plugin.dirs` 指定其他源码目录。 |
+| `data/plugins/<插件名>/` | 插件自己的数据库、缓存和生成文件，通过 `ctx.data_dir` 或 `plugin.data_dir` 访问。 |
+| `data/fllbot.db` | 默认宿主数据库，保存插件设置、权限、群配置和聊天记录。 |
+| `services/` | 独立运行的外部服务，例如 TTS。 |
+| `tests/`、`scripts/` | 自动化测试与项目验证入口。 |
+
+升级或移除插件时，插件数据按原插件名保留。备份时同时保存宿主数据库和 `data/plugins/`。完整约定见 [插件包规范](docs/plugin-packages.md)。
+
+修改项目后，在 Windows 上运行 `.\scripts\verify.ps1`，统一检查架构、管理 API 作用域、插件包、Ruff 和测试。
 
 ## 配置
 

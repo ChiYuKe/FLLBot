@@ -18,6 +18,8 @@ Python 模块顶部写 `Plugin: __NAME__ | Role: 职责`，元信息统一引用
 
 ## 生命周期
 
+插件自有数据库、缓存和生成文件写入 `plugin.data_dir` 或 `ctx.data_dir`，统一位于实例的 `data/plugins/<name>/`。
+
 导入阶段只声明配置、处理器和工具。通过 `on_load(bot)` 创建资源，立即调用 `plugin.on_cleanup(callback)` 登记清理；支持同步或异步回调，卸载、重载或初始化失败时逆序执行。
 `on_load` 失败会保留工作中的旧插件；初始化不要修改其他插件的状态。数据库表结构不在插件导入时变更。
 周期任务使用 `@plugin.on_loop(seconds=...)`，宿主负责取消与回收。

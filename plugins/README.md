@@ -34,7 +34,7 @@ demo/
 
 - 文件夹名必须等于包头 name，包内用 `Plugin.from_manifest(__file__)`，元信息不重复维护
 - `--template tool` 可生成带显式 AI 工具的模板；新增模块沿用带插件标识与职责的文件头
-- 包内使用相对导入，运行文件写 `ctx.data_dir`，配置交给宿主数据库
+- 包内使用相对导入，宿主接口从 `fllbot.plugin` 导入。随包资源放 `assets/`，运行数据写 `ctx.data_dir`（`data/plugins/<name>/`），配置交给宿主数据库
 - 启动、热重载自动发现用户包；修改前先启用新加载器，当前运行的 FLLBot 需要重启一次
 - 文件名/目录名以 `_` 或 `.` 开头的会被跳过
 - 用 `bot.plugins.failed` 或 `GET /api/plugins` 查看加载失败原因，日志前缀 `fllbot.plugin.loader`

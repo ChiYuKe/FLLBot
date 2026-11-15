@@ -15,7 +15,8 @@
 旧单文件插件与无清单的目录插件仍能运行，用于平稳迁移；新建模板和内置插件均采用标准包。
 
 生命周期资源使用 `plugin.on_cleanup(callback)`，支持同步或异步回调，卸载、重载及初始化失败时逆序清理。
-文件数据使用 `ctx.data_dir` / `plugin.data_dir`，对应宿主 `data/plugins/<name>/`；配置仍由 `plugin.setting()`
+插件自有数据库、缓存和生成文件使用 `ctx.data_dir` / `plugin.data_dir`，对应实例的 `data/plugins/<name>/`。
+外部服务可通过 `ctx.instance_root` 定位实例部署目录。配置仍由 `plugin.setting()`
 声明并保存到宿主数据库，群覆盖与密钥掩码规则保持不变。
 
 ## 装饰器最小示例（旧声明写法仍兼容）
