@@ -99,7 +99,7 @@ INFO  fllbot: FLLBot 0.1.0 已启动：WS /onebot/v11/ws | 插件 2 个 | LLM �
 | `services/` | 独立运行的外部服务，例如 TTS。 |
 | `tests/`、`scripts/` | 自动化测试与项目验证入口。 |
 
-升级或移除插件时，插件数据按原插件名保留。备份时同时保存宿主数据库和 `data/plugins/`。完整约定见 [插件包规范](docs/plugin-packages.md)。
+升级或移除插件时，插件数据按原插件名保留。完整备份实例时应同时保存宿主数据库、`data/plugins/` 和 `personas/`；内置数据库备份只覆盖主库。完整约定见 [插件包规范](docs/plugin-packages.md)。
 
 修改项目后，在 Windows 上运行 `.\scripts\verify.ps1`，统一检查架构、管理 API 作用域、插件包、Ruff 和测试。
 

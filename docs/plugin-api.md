@@ -13,6 +13,7 @@
 
 包内使用 `plugin = Plugin.from_manifest(__file__)` 读取元信息，文件变动自动热重载（`plugin.hot_reload = true`）。
 旧单文件插件与无清单的目录插件仍能运行，用于平稳迁移；新建模板和内置插件均采用标准包。
+插件包只从 `fllbot.plugin` 导入宿主接口；`fllbot.app`、`fllbot.api`、`fllbot.onebot` 等内部模块由安装检查与架构检查拒绝。
 
 生命周期资源使用 `plugin.on_cleanup(callback)`，支持同步或异步回调，卸载、重载及初始化失败时逆序清理。
 插件自有数据库、缓存和生成文件使用 `ctx.data_dir` / `plugin.data_dir`，对应实例的 `data/plugins/<name>/`。
@@ -271,6 +272,8 @@ plugin.readme = """# demo
 | `ctx.config` | 当前生效配置（`AppConfig`） |
 | `ctx.db` | `Storage`，见下文 |
 | `ctx.settings` | 当前插件的配置视图（`get` / `set` / `all`），群级字段自动取本群值 |
+| `ctx.data_dir` | 插件运行数据目录（`data/plugins/<name>/`），用于数据库、缓存和生成文件 |
+| `ctx.instance_root` | FLLBot 实例根目录，用于定位 `services/` 等外部服务，不用于保存插件数据 |
 | `ctx.llm` | `ChatService` |
 | `ctx.self_id` / `ctx.user_id` / `ctx.group_id` / `ctx.message_id` | 常用标识 |
 | `ctx.is_group` / `ctx.is_private` / `ctx.to_me` | 场景判断 |
@@ -300,7 +303,7 @@ ctx.stop()                                     # 只阻断，不回复
 消息段：
 
 ```python
-from fllbot.onebot import MessageSegment
+from fllbot.plugin import MessageSegment
 
 await ctx.reply([MessageSegment.at(123456), MessageSegment.text(" 看这里")])
 await ctx.reply([MessageSegment.image("https://example.com/a.png")])
@@ -312,7 +315,7 @@ await ctx.reply([MessageSegment.image("https://example.com/a.png")])
 用 `notice_turn_context()` 派生一个消息上下文再交给 `ctx.llm`：
 
 ```python
-from fllbot.plugin.context import notice_turn_context
+from fllbot.plugin import notice_turn_context
 
 poke_ctx = notice_turn_context(ctx, "戳了你一下", nickname="小明", user_id=123456)
 poke_ctx.plugin = plugin  # 送达时按插件开关与场景开关复核

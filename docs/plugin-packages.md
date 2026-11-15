@@ -69,7 +69,7 @@ dependencies = ["httpx>=0.27,<1"]
 
 默认 `command` 模板包含配置字段与命令；`tool` 模板额外生成显式的 `on_ai_tool` 示例，仍需按权限规则授权模型使用。
 `--root` 指定宿主根目录，`--directory` 指定相对于 root 的插件目录，默认 `plugins`。
-`plugin check --builtin` 同时检查用户与内置包。检查只解析 TOML、文件结构和 Python 语法，不执行插件代码、不连接外部服务；
+`plugin check --builtin` 同时检查用户与内置包。检查只解析 TOML、文件结构、Python 语法和静态导入边界，不执行插件代码、不连接外部服务；
 运行时能否成功初始化仍需实际加载验证。
 `fllbot init` 也生成 `plugins/hello/` 完整包，已有插件和配置不会被覆盖。
 
@@ -126,7 +126,7 @@ Python 依赖使用宿主同一环境，目前不提供每插件依赖隔离。
 `__init__.py` 只保留 `from .plugin import plugin` 和导出列表；`plugin.py` 读取清单并连接处理器与配置。
 小插件可以把现有逻辑留在 plugin.py；复杂功能按职责拆分，避免每个文件都引入相同配置或循环导入。
 专属业务实现、客户端与静态资源必须留在插件包内，不能要求用户往宿主目录补文件。
-静态检查拒绝越出包的相对导入、其他插件包及宿主 app/API 内部导入；这不是任意 Python 动态行为的隔离机制。
+静态检查拒绝越出包的相对导入、其他插件包，以及除 `fllbot.plugin` 外的宿主内部模块（如 `fllbot.app`、`fllbot.api`、`fllbot.onebot`）；这不是任意 Python 动态行为的隔离机制。
 确实同时由宿主与插件使用的通用能力保留在公共模块，例如 `fllbot/rendering/` 同时支撑宿主图片回复与 text 工具。
 包内 `text/code_render.py`、`markdown_render.py` 仅保留旧导入路径兼容，真实共用实现的位置须在开发文档中说明。
 新建模板默认提供 handlers.py 与 settings.py，包内使用相对导入。
@@ -170,7 +170,8 @@ README 开头标明包名并链接包头，正文包含用途、安装使用、�
 | `data/plugins/<name>/` | 插件自有数据库、缓存、生成文件和其他运行数据。通过 `ctx.data_dir` 或 `plugin.data_dir` 获取，可按功能建立子目录。 |
 | 宿主数据库 | 宿主管理的插件设置、群覆盖、权限和共享业务记录，通过宿主接口读写。 |
 
-随包资源可放在 `assets/`。迁移源码、升级或移除插件时，运行数据仍按插件名定位。备份时同时包含 `data/plugins/` 与宿主数据库。
+随包资源可放在 `assets/`。迁移源码、升级或移除插件时，运行数据仍按插件名定位。完整备份实例时应同时包含 `data/plugins/` 与宿主数据库；
+内置的数据库备份只覆盖主库，不包含插件文件和人格文件。
 用户主动导出的文件按对应功能的工作区规则保存。
 
 `services/tts`、`services/qwen-tts` 是拥有独立环境和模型的外部服务，voice 插件只负责客户端与命令。

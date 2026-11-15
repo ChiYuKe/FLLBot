@@ -15,6 +15,7 @@
 
 Python 模块顶部写 `Plugin: __NAME__ | Role: 职责`，元信息统一引用 plugin.toml。
 包内使用相对导入，不修改 sys.path，不通过复制文件共享宿主代码，也不导入其他用户插件。
+宿主接口只从 `fllbot.plugin` 导入；`fllbot.app`、`fllbot.onebot` 等内部模块会被安装检查拒绝。
 
 ## 生命周期
 

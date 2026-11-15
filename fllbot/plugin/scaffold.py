@@ -10,6 +10,7 @@ from pathlib import Path
 from .manifest import PluginManifest, validate_name
 
 TEMPLATES = Path(__file__).with_name("templates")
+HOST_API = "fllbot.plugin"
 
 
 def create_package(
@@ -77,6 +78,17 @@ def create_package(
     return target
 
 
+def _forbidden_import(module: str) -> bool:
+    """External packages may only use the public plugin API, never host internals."""
+    if module == "plugins" or module.startswith("plugins."):
+        return True
+    if module == "fllbot_user_plugins" or module.startswith("fllbot_user_plugins."):
+        return True
+    if module == "fllbot" or module.startswith("fllbot."):
+        return module != HOST_API and not module.startswith(HOST_API + ".")
+    return False
+
+
 def check_package(directory: Path) -> PluginManifest:
     manifest = PluginManifest.read(directory)
     for source in directory.rglob("*.py"):
@@ -89,13 +101,21 @@ def check_package(directory: Path) -> PluginManifest:
                 if isinstance(node, ast.ImportFrom):
                     if node.level > len(relative.parts):
                         raise ValueError(f"{relative}:{node.lineno}: 相对导入越出插件包")
-                    names = [node.module or ""] if not node.level else []
+                    if node.level or not node.module:
+                        continue
+                    targets = (
+                        [f"fllbot.{alias.name}" for alias in node.names]
+                        if node.module == "fllbot"
+                        else [node.module]
+                    )
                 elif isinstance(node, ast.Import):
-                    names = [alias.name for alias in node.names]
+                    targets = [alias.name for alias in node.names]
                 else:
                     continue
-                forbidden = ("plugins", "fllbot_user_plugins", "fllbot.builtin_plugins", "fllbot.app", "fllbot.api")
-                for name in names:
-                    if any(name == prefix or name.startswith(prefix + ".") for prefix in forbidden):
-                        raise ValueError(f"{relative}:{node.lineno}: 插件必须通过公开 SDK 协作，不能导入 {name}")
+                for target in targets:
+                    if _forbidden_import(target):
+                        raise ValueError(
+                            f"{relative}:{node.lineno}: 插件必须通过公开 SDK 协作，不能导入 {target}；"
+                            f"宿主接口请从 {HOST_API} 导入"
+                        )
     return manifest

@@ -10,6 +10,7 @@ import pytest
 
 from fllbot.cli import main
 from fllbot.onebot.models import parse_event
+from fllbot.plugin import Context
 from fllbot.plugin.manifest import PluginManifest
 from fllbot.plugin.package_lock import PackageLock
 from fllbot.plugin.packages import PackageStore
@@ -55,6 +56,9 @@ async def test_external_package_installs_loads_resources_and_preserves_data(tmp_
         await bot.dispatcher.dispatch(parse_event(group_message("/demo")), connection)
         assert connection.texts() == ["来自第三方包"]
         plugin = bot.plugins.get("demo")
+        ctx = Context(bot, connection, parse_event(group_message("/demo")), plugin=plugin)
+        assert ctx.instance_root == root.resolve()
+        assert ctx.data_dir == root.resolve() / "data" / "plugins" / "demo"
         await plugin.settings.update({"greeting": "saved"})
         plugin.data_dir.mkdir(parents=True, exist_ok=True)
         data = plugin.data_dir / "record.txt"
@@ -161,12 +165,31 @@ async def test_incompatible_plugin_is_rejected_before_import(tmp_path, distribut
         await bot.stop()
 
 
-@pytest.mark.parametrize("statement", ["from .. import other", "import plugins.other", "from fllbot.app import FLLBot"])
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from .. import other",
+        "import plugins.other",
+        "from fllbot.app import FLLBot",
+        "from fllbot.onebot.segments import MessageSegment",
+        "import fllbot.delivery_policy",
+        "from fllbot import onebot",
+    ],
+)
 def test_package_cannot_depend_on_external_implementation(tmp_path, distribution, statement):
     (distribution / "private.py").write_text(statement, encoding="utf-8")
     with pytest.raises(ValueError, match="导入"):
         PackageStore(tmp_path / "plugins").install(distribution)
     assert not (tmp_path / "plugins/demo").exists()
+
+
+def test_package_may_use_public_plugin_api(tmp_path, distribution):
+    (distribution / "public.py").write_text(
+        "from fllbot import plugin\nfrom fllbot.plugin.context import Context\n",
+        encoding="utf-8",
+    )
+    installed = PackageStore(tmp_path / "plugins").install(distribution)
+    assert PluginManifest.read(installed).name == "demo"
 
 
 @pytest.mark.parametrize("failure", ["replace", "backup"])

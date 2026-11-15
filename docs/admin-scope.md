@@ -217,6 +217,7 @@
 | 群配置 | groups.group_id | 同群所有 Bot 共享；移除覆盖不清历史 |
 | 插件开关 | plugin_state(plugin_name,group_id) | 0 全局，群级不区分 Bot |
 | 插件配置 | kv(plugin-settings:<名称>,<群号>:<字段>) | 0 全局；群覆盖不区分 Bot；批量原子保存并记录字段级元数据 |
+| 插件运行数据 | data/plugins/<名称>/ | 按插件名定位；升级、移除与恢复源码不删除；主库备份不含，完整备份需另行包含 |
 | AI 旧会话 | chat_messages(scene,scene_id) | 无 self_id；同群多 Bot 共享；会话清理联动记忆和摘要 |
 | 群记忆原文/摘要 | group_memory_*(self_id,group_id) | 按 Bot 和群隔离；部分原文删除使相关摘要失效 |
 | 消息记录 | message_log(self_id,scene,scene_id) | 按 Bot 可筛选；手动预览与可选保留期 |

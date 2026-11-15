@@ -33,6 +33,18 @@ def test_plugins_cannot_import_another_plugin_package(tmp_path):
     assert CHECK(tmp_path)
 
 
+def test_external_plugins_must_use_the_public_plugin_api(tmp_path):
+    path = tmp_path / "plugins/demo/handlers.py"
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        "from fllbot.plugin import Context\nfrom fllbot.onebot.segments import MessageSegment\n",
+        encoding="utf-8",
+    )
+    errors = CHECK(tmp_path)
+    assert errors
+    assert all("fllbot.onebot.segments" in error for error in errors)
+
+
 def test_model_gateway_cannot_depend_on_chat_or_delivery(tmp_path):
     path = tmp_path / 'fllbot/llm/model_gateway.py'
     path.parent.mkdir(parents=True)
