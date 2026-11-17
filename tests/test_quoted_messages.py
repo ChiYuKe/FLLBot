@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from fllbot.llm.quote import DISABLED_IMAGE_LABEL
 from fllbot.onebot.models import parse_event
 from fllbot.plugin.context import Context
 from helpers import FakeConnection, group_message, make_bot, private_message
@@ -178,8 +179,11 @@ async def test_quoted_images_respect_the_image_switch(tmp_path):
         content = messages[-1]['content']
         assert isinstance(content, str)
         assert '深渊怎么能没有点危险东西呢' in content
-        assert '[图片]' in content and '[图片 1]' not in content
+        # 识图关闭时必须写明原因：模型不该把“看不到”猜成“图没传过来”。
+        assert DISABLED_IMAGE_LABEL in content
+        assert '[图片 1]' not in content
         assert 'https://example.test/shot.png' not in content
+        assert DISABLED_IMAGE_LABEL in messages[0]['content']
     finally:
         await bot.stop()
 
