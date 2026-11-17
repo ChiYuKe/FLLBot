@@ -14,6 +14,18 @@ from PIL import Image
 
 MAX_IMAGE_BYTES = 4 * 1024 * 1024
 MAX_IMAGES = 4
+# Clash/Mihomo 等代理的 fake-IP DNS 会把任意域名解析到 198.18.0.0/15（RFC 2544 基准测试网段）。
+# 该网段不会出现在真实局域网里，连接由本地代理接管转发，因此按公网地址处理；
+# 否则开了代理的机器上所有域名图片都会被当成内网地址拒绝。
+_FAKE_IP_RANGE = ipaddress.ip_network("198.18.0.0/15")
+
+
+def _public(address: str) -> bool:
+    try:
+        value = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return value in _FAKE_IP_RANGE or value.is_global
 
 
 async def public_image_source(source: str) -> bool:
@@ -23,7 +35,7 @@ async def public_image_source(source: str) -> bool:
         if url.scheme not in {'http', 'https'} or not url.hostname or url.username or url.password:
             return False
         addresses = await asyncio.to_thread(socket.getaddrinfo, url.hostname, url.port or 443, type=socket.SOCK_STREAM)
-        return bool(addresses) and all(ipaddress.ip_address(address[4][0]).is_global for address in addresses)
+        return bool(addresses) and all(_public(address[4][0]) for address in addresses)
     except (OSError, ValueError):
         return False
 

@@ -23,9 +23,15 @@ DEFAULT_HEADERS = {
     "User-Agent": "FLLBot-Sandbox/1.0 (+https://github.com/)",
     "Accept": "text/html,text/plain,application/json;q=0.9,*/*;q=0.5",
 }
+# Clash/Mihomo 等代理的 fake-IP DNS 会把任意域名解析到 198.18.0.0/15（RFC 2544 基准测试网段）。
+# 该网段不会出现在真实局域网里，连接由本地代理接管转发，因此不当作内网地址；
+# 忽略它会使得开了代理的机器上所有网页读取都被判成内网访问。
+_FAKE_IP_RANGE = ipaddress.ip_network("198.18.0.0/15")
 
 
 def _private(address) -> bool:
+    if address in _FAKE_IP_RANGE:
+        return False
     return (address.is_private or address.is_loopback or address.is_link_local
             or address.is_reserved or address.is_multicast or address.is_unspecified)
 

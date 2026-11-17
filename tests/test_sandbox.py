@@ -187,11 +187,19 @@ async def test_network_revalidates_redirects_and_types(tmp_path):
 
     transport = httpx.MockTransport(handler)
     def resolver(host, port):
-        return ["10.0.0.5"] if host == "private.example.com" else ["93.184.216.34"]
+        if host == "private.example.com":
+            return ["10.0.0.5"]
+        # 代理软件 fake-IP 模式的地址：不是真实内网，应允许读取。
+        if host == "proxy.example.com":
+            return ["198.18.2.80"]
+        return ["93.184.216.34"]
     network = SandboxNetwork(policy(tmp_path), transport=transport, resolver=resolver)
     result = await network.fetch("http://example.com/start")
     assert result["text"] == "hello page" and result["url"].endswith("/page")
     assert seen == ["http://example.com/start", "http://example.com/page"]
+
+    fake_ip = SandboxNetwork(policy(tmp_path), transport=transport, resolver=resolver)
+    assert (await fake_ip.fetch("http://proxy.example.com/start"))["text"] == "hello page"
 
     redirect = SandboxNetwork(policy(tmp_path), transport=transport, resolver=resolver)
     with pytest.raises(SandboxError):

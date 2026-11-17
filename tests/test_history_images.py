@@ -57,7 +57,9 @@ async def test_snapshot_download_and_failure_fallback(picture, monkeypatch):
 
 
 @pytest.mark.parametrize('address,allowed', [('127.0.0.1', False), ('10.0.0.1', False),
-                                          ('169.254.169.254', False), ('8.8.8.8', True)])
+                                          ('169.254.169.254', False), ('8.8.8.8', True),
+                                          # 代理 fake-IP 模式的地址不是真实内网，要允许抓图。
+                                          ('198.18.2.80', True)])
 async def test_download_rejects_local_services(address, allowed, monkeypatch):
     monkeypatch.setattr('fllbot.history_images.socket.getaddrinfo',
                         lambda *args, **kwargs: [(2, 1, 6, '', (address, 443))])

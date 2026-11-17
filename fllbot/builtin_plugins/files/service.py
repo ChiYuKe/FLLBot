@@ -13,6 +13,17 @@ import httpx
 
 MAX_BYTES = 1_048_576
 CHUNK_CHARS = 12_000
+# 代理软件的 fake-IP DNS 会把域名解析到 198.18.0.0/15（RFC 2544 基准测试网段）。
+# 该网段不会出现在真实局域网里，连接由本地代理接管转发，按公网地址处理；
+# 否则开了代理的机器上 QQ 附件下载会一律被判成内网地址。
+_FAKE_IP_RANGE = ipaddress.ip_network("198.18.0.0/15")
+
+
+def _public_address(value: str) -> bool:
+    address = ipaddress.ip_address(value)
+    return address in _FAKE_IP_RANGE or address.is_global
+
+
 TEXT_EXTENSIONS = {
     ".cs",
     ".py",
@@ -97,7 +108,7 @@ def _validate_url(url: str) -> None:
     addresses = socket.getaddrinfo(
         host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM
     )
-    if not addresses or any(not ipaddress.ip_address(item[4][0]).is_global for item in addresses):
+    if not addresses or any(not _public_address(item[4][0]) for item in addresses):
         raise ValueError("文件下载地址解析为非公网地址，已停止读取")
 
 
