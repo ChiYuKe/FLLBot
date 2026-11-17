@@ -3,13 +3,13 @@
 var sectionForView = {
   bots: 'bots', accounts: 'bots',
   groups: 'config', agent: 'config', models: 'models', playground: 'models',
-  history: 'data', usage: 'data', logs: 'data', traces: 'data', system: 'system', maintenance: 'system', services: 'system', retention: 'system'
+  history: 'data', usage: 'data', logs: 'data', traces: 'data', 'tool-stats': 'data', system: 'system', maintenance: 'system', services: 'system', retention: 'system'
 };
 var sectionInfo = {
   bots: { title: 'Agent', tabs: ['bots', 'accounts'] },
   config: { title: '群与回复', tabs: ['groups', 'agent'] },
   models: { title: '模型服务', tabs: ['models', 'playground'] },
-  data: { title: '数据与日志', tabs: ['logs', 'traces', 'history', 'usage'] },
+  data: { title: '数据与日志', tabs: ['logs', 'traces', 'tool-stats', 'history', 'usage'] },
   system: { title: '系统设置', tabs: ['system', 'services', 'maintenance', 'retention'] }
 };
 var lastSectionViews = { bots: 'bots', config: 'groups', models: 'models', data: 'logs', system: 'system' };
@@ -78,6 +78,7 @@ function navigate(view) {
   if (view === 'history') loadHistory();
   if (view === 'usage') loadUsage();
   if (view === 'traces') { loadTraces(); loadTurns(false); }
+  if (view === 'tool-stats') loadToolStats();
   if (view === 'services') loadServiceHealth();
   if (view === 'maintenance') loadBackups();
   if (view === 'retention') loadRetention();

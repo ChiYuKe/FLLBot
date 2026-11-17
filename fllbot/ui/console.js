@@ -52,6 +52,7 @@ var viewInfo = {
   usage: ['用量统计', '了解消息量、模型请求与 Token 消耗。'],
   logs: ['运行日志', '筛选运行记录，定位连接和回复问题。'],
   traces: ['消息诊断', '按账号和会话查看消息处理的阶段、耗时与原因。'],
+  'tool-stats': ['工具执行', '按工具聚合调用、失败、不确定、被阻止与耗时。'],
   system: ['系统设置', '管理连接方式、机器人行为和访问权限。'],
   services: ['外部服务', '查看插件声明的服务状态，按需检查健康接口。'],
   maintenance: ['备份与恢复', '创建、校验和下载数据库备份，查看停机恢复指引。'],
@@ -677,8 +678,13 @@ document.getElementById('usage-range').addEventListener('change', loadUsage);
 document.getElementById('usage-refresh').addEventListener('click', loadUsage);
 
 function renderToolChoices() {
-  var field = document.querySelector('#agent-settings-form [data-key="allowed_tools"]');
-  if (!field) return;
+  ['allowed_tools', 'private_allowed_tools'].forEach(function (key) { renderToolChoiceField(key); });
+}
+
+function renderToolChoiceField(key) {
+  var field = document.querySelector('#agent-settings-form [data-key="' + key + '"]');
+  if (!field || field.dataset.toolPickerRendered) return;
+  field.dataset.toolPickerRendered = '1';
   var selected = field.value.split(/[,\n]/).map(function (item) { return item.trim(); }).filter(Boolean);
   var node = h('div', { class: 'tool-choices' });
   renderToolPicker(node, selected, field.disabled, function (id, checked) {

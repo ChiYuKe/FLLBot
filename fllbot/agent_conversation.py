@@ -10,6 +10,13 @@ from typing import Any
 from .llm.agent_runtime import AGENT_RULES
 from .llm.client import LLMError
 
+# 群聊规则里的“判断是否插话/静默”只适用于自动参与；私聊每条消息都是明确请求。
+PRIVATE_RULES = (
+    '\n\n当前是 QQ 私聊：对方的每条消息都是明确对你说的，直接回应，不需要等待 @ 或唤醒词，'
+    '也不存在群聊自动参与。私聊不使用静默判断，不要调用 agent__stay_silent，'
+    '不要用 <NO_REPLY> 结束回复。'
+)
+
 
 class AgentConversationService:
     def __init__(self, *, triggers, storage, conversations, build_messages, runtime, send, settings=None, tasks=None):
@@ -29,6 +36,10 @@ class AgentConversationService:
         ctx.trace_event("trigger", decision.reason, "passed" if decision.outcome == "accept" else "skipped")
         if decision.outcome != "accept":
             return
+        # 会话场景由事件决定：群聊按群号，私聊按对方 QQ 号；历史、记忆、模型与发送都跟着场景走。
+        private = bool(getattr(ctx, "is_private", False))
+        scene = "private" if private else "group"
+        scene_id = int(ctx.user_id if private else ctx.group_id or 0)
         text, record_text = decision.text, decision.record_text
         settings = decision.settings
         fixed_replies = decision.fixed_replies
@@ -53,18 +64,19 @@ class AgentConversationService:
             with self.tasks.track(ctx) if self.tasks else nullcontext():
                 settings = self.settings(ctx) if self.settings else settings
                 definitions, registry = tools(ctx)
-                history_since = await self.storage.kv_get("agent-consent-start", f"{ctx.self_id}:{ctx.group_id}")
+                consent_key = f"{ctx.self_id}:private:{scene_id}" if private else f"{ctx.self_id}:{scene_id}"
+                history_since = await self.storage.kv_get("agent-consent-start", consent_key)
                 if history_since is None:
                     history_since = await self.storage.kv_initialize(
-                        "agent-consent-start", f"{ctx.self_id}:{ctx.group_id}", time.time() + 0.001)
+                        "agent-consent-start", consent_key, time.time() + 0.001)
                 messages = await self.build_messages(
-                    "group",
-                    ctx.group_id,
+                    scene,
+                    scene_id,
                     text,
                     ctx=ctx,
                     history_since=float(history_since),
                     tools=definitions,
-                    system_rules=AGENT_RULES,
+                    system_rules=AGENT_RULES + PRIVATE_RULES if private else AGENT_RULES,
                     agent_instructions=instructions(registry, definitions) if instructions else [],
                 )
                 record_text = ctx.context_input or record_text
@@ -72,8 +84,8 @@ class AgentConversationService:
                 try:
                     result = await self.runtime.run(
                         messages,
-                        scene="group",
-                        scene_id=ctx.group_id,
+                        scene=scene,
+                        scene_id=scene_id,
                         ctx=ctx,
                         tools=definitions,
                         registry=registry,

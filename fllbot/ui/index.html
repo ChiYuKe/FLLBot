@@ -148,7 +148,7 @@
     </section>
 
     <section class="card" id="agent-tools-panel" data-page="agent" hidden>
-      <div class="card-head"><div><h2>默认回复行为</h2><p>设置未单独定制的群所使用的回复方式和 Agent 工具权限</p></div></div>
+      <div class="card-head"><div><h2>默认回复行为</h2><p>设置未单独定制的群所使用的回复方式、私聊智能体开关与 Agent 工具权限</p></div></div>
       <div class="readme-body">
         <details class="advanced legacy-group-settings"><summary>旧版群覆盖配置</summary>        <div class="settings-scope"><label for="agent-settings-group">配置范围</label><select id="agent-settings-group"><option value="">全局默认配置</option></select><small class="settings-note">自动获取已加入的群；展开后可按群名、群号搜索。</small></div>
 </details>
@@ -197,6 +197,24 @@
   <form id="turns-filter" class="readme-body form-grid"><label class="setting-field"><span>机器人 QQ</span><input id="turns-bot" inputmode="numeric" placeholder="全部账号"></label><label class="setting-field"><span>群号 / 私聊 QQ</span><input id="turns-scene-id" inputmode="numeric" placeholder="全部会话"></label><label class="setting-field"><span>状态</span><select id="turns-status"><option value="">全部状态</option><option value="failed">失败</option><option value="delivery_uncertain">送达不确定</option><option value="delivered">已送达</option><option value="running">执行中</option><option value="queued">排队中</option><option value="silent">静默结束</option><option value="cancelled">已取消</option><option value="expired">已过期</option></select></label><button type="submit" class="btn">筛选轮次</button></form>
   <p id="turns-note" class="settings-note readme-body" role="status"></p>
   <div class="split-layout"><div><div id="turns-list" class="room-list"></div><button type="button" class="btn" id="turns-more" hidden>更早轮次</button></div><div id="turn-detail" class="readme-body"><p class="settings-note">选择一个轮次查看详情。</p></div></div>
+</section>
+<section data-page="tool-stats" hidden>
+  <div class="card">
+    <div class="card-head"><div><h2>工具执行</h2><p>按工具聚合调用、成功、失败、不确定与被阻止、平均耗时和最近错误；只含执行元数据，不包含参数、工具结果正文或消息内容。</p></div><button class="btn" type="button" id="tool-stats-refresh">刷新统计</button></div>
+    <form id="tool-stats-filter" class="readme-body form-grid">
+      <label class="setting-field"><span>时间范围</span><select id="tool-stats-days"><option value="1">最近 24 小时</option><option value="7" selected>最近 7 天</option><option value="30">最近 30 天</option><option value="90">最近 90 天</option></select></label>
+      <label class="setting-field"><span>机器人 QQ（选填）</span><input id="tool-stats-bot" inputmode="numeric" placeholder="全部账号"></label>
+      <button type="submit" class="btn">应用筛选</button>
+    </form>
+    <p id="tool-stats-note" class="settings-note readme-body" role="status"></p>
+    <div class="usage-table-wrap">
+      <table class="usage-model-table">
+        <caption class="visually-hidden">按工具聚合的执行统计</caption>
+        <thead><tr><th scope="col">工具</th><th scope="col">调用</th><th scope="col">成功</th><th scope="col">失败</th><th scope="col">不确定</th><th scope="col">被阻止</th><th scope="col">平均耗时</th><th scope="col">最近错误</th><th scope="col">最近调用</th></tr></thead>
+        <tbody id="tool-stats-body"><tr><td colspan="9" class="empty">正在读取工具执行统计…</td></tr></tbody>
+      </table>
+    </div>
+  </div>
 </section>
 <section data-page="retention" hidden>
   <div class="card"><div class="card-head"><div><h2>自动数据保留</h2><p>默认关闭；0 天表示该类不自动清理。保存不会立即删除数据。</p></div><button id="retention-reload" type="button" class="btn">重新读取策略</button></div><form id="retention-form" class="readme-body settings-form"><label class="inline-check"><input id="retention-enabled" type="checkbox"><span>启用定时清理</span></label><div class="form-grid"><label class="setting-field"><span>消息记录保留天数</span><input id="retention-messages" type="number" min="0" max="3650" step="1" required></label><label class="setting-field"><span>AI 会话及群记忆保留天数</span><input id="retention-conversations" type="number" min="0" max="3650" step="1" required></label><label class="setting-field"><span>模型用量保留天数</span><input id="retention-usage" type="number" min="0" max="3650" step="1" required></label><label class="setting-field"><span>配置变更记录保留天数</span><input id="retention-changes" type="number" min="0" max="3650" step="1" required></label><label class="setting-field"><span>执行间隔（秒，默认一小时）</span><input id="retention-interval" type="number" min="60" max="86400" step="1" required></label></div><p id="retention-note" class="settings-note" role="status"></p><button id="retention-save" type="submit" class="btn primary">保存保留策略</button></form></div>

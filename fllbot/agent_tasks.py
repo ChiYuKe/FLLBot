@@ -133,10 +133,18 @@ class AgentTasks:
                 break
         async def reply(text):
             await self.reply(ctx, text, defer_reply)
-        if (not ctx.is_group or not ctx.data_current or not self.account_enabled(ctx.self_id)
-                or not self.permissions.group_enabled(ctx.group_id)
-                or not self.permissions.plugin_enabled('agent', ctx.group_id)
-                or not self.scene_enabled(ctx.event.scene, ctx.event.scene_id)):
+        if not ctx.is_group and not ctx.is_private:
+            return False
+        if not ctx.data_current or not self.account_enabled(ctx.self_id):
+            return False
+        if ctx.is_group:
+            if (ctx.group_id is None or not self.permissions.group_enabled(ctx.group_id)
+                    or not self.permissions.plugin_enabled('agent', ctx.group_id)):
+                return False
+        elif (not self.permissions.allow_private
+              or not self.permissions.plugin_enabled('agent', None)):
+            return False
+        if not self.scene_enabled(ctx.event.scene, ctx.event.scene_id):
             return False
         state = self.state(ctx)
         if follow_up:

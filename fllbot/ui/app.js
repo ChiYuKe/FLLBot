@@ -839,7 +839,8 @@
     while (form.firstChild) source.appendChild(form.firstChild);
     var groups = [
       { title: '群聊响应', description: '控制智能体何时处理本群消息；自动参与先评分，低于阈值不请求模型。', keys: ['auto_group', 'trigger_mode', 'trigger_prefix', 'auto_reply_probability', 'participation_threshold', 'cooldown_seconds'] },
-      { title: '工具', description: '选择模型可以调用的工具。工具由插件提供，执行时仍检查插件开关、用户权限与沙盒策略。', keys: ['allowed_tools'] }
+      { title: '工具', description: '选择模型可以调用的工具。工具由插件提供，执行时仍检查插件开关、用户权限与沙盒策略。', keys: ['allowed_tools'] },
+      { title: '私聊智能体', description: '私聊没有群级覆盖：开关与工具白名单在这里统一设置，保存后下一条私聊消息生效。私聊仍受用户权限、插件全局开关与沙盒裁决约束。', keys: ['private_enabled', 'private_allowed_tools'] }
     ];
     var fields = {};
     while (source.firstChild) {
@@ -864,8 +865,8 @@
     });
     var groupId = data.group_id;
     document.getElementById('agent-settings-note').textContent = groupId
-      ? '正在编辑该群的生效配置；只有标记为可按群设置的参数可在此覆盖。'
-      : '群聊自然语言响应默认关闭。启用后，该群普通消息及启用后的会话历史会发送到已配置的模型服务。';
+      ? '正在编辑该群的生效配置；只有标记为可按群设置的参数可在此覆盖。私聊开关与私聊工具是全局设置，不随群变化。'
+      : '群聊响应默认关闭；私聊智能体是全局开关，也默认关闭，工具需单独授权。启用后对应会话消息及启用后的历史会发送到已配置的模型服务。';
     if (data.group_policy) document.getElementById('agent-settings-note').textContent += ' 该群有独立设置，部分字段会被覆盖；请到“配置 → 群聊设置”查看。';
     renderToolChoices();
     renderAgentStatus();

@@ -113,11 +113,51 @@ class TriggerPolicy:
         return evaluate(signals, threshold)
 
     def rejected(self, ctx: Any, reason: str) -> TriggerDecision:
+        if getattr(ctx, "is_private", False):
+            settings = self.settings(None, ctx.self_id) if self.settings else {}
+            version = hashlib.sha256(json.dumps(
+                [settings, ctx.config.model_dump()], sort_keys=True, default=str).encode()).hexdigest()
+            return TriggerDecision('reject', reason, '', version)
         settings = self.settings(ctx.group_id,ctx.self_id) if ctx.is_group and ctx.group_id else {}
         version = hashlib.sha256(json.dumps([settings,ctx.config.model_dump(),self.permissions.group_config(ctx.group_id) if ctx.is_group else {}],sort_keys=True,default=str).encode()).hexdigest()
         return TriggerDecision('reject',reason,'',version)
 
+    def _decide_private(self, ctx: Any) -> TriggerDecision:
+        """私聊分支：明确请求即处理，不做自动参与评分，也不套用群级覆盖。"""
+        settings = self.settings(None, ctx.self_id) if self.settings else {}
+        version = hashlib.sha256(json.dumps(
+            [settings, ctx.config.model_dump()], sort_keys=True, default=str).encode()).hexdigest()
+        text = record_text = ctx.text or ctx.readable
+        def decision(outcome, reason):
+            # 私聊天然是对 Bot 说话，addressed 始终为真，写操作按明确请求裁决。
+            return TriggerDecision(outcome, reason, 'private', version, text, record_text,
+                                   (), settings, None, True)
+        if ctx.command:
+            return decision('ignore', 'not_agent_message')
+        if not text or any(prefix and text.startswith(prefix) for prefix in ctx.config.bot.command_prefix):
+            return decision('ignore', 'command_or_empty')
+        if not ctx.data_current:
+            return decision('reject', 'context_cleared')
+        bot = getattr(ctx, 'bot', None)
+        if bot is not None and not bot.bots.enabled(ctx.self_id):
+            return decision('reject', 'account_disabled')
+        if not self.permissions.allow_private:
+            return decision('reject', 'access_denied')
+        if not self.permissions.plugin_enabled('agent', None):
+            return decision('reject', 'access_denied')
+        if not settings.get('private_enabled', False):
+            return decision('ignore', 'private_disabled')
+        if not self.available() or not self.scene_enabled('private', ctx.user_id):
+            return decision('reject', 'scene_ai_disabled')
+        cooldown = float(settings.get('cooldown_seconds', 5) or 0)
+        key = ('agent', f'natural_language:private:{ctx.self_id}', ctx.user_id)
+        if not self.permissions.cooldown_ok(key, cooldown):
+            return decision('ignore', 'agent_cooldown')
+        return decision('accept', 'private_trigger_matched')
+
     def decide(self, ctx: Any) -> TriggerDecision:
+        if getattr(ctx, "is_private", False):
+            return self._decide_private(ctx)
         settings = self.settings(ctx.group_id,ctx.self_id) if ctx.is_group and ctx.group_id else {}
         options = ctx.config.chat
         version = hashlib.sha256(json.dumps([settings,ctx.config.model_dump(),self.permissions.group_config(ctx.group_id) if ctx.is_group else {}],sort_keys=True,default=str).encode()).hexdigest()

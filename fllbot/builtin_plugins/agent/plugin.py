@@ -11,6 +11,20 @@ from fllbot.plugin.base import AIToolSpec
 
 plugin = Plugin.from_manifest(__file__)
 plugin.setting(
+    "private_enabled",
+    type="bool",
+    label="私聊自然语言响应",
+    default=False,
+    description="开启后，Bot 的私聊消息会发送到配置的模型服务；私聊没有群级覆盖，使用全局模型与人格默认值。",
+)
+plugin.setting(
+    "private_allowed_tools",
+    type="list",
+    label="私聊允许调用的工具",
+    default=[],
+    description="私聊只开放这里勾选、且插件全局启用、用户权限允许的工具；执行仍需通过沙盒裁决。",
+)
+plugin.setting(
     "auto_group",
     type="bool",
     label="群聊自然语言响应",
@@ -119,7 +133,9 @@ def _addressed(ctx: Context, settings: dict) -> bool:
 
 
 def _stay_silent_offered(ctx: Context, settings: dict) -> bool:
-    """自动参与且模型支持工具时才提供内部静默工具。"""
+    """自动参与且模型支持工具时才提供内部静默工具；私聊是明确请求，不提供。"""
+    if getattr(ctx, 'is_private', False):
+        return False
     if 'all' not in settings.get('trigger_modes', ()) or _addressed(ctx, settings):
         return False
     provider_name = ctx.bot.chat.provider_name('group', ctx.group_id, 'agent', ctx.self_id)
@@ -127,13 +143,20 @@ def _stay_silent_offered(ctx: Context, settings: dict) -> bool:
     return bool(provider.supports_tools)
 
 
+def _allowed_tools(settings: dict, private: bool) -> set[str]:
+    """群聊读群级白名单；私聊只读独立的全局私聊白名单。"""
+    key = 'private_allowed_tools' if private else 'allowed_tools'
+    return {str(name) for name in (settings.get(key) or [])}
+
+
 def _get_tools(ctx: Context, *, live: bool = False) -> tuple[list[dict[str, Any]], dict[str, tuple[Any, AIToolSpec]]]:
-    """从宿主工具目录快照中筛出本群可见工具；只为入选工具复制 Schema。"""
+    """从宿主工具目录快照中筛出当前场景可见工具；只为入选工具复制 Schema。"""
     del live  # 兼容旧调用；目录快照自身会在插件或 Schema 变化后重建
     definitions: list[dict[str, Any]] = []
     registry: dict[str, tuple[Any, AIToolSpec]] = {}
     settings = _agent_settings(ctx)
-    allowed_tools = {str(name) for name in (settings["allowed_tools"] or [])}
+    private = bool(getattr(ctx, 'is_private', False))
+    allowed_tools = _allowed_tools(settings, private)
     snapshot = ctx.bot.tools.snapshot()
     ctx.tool_snapshot = snapshot
     memory_available = ctx.bot.chat.memory.enabled(ctx) and ctx.bot.chat.memory.recall_requested(ctx)
@@ -181,7 +204,7 @@ def _resolve_live(ctx: Context, name: str, registry: dict[str, tuple[Any, AITool
         if not (ctx.bot.chat.memory.enabled(ctx) and ctx.bot.chat.memory.recall_requested(ctx)):
             return None
     else:
-        allowed_tools = {str(item) for item in (settings.get('allowed_tools') or [])}
+        allowed_tools = _allowed_tools(settings, bool(getattr(ctx, 'is_private', False)))
         if name not in allowed_tools or not ctx.bot.permissions.check(entry.spec.permission, ctx):
             return None
     return owner, entry.spec

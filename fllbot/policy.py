@@ -121,7 +121,28 @@ def policy_overrides(bot: FLLBot, group_id: int) -> dict[str, Any]:
         return {}
 
 
-def agent_settings(bot: FLLBot, group_id: int, self_id: int | None = None) -> dict[str, Any]:
+def private_agent_settings(bot: FLLBot) -> dict[str, Any]:
+    """私聊智能体设置：只读 agent 插件的全局（非 group_scoped）配置。
+
+    私聊没有群级覆盖，也不套用机器人的群回复方式；开关与工具白名单都在这里统一解析，
+    供触发策略、工具筛选和管理端复用。
+    """
+    plugin = bot.plugins.get("agent")
+    if plugin is None:
+        return {
+            "private_enabled": False, "private_allowed_tools": [], "cooldown_seconds": 5,
+            "trigger_modes": [], "trigger_prefix": "",
+        }
+    values = dict(plugin.settings.values())
+    values.setdefault("trigger_modes", [])
+    values.setdefault("trigger_prefix", "")
+    return values
+
+
+def agent_settings(bot: FLLBot, group_id: int | None, self_id: int | None = None) -> dict[str, Any]:
+    # 私聊没有群号：返回全局私聊设置，避免把用户 QQ 当成群号解析群策略。
+    if group_id is None:
+        return private_agent_settings(bot)
     plugin = bot.plugins.get("agent")
     values = plugin.settings.values() if plugin else {
         "auto_group": False, "trigger_mode": "all", "trigger_prefix": "ai",

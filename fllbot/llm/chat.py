@@ -108,12 +108,15 @@ class ChatService:
         snapshot = current(self.bot)
         return snapshot.version if snapshot else hashlib.sha256(self.bot.config.model_dump_json().encode()).hexdigest()
 
-    def turn_agent_settings(self, group_id: int, self_id: int | None = None, *, live: bool = False) -> dict:
+    def turn_agent_settings(self, group_id: int | None, self_id: int | None = None, *, live: bool = False) -> dict:
         from ..policy import agent_settings
         snapshot = current(self.bot)
-        if not live and snapshot and snapshot.scene == 'group' and snapshot.scene_id == group_id:
+        if not live and snapshot and (
+            (snapshot.scene == 'group' and snapshot.scene_id == group_id)
+            or (snapshot.scene == 'private' and group_id is None and snapshot.self_id == (self_id or 0))
+        ):
             return copy.deepcopy(snapshot.agent)
-        return agent_settings(self.bot,group_id,self_id)
+        return agent_settings(self.bot, group_id, self_id)
 
     def _model_session_id(self) -> str:
         snapshot = current(self.bot)
@@ -139,7 +142,8 @@ class ChatService:
             copy.deepcopy(policy_overrides(self.bot, scene_id)) if scene == "group" else {},
             self.bot.bots.defaults(self_id).model_copy(deep=True),
             copy.deepcopy(self.bot.personas),
-            copy.deepcopy(agent_settings(self.bot,scene_id,self_id)) if scene == 'group' else {},
+            copy.deepcopy(agent_settings(self.bot, None if scene == 'private' else scene_id, self_id))
+            if scene in ('group', 'private') else {},
             self_id=self_id or 0,
             sender_id=sender_id if scene == "group" else 0,
         )
