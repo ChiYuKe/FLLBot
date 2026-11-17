@@ -58,7 +58,7 @@ class Limits:
     max_cells: int = 20_000
     max_cell_chars: int = 500
     max_bullets: int = 50
-    max_file_bytes: int = 8 * 1024 * 1024
+    max_file_bytes: int = 5 * 1024 * 1024
     retention_days: int = 3
     font_name: str = "微软雅黑"
 
@@ -636,8 +636,16 @@ def _commit(
     return GeneratedFile(path=path, filename=filename, payload=payload, detail=detail)
 
 
+# 本插件生成的磁盘文件名：12 位随机前缀 + 清洗后的附件名。清理只认这个前缀，
+# 避免误删用户或其它程序放进同一目录的文件。
+_GENERATED_NAME = re.compile(r"^[0-9a-f]{12}_")
+
+
 def cleanup(directory: Path, retention_days: int, keep: Path | None = None) -> int:
-    """删除超过保留期的生成文件；尽力而为，失败不阻塞发送。"""
+    """删除超过保留期的本插件生成文件；尽力而为，失败不阻塞发送。
+
+    只处理文件名匹配 ``<12 位十六进制>_<附件名>`` 的文件，同目录中其它文件保持不动。
+    """
     if retention_days <= 0:
         return 0
     cutoff = time.time() - retention_days * 86_400
@@ -648,6 +656,8 @@ def cleanup(directory: Path, retention_days: int, keep: Path | None = None) -> i
         return 0
     for path in entries:
         if keep is not None and path == keep:
+            continue
+        if not _GENERATED_NAME.match(path.name):
             continue
         try:
             if path.is_file() and path.stat().st_mtime < cutoff:

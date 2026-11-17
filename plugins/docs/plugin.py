@@ -1,8 +1,10 @@
 """Plugin: docs | Role: settings, AI tools and attachment delivery | Metadata: plugin.toml.
 
 三个工具都声明 ``qq.send_file``：宿主沙盒会在自动参与（未 @、未叫到）时拒绝，模型也必须在
-「智能体 → 允许调用的工具」里被授权后才看得见。文件生成在插件 data_dir 的 files/ 子目录，
-先写成真实文件并用对应库重新打开校验，发送失败时删除，不留下半成品。
+「智能体 → 允许调用的工具」里被授权后才看得见。回调里另有一道 ``addressed`` 兜底，
+因此即使管理员关闭 ``[sandbox].enabled``、宿主不做能力裁决，自动参与也不会生成文件。
+文件生成在插件 data_dir 的 files/ 子目录，先写成真实文件并用对应库重新打开校验；
+生成/校验/发送失败只删除本次文件，加载时与每 6 小时按 retention_days 清理本插件生成的旧文件。
 """
 
 from __future__ import annotations
@@ -17,7 +19,21 @@ from fllbot.plugin import Context, MessageSegment, Plugin, send_media_reply
 
 from . import service as core
 
-plugin = Plugin.from_manifest(__file__)
+CLEANUP_INTERVAL_SECONDS = 6 * 60 * 60
+CLEANUP_INITIAL_DELAY_SECONDS = 5 * 60
+
+
+class DocsPlugin(Plugin):
+    """生命周期：加载后先清理一次过期文件，之后交给周期任务和发送后清理。"""
+
+    async def on_load(self, bot: Any) -> None:
+        try:
+            await asyncio.to_thread(_cleanup_files, self, "on_load")
+        except Exception:  # noqa: BLE001 - 清理失败不能阻止插件加载
+            self.logger.exception("文档插件加载清理失败")
+
+
+plugin = DocsPlugin.from_manifest(__file__)
 
 _KIND_LABELS = {"docx": "Word 文档", "xlsx": "Excel 表格", "pptx": "PPT 演示文稿"}
 
@@ -33,10 +49,13 @@ plugin.setting(
     "max_file_mb",
     type="float",
     label="单文件大小上限（MB）",
-    default=8.0,
+    default=5.0,
     min=1.0,
     max=30.0,
-    description="生成文件超过上限直接拒绝，不写入也不发送；同时受 QQ 侧附件能力限制。",
+    description=(
+        "默认 5 MB，与工作区 send_file 的默认附件上限一致，避免 base64 大文件进入消息历史；"
+        "可按 NapCat/QQ 实际附件能力调整。生成文件超过上限直接拒绝，不写入也不发送。"
+    ),
 )
 plugin.setting(
     "max_chars",
@@ -117,7 +136,10 @@ plugin.setting(
     default=3,
     min=1,
     max=30,
-    description="发送成功后按天清理 data/plugins/docs/files 里的旧文件；最近发送的文件不受影响。",
+    description=(
+        "发送成功后按天清理 data/plugins/docs/files 里本插件生成的旧文件；"
+        "插件加载时和每 6 小时也会各清理一次，最近发送的文件不受影响。"
+    ),
 )
 plugin.setting(
     "font_name",
@@ -142,6 +164,48 @@ plugin.agent_instruction(
 )
 
 
+def _addressed(ctx: Context) -> bool:
+    """与宿主沙盒一致的“明确请求”判断：自动参与视为未被明确请求。"""
+    if getattr(ctx, "entrypoint", "qq") != "qq":
+        return True
+    decision = getattr(ctx, "trigger_decision", None)
+    if decision is None:
+        return True
+    explicit = getattr(decision, "addressed", None)
+    if explicit is not None:
+        return bool(explicit)
+    return str(getattr(decision, "trigger_kind", "") or "") in {"at", "prefix"}
+
+
+def _cleanup_files(instance: Plugin, reason: str = "periodic") -> int:
+    """按 retention_days 清理本插件生成的旧文件；失败只记日志，不向调用方抛出。"""
+    try:
+        directory = instance.data_dir / "files"
+        if not directory.is_dir():
+            return 0
+        retention_days = int(instance.settings.get("retention_days") or 3)
+        removed = core.cleanup(directory, retention_days)
+    except Exception:  # noqa: BLE001 - 清理失败不影响生成与发送
+        instance.logger.exception("清理旧文档文件失败（%s）", reason)
+        return 0
+    if removed:
+        instance.logger.info("已清理 %d 个过期文档文件（%s）", removed, reason)
+    return removed
+
+
+@plugin.on_loop(
+    CLEANUP_INTERVAL_SECONDS,
+    name="cleanup_files",
+    initial_delay=CLEANUP_INITIAL_DELAY_SECONDS,
+)
+async def cleanup_generated_files(bot: Any) -> None:
+    """周期清理过期生成文件；宿主没有加载本插件时静默跳过。"""
+    instance = bot.plugins.get("docs") if getattr(bot, "plugins", None) is not None else None
+    if instance is None:
+        return
+    await asyncio.to_thread(_cleanup_files, instance, "loop")
+
+
 def _limits(settings: Any) -> core.Limits:
     return core.Limits(
         max_chars=int(settings.get("max_chars") or 50_000),
@@ -152,7 +216,7 @@ def _limits(settings: Any) -> core.Limits:
         max_cells=int(settings.get("max_cells") or 20_000),
         max_cell_chars=int(settings.get("max_cell_chars") or 500),
         max_bullets=int(settings.get("max_bullets") or 50),
-        max_file_bytes=max(1, int(float(settings.get("max_file_mb") or 8.0) * 1024 * 1024)),
+        max_file_bytes=max(1, int(float(settings.get("max_file_mb") or 5.0) * 1024 * 1024)),
         retention_days=int(settings.get("retention_days") or 3),
         font_name=core.safe_font_name(settings.get("font_name")),
     )
@@ -170,6 +234,11 @@ async def _send_document(
     builder: Callable[[Path, str, core.Limits], core.GeneratedFile],
 ) -> dict[str, Any]:
     """生成、校验、发送一个 Office 附件；失败只返回可读原因，不发送半成品。"""
+    if not _addressed(ctx):
+        return {
+            "error": "docs_addressed_required",
+            "message": "自动参与时不会生成文档，需要群友 @ 或唤醒词明确请求。",
+        }
     settings = ctx.settings
     if not bool(settings.get("enabled", True)):
         return {"error": "docs_disabled", "message": "文档生成在本群没有启用。"}
@@ -458,4 +527,4 @@ async def write_pptx(
     )
 
 
-__all__ = ["plugin", "write_docx", "write_pptx", "write_xlsx"]
+__all__ = ["DocsPlugin", "cleanup_generated_files", "plugin", "write_docx", "write_pptx", "write_xlsx"]
