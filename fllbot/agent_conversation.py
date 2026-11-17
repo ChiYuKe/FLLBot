@@ -112,12 +112,16 @@ class AgentConversationService:
                     ctx.trace_event("trigger", "context_cleared", "skipped")
                     ctx.stop()
                     return
-                if result.text or result.spoken:
+                if result.text or result.reply or result.spoken:
                     if not ctx.input_projected:
                         await self.conversations.project_input(ctx, record_text)
                         ctx.input_projected = True
                     if result.text:
                         await self.send(ctx, result.text)
+                        self.triggers.observe_reply(ctx)
+                    elif result.reply:
+                        # 直出快路径：工具已完成用户可见交付，用现有发送回调发它给的一句确认。
+                        await self.send(ctx, result.reply)
                         self.triggers.observe_reply(ctx)
                 elif result.reason == "empty_response" and ctx.to_me:
                     ctx.turn_reason = "empty_response"
