@@ -86,8 +86,12 @@ class AgentConversationService:
                     if self.tasks:
                         self.tasks.finish_input(ctx)
                 except LLMError:
+                    # 与普通对话路径一致：模型失败只记录原因、静默收尾，
+                    # 不冒泡给 dispatcher 发通用 error_reply，避免模型服务故障时刷屏。
                     ctx.turn_reason = 'model_failed'
-                    raise
+                    ctx.trace_event("model", "model_failed", "failed")
+                    ctx.stop()
+                    return
                 if result.reason in ("explicit_silence", "tool_completed"):
                     ctx.turn_silent_reason = result.reason
                 elif result.reason == "empty_response":

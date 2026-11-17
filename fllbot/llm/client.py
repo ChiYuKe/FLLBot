@@ -20,6 +20,7 @@ from typing import Any
 import httpx
 
 from ..config import LLMConfig, LLMProviderConfig
+from ..log_context import current_inbound_message
 from ..tracing import record, span
 from .budget import fit_messages, request_tokens, wire_messages
 from .tool_protocol import ToolProtocolError, contains_dsml, normalize_tool_calls
@@ -80,6 +81,29 @@ def estimate_tokens(text: str) -> int:
     if not stripped:
         return 0
     return len(stripped.encode("utf-8"))
+
+
+# 运行日志里附带的用户消息上限；超出只保留开头的预览。
+USER_MESSAGE_PREVIEW_LIMIT = 200
+
+
+def message_preview(text: str, limit: int = USER_MESSAGE_PREVIEW_LIMIT) -> tuple[str, int] | None:
+    """把消息压成单行并截断，返回预览与原始字数；空消息返回 ``None``。"""
+    single = " ".join((text or "").split())
+    if not single:
+        return None
+    return (single[:limit] + "…" if len(single) > limit else single, len(single))
+
+
+def _image_count(messages: Sequence[dict[str, Any]]) -> int:
+    """本轮实际附带的图片数；日志里用于确认“图到底有没有传过去”。"""
+    return sum(
+        1
+        for message in messages
+        if isinstance(message.get("content"), list)
+        for part in message["content"]
+        if isinstance(part, dict) and part.get("type") == "image_url"
+    )
 
 
 class LLMClient:
@@ -393,8 +417,21 @@ class LLMClient:
         )
         input_estimate = request_tokens(list(messages), list(tools) if tools else None, config.image_token_budget)
         output_limit = None if unbounded_output else int(payload[config.token_parameter])
+        # 只在真实消息链路里附带用户正文：入站消息正文由调度层放在任务上下文，
+        # 管理端对话测试、后台摘要与其它内部调用没有该上下文，仍只记录元数据。
+        preview = message_preview(current_inbound_message() or "")
+        preview_field = ""
+        preview_extra: dict[str, Any] = {}
+        if preview is not None:
+            preview_text, preview_chars = preview
+            preview_field = f" 用户消息=“{preview_text}”"
+            preview_extra = {
+                "user_message_preview": preview_text,
+                "user_message_chars": preview_chars,
+                "user_message_truncated": preview_chars > USER_MESSAGE_PREVIEW_LIMIT,
+            }
         self.logger.info(
-            "模型请求开始：provider=%s model=%s 输入上下文估算=%s/%s tokens 输出上限=%s 消息数=%s 工具数=%s",
+            "模型请求开始：provider=%s model=%s 输入上下文估算=%s/%s tokens 输出上限=%s 消息数=%s 工具数=%s%s",
             name,
             config.model,
             input_estimate,
@@ -402,6 +439,7 @@ class LLMClient:
             "未指定（服务商默认）" if output_limit is None else f"{output_limit} tokens",
             len(messages),
             len(tools or ()),
+            preview_field,
             extra={
                 "event": "model_call_started",
                 "provider": name,
@@ -412,6 +450,8 @@ class LLMClient:
                 "output_limit_mode": "provider_default" if unbounded_output else "explicit",
                 "message_count": len(messages),
                 "tool_count": len(tools or ()),
+                "image_count": _image_count(messages),
+                **preview_extra,
             },
         )
         started = time.perf_counter()

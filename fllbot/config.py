@@ -78,7 +78,7 @@ class BotConfig(BaseModel):
     superusers: list[int] = Field(default_factory=list)
     command_prefix: list[str] = Field(default_factory=lambda: ["/"])
     allow_bare_command: bool = True
-    error_reply: str = ""
+    error_reply: str = "抱歉，我刚才处理这条消息时遇到问题，请稍后再试。"
 
 
 class PermissionConfig(BaseModel):

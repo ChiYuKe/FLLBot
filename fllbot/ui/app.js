@@ -1435,7 +1435,13 @@
     filtered.forEach(function (item) {
       var current = String(item.level || 'INFO').toUpperCase();
       var kind = current === 'ERROR' || current === 'CRITICAL' ? 'error' : current === 'WARNING' ? 'warning' : '';
-      logs.appendChild(h('div', { class: 'log-line ' + kind }, h('span', { class: 'log-time', text: formatTime(item.ts) }), h('span', { class: 'log-level', text: current }), h('span', { class: 'log-message', text: (item.logger ? item.logger + ': ' : '') + (item.message || '') })));
+      var line = (item.logger ? item.logger + ': ' : '') + (item.message || '');
+      var marker = ' 用户消息=“';
+      var at = line.indexOf(marker);
+      var message = h('span', { class: 'log-message' },
+        at > 0 ? line.slice(0, at) : line,
+        at > 0 ? h('span', { class: 'log-user', text: line.slice(at) }) : null);
+      logs.appendChild(h('div', { class: 'log-line ' + kind }, h('span', { class: 'log-time', text: formatTime(item.ts) }), h('span', { class: 'log-level', text: current }), message));
     });
     logs.scrollTop = nearBottom ? logs.scrollHeight : previousScroll;
   }

@@ -6,7 +6,7 @@ import httpx
 import pytest
 
 from fllbot.config import LLMConfig
-from fllbot.llm.client import LLMClient, LLMError
+from fllbot.llm.client import USER_MESSAGE_PREVIEW_LIMIT, LLMClient, LLMError, message_preview
 from fllbot.logging_setup import clear_ring, get_ring
 from helpers import FakeConnection, group_message, make_bot
 
@@ -91,6 +91,30 @@ async def test_diagnostic_body_requires_optin_and_expires_without_removing_count
         assert all(not row[0] for row in await (await bot.storage.db.execute('SELECT content FROM message_log')).fetchall())
     finally:
         await bot.stop()
+
+
+def test_message_preview_collapses_lines_and_truncates():
+    assert message_preview('') is None and message_preview('  \n ') is None
+    assert message_preview('  你好\n世界  ') == ('你好 世界', 5)
+    text, chars = message_preview('长' * 500)
+    assert chars == 500 and text == '长' * USER_MESSAGE_PREVIEW_LIMIT + '…'
+
+
+async def test_model_request_log_shows_inbound_user_text_only_when_present(caplog):
+    from fllbot.log_context import inbound_message
+
+    config = LLMConfig(api_key='fake', context_window=8192)
+    payload = {'choices': [{'message': {'content': 'answer'}, 'finish_reason': 'stop'}],
+               'usage': {'prompt_tokens': 10, 'completion_tokens': 2}}
+    messages = [{'role': 'system', 'content': '规则'}, {'role': 'user', 'content': '模型收到的内容'}]
+    caplog.set_level('INFO', logger='fllbot.llm')
+    async with httpx.AsyncClient(transport=httpx.MockTransport(lambda request: httpx.Response(200, json=payload))) as http:
+        client = LLMClient(lambda: config, http_client=http)
+        await client.chat_result(messages)
+        assert '用户消息' not in caplog.text
+        with inbound_message('测试用户(30003)：你好'):
+            await client.chat_result(messages)
+    assert '用户消息=“测试用户(30003)：你好”' in caplog.text
 
 
 async def test_generated_admin_token_is_not_logged(tmp_path):

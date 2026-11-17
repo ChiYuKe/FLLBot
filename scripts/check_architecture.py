@@ -10,6 +10,7 @@ BOUNDARIES = {
     "config": {"config"},
     "events": {"events"},
     "logging_setup": {"logging_setup", "tracing"},
+    "log_context": set(),
     "tracing": {"tracing"},
     "storage": {"storage"},
     "onebot": {"onebot", "tracing"},
@@ -19,7 +20,7 @@ BOUNDARIES = {
     "history_images": set(),
     "sandbox": {"sandbox"},
     "tool_registry": {"tool_registry"},
-    "llm": {"llm", "config", "onebot", "policy", "tracing", "conversation", "delivery_policy", "history_images"},
+    "llm": {"llm", "config", "onebot", "policy", "tracing", "conversation", "delivery_policy", "history_images", "log_context"},
     "plugin": {"plugin", "rules", "onebot", "tracing", "conversation", "sandbox", "delivery_policy"},
 }
 

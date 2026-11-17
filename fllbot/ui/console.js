@@ -857,7 +857,7 @@ var systemFields = [
   ['llm.cooldown_seconds', 'AI 对话冷却（秒）', 'number', '自然语言智能体的冷却在“配置 → 默认行为”中设置，单群策略可独立覆盖。'],
   ['llm.max_context_messages', '最多携带的上下文消息数', 'number'],
   ['logging.level', '日志详细程度', 'select', '', ['DEBUG', 'INFO', 'WARNING', 'ERROR']],
-  ['bot.error_reply', '命令异常时的回复', 'text', '留空则只记录日志。']
+  ['bot.error_reply', '命令异常时的回复', 'text', '异常时发送给用户；留空则只记录日志。']
 ];
 function getNested(object, path) { return path.split('.').reduce(function (value, key) { return value[key]; }, object); }
 function loadSystem() {

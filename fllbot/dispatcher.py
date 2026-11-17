@@ -11,6 +11,8 @@ from typing import TYPE_CHECKING, Any
 
 from .conversation import CapacityExceeded, ConversationKey, MessageEnvelope, ReceiveSnapshot, receive_scope
 from .event_queue import ConversationQueue
+from .log_context import inbound_message
+from .onebot.connection import ActionError, InvalidDeliveryReceipt
 from .onebot.models import Event, MessageEvent, event_kind
 from .plugin.base import HandlerSpec
 from .plugin.context import Context
@@ -21,6 +23,18 @@ if TYPE_CHECKING:  # pragma: no cover
     from .onebot.connection import OneBotConnection
 
 DISPATCH_KINDS = ("message", "notice", "request", "meta_event")
+
+
+def _log_message_text(event: Event) -> str:
+    """运行日志里展示的入站消息：发送者与可读正文。"""
+    if not isinstance(event, MessageEvent):
+        return ""
+    body = event.readable.strip()
+    if not body:
+        return ""
+    nickname = event.nickname
+    sender = nickname if nickname == str(event.user_id) else f"{nickname}({event.user_id})"
+    return f"{sender}：{body}"
 
 
 class Dispatcher:
@@ -137,7 +151,7 @@ class Dispatcher:
                 trace.add('dedup','duplicate_message','skipped')
                 self.bot.traces.submit(trace,'skipped')
             return
-        with receive_scope(snapshot), activate(trace):
+        with receive_scope(snapshot), activate(trace), inbound_message(_log_message_text(event)):
             if await self.bot.agent_tasks.handle(Context(self.bot, connection, event), defer_reply=True):
                 await self.bot.storage.update_event(envelope.event_key, 'completed', 'agent_control')
                 self.stats['agent_controls'] += 1
@@ -278,7 +292,7 @@ class Dispatcher:
         if trace is None and isinstance(event, MessageEvent):
             trace = MessageTrace(event, connection)
             trace.add('receive', 'received')
-        with activate(trace):
+        with activate(trace), inbound_message(_log_message_text(event)):
             try:
                 with span('dispatch'):
                     await self._dispatch(event, connection, kind)
@@ -406,6 +420,10 @@ class Dispatcher:
             record('handler', 'handler_failed', 'failed', spec.label)
             self.stats["errors"] += 1
             self.logger.error("处理器异常：%s（%s）", spec.label,type(exc).__name__)
+            if isinstance(exc, (ActionError, InvalidDeliveryReceipt, ConnectionError)):
+                # 发送/协议失败已由投递层记录为 delivery_failed / delivery_uncertain，
+                # 再发错误提示只会重试同一条失败链路，不再回复。
+                return
             await self._reply_error(ctx)
 
     async def _reply_error(self, ctx: Context) -> None:

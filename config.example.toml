@@ -35,7 +35,7 @@ command_prefix = ["/"]
 # 被 @ 时允许省略前缀（@机器人 ping 等价于 /ping）。
 allow_bare_command = true
 # 插件抛出异常时回给用户的话；留空则静默失败（只写日志）。
-error_reply = ""
+error_reply = "抱歉，我刚才处理这条消息时遇到问题，请稍后再试。"
 
 [permission]
 # 非空时只处理这些群（白名单），留空表示不限制。

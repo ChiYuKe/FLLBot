@@ -117,6 +117,21 @@ async def test_cooldown(dbot) -> None:
     assert "slow" not in second.texts()
 
 
+async def test_dispatch_exposes_inbound_message_for_logs(dbot) -> None:
+    from fllbot.log_context import current_inbound_message
+    from fllbot.plugin.base import HandlerSpec
+
+    seen: list[str | None] = []
+
+    async def probe(ctx) -> None:
+        seen.append(current_inbound_message())
+
+    dbot.dispatcher.register(HandlerSpec(kind="message", callback=probe, name="probe", plugin_name="tester"))
+    await dispatch(dbot, group_message("你好，世界"), FakeConnection())
+    assert seen == ["测试用户(30003)：你好，世界"]
+    assert current_inbound_message() is None
+
+
 async def test_builtin_ping_plugin(bot) -> None:
     conn = await dispatch(bot, group_message("/ping"), FakeConnection())
     assert conn.texts() == ["pong"]
