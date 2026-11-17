@@ -161,7 +161,7 @@ Invoke-RestMethod -Headers @{ Authorization = "Bearer $token" } http://127.0.0.1
 `registry` 是宿主工具目录快照信息：`revision` 在插件工具变化后递增，`rebuilds` / `reused` 分别表示重建与
 复用次数，`tools` 为登记工具数。目录契约见 [Agent 与插件](tool-registry.md)。
 `capabilities` 是 `fs.read`、`fs.write`、`net.read`、`net.write`、`email.send`、`qq.send`、`qq.manage`、`memory.read`、
-`system.read`、`qq.send_file`、`screen.capture`、`process.exec` 的子集，`risk` 为 `read|write|destructive`。执行前由 `[sandbox]` 策略裁决；
+`memory.write`、`system.read`、`qq.send_file`、`screen.capture`、`process.exec` 的子集，`risk` 为 `read|write|destructive`。执行前由 `[sandbox]` 策略裁决；
 被拒绝时工具结果返回 `{"error": "tool_blocked", "reason": ...}`，不产生外部动作。设计见
 [群聊智能体与执行沙盒](agent-sandbox.md)。
 

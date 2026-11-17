@@ -12,6 +12,15 @@
 
 ### 变更
 
+- **沙盒能力补全**：新增宿主 `memory.write` 能力，长期记忆的写入工具（`memory__remember` / `memory__forget`）改为声明该能力，
+  自动参与（未 @、未叫到机器人）时由 `ToolExecutor` 在回调前统一拒绝（`tool_blocked` / `automatic_side_effect`），
+  不再依赖插件回调自行检查 `trigger_decision.addressed`；`memory.write` 默认放行、无独立策略开关、不要求 `allow_write`，
+  计入单轮写入额度。`docs/api.md`、`docs/plugin-api.md` 的能力取值同步补充。
+- **docs 插件收尾**：生成文件改为「加载时 + 每 6 小时 + 发送成功后」三时机按保留天数清理，只删除本插件 12 位前缀文件，
+  不清手工放入的文件；默认单文件上限由 8 MB 降为 5 MB（与工作区发文件默认上限一致）；`[sandbox].enabled=false`
+  时插件仍按 `trigger_decision.addressed` 拒绝自动参与生成（`docs_addressed_required`），不产生文件与发送。
+- **CI 与前端门禁**：新增 GitHub Actions（Windows + Python 3.12 + Node 20），对 `master` 推送、PR 与手动触发运行
+  `scripts/verify.ps1`；本地验证脚本在 ruff 后增加 `node --check fllbot/ui/*.js`（未安装 Node 时跳过并提示）。
 - **异常回复策略**：`bot.error_reply` 默认从留空（只记日志）改为「抱歉，我刚才处理这条消息时遇到问题，请稍后再试。」，
   插件处理器异常时用户默认能看到一句明确反馈，留空则恢复静默。发送/协议类失败（`ActionError`、无效回执、连接错误）
   不再追加错误提示，避免在同一条已失败的发送链路上重试；模型失败保持静默收尾、只记录 `model_failed`，
@@ -33,6 +42,11 @@
 
 ### 新增
 
+- **私聊每日额度**：`[llm]` 新增 `private_daily_token_limit` / `private_daily_cost_limit`（默认 0 不限），
+  按「Bot 账号 + 私聊用户」每日累计，与群额度互不影响；超限时在请求模型前拒绝并保留明确原因。
+  用量表迁移到 v28 增加 `self_id` 列与作用域索引，`group_llm_usage` 旧口径不变；管理页「额度与故障恢复」
+  可同时编辑群与私聊额度，文档见 `docs/llm.md`。
+
 - **私聊智能体**：`agent` 插件新增全局设置 `private_enabled`（默认关闭）与 `private_allowed_tools`（私聊独立工具白名单），
   开启后好友私聊的普通文字交给同一套自然语言智能体：使用私聊场景历史、Bot 默认模型/人格/额度，工具执行仍经
   ToolExecutor 与沙盒裁决。私聊与群聊按场景隔离：群历史、群记忆（含摘要与 `agent__search_history`）不进入私聊，
@@ -46,16 +60,16 @@
   只接受受控结构（Word 标题/正文/要点/表格、Excel 行列数据、PPT 页标题/要点），不支持图片、超链接、公式、
   任意 XML 或模板；文件名严格清洗，`=` 开头的单元格按纯文本写入防止公式注入；生成后立即用对应库重新打开校验，
   失败即删除且不发送。三个工具声明 `qq.send_file`，自动参与被沙盒拒绝、需在「允许调用的工具」授权；
-  默认单文件 8 MB、总字数 50000、Word 60 章节、PPT 30 页、表格 2000 行/50 列/20000 单元格，生成文件在
-  `data/plugins/docs/files/` 按保留天数清理。宿主 `pyproject.toml` 新增 python-docx、openpyxl、python-pptx 依赖。
+  默认单文件 5 MB、总字数 50000、Word 60 章节、PPT 30 页、表格 2000 行/50 列/20000 单元格，生成文件在
+  `data/plugins/docs/files/`，加载时、每 6 小时与发送成功后按保留天数清理。宿主 `pyproject.toml` 新增
+  python-docx、openpyxl、python-pptx 依赖。
 
 - **长期记忆插件**：新增独立 `memory` 插件与 `memory__remember` / `memory__recall` / `memory__forget` 工具，
   按「机器人账号 + 群/私聊 + 用户」三层隔离保存群友本人明确要求记住的事实与偏好；`/记忆`、`/忘记 <编号|全部>`
   命令只操作本人在当前会话的记录。默认每人 50 条、单条 200 字、保留 180 天，重复内容去重，写入时与每小时清理
-  过期记忆；密码、令牌、验证码、证件号等凭据会被确定性拒绝。写工具在自动参与（未 @、未叫到机器人）时返回
-  `addressed_required` 且不落库，提示词片段只在对应工具可见时注入；v1 没有新增宿主 `memory.write` 能力，
-  自动参与边界暂由插件回调按 `trigger_decision.addressed` 判断（后续若加宿主能力再迁移）。数据保存在
-  `data/plugins/memory/` 独立数据库。
+  过期记忆；密码、令牌、验证码、证件号等凭据会被确定性拒绝。写工具声明宿主 `memory.write` 能力，
+  自动参与（未 @、未叫到机器人）时由沙盒统一拒绝（`tool_blocked`）且不落库；提示词片段只在对应工具可见时注入。
+  数据保存在 `data/plugins/memory/` 独立数据库。
 
 - **缺氧知识库中文翻译索引**：`oni_knowledge` 新增插件设置 `strings_file`，可填游戏简体中文 .po 文件或
   `StreamingAssets/strings` 目录；检索时把「电解器」这类中文显示名按游戏翻译展开成 `Electrolyzer` 等代码标识符，

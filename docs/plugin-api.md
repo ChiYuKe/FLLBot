@@ -186,7 +186,8 @@ async def write_note(ctx: Context, path: str, content: str) -> dict:
 ```
 
 能力取值为 `fs.read`、`fs.write`、`net.read`、`net.write`、`email.send`、`qq.send`、`qq.send_file`、`qq.manage`、
-`memory.read`、`system.read`、`screen.capture`、`process.exec`；`risk` 为 `read`、`write`、`destructive`。未声明能力的旧工具保持原有权限行为。
+`memory.read`、`memory.write`、`system.read`、`screen.capture`、`process.exec`；`risk` 为 `read`、`write`、`destructive`。未声明能力的旧工具保持原有权限行为。
+默认策略下 `memory.read` / `memory.write` / `system.read` 可用且没有独立开关；`memory.write` 风险为 `write`，自动参与时与其他写能力一样被要求明确请求。
 声明后，宿主按 `[sandbox]` 策略检查能力开关、参数中的路径与链接、发起者权限、自动参与边界和本轮额度；
 被拒绝时回调不会执行，模型收到 `{"error": "tool_blocked", "reason": ...}`。文件与联网应通过
 `ctx.sandbox.files` / `ctx.sandbox.network`，不要自行打开路径或创建 HTTP 客户端。详见
