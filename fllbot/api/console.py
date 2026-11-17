@@ -191,6 +191,11 @@ def create_console_router(bot: FLLBot) -> APIRouter:
             raise HTTPException(409, '轮次已结束或不在当前进程运行，不能重新执行')
         return {'accepted':True, 'turn_id':turn_id}
 
+    @router.get('/tools/stats', summary='工具执行聚合统计（不含参数与结果正文）')
+    async def tool_execution_stats(days: int = Query(default=7, ge=1, le=90),
+                                   self_id: int | None = Query(default=None, gt=0)) -> dict[str, Any]:
+        return await bot.storage.tool_execution_stats(days=days, self_id=self_id)
+
     @router.get("/chat", summary="Agent 聊天信息与唤醒参数")
     async def chat_settings(response: Response) -> dict[str, Any]:
         response.headers['ETag'] = bot.config_revision()

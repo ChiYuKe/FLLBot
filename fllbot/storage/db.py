@@ -1069,6 +1069,69 @@ class Storage:
                 await self.db.rollback()
                 raise
 
+    # -- 工具执行统计 ----------------------------------------------------- #
+    @staticmethod
+    def tool_stats_days(value: Any) -> int:
+        """Bound the statistics window so one query can never scan an unbounded history."""
+        try:
+            days = int(value)
+        except (TypeError, ValueError):
+            days = 7
+        return max(1, min(days, 90))
+
+    async def tool_execution_stats(self, *, days: int = 7, self_id: int | None = None) -> dict[str, Any]:
+        """Aggregate durable tool facts per tool without reading arguments or result bodies.
+
+        ``blocked`` counts executions that were claimed and then cancelled (permission or sandbox
+        re-check, shutdown or executor busy). Sandbox rejections that happen before the claim are
+        not written to ``tool_executions``; they only appear as tool trace events. ``running`` is
+        normally transient and is reset to ``uncertain`` when the process restarts.
+        """
+        days = self.tool_stats_days(days)
+        since = time.time() - days * 86400
+        clauses, params = ['created_at>=?'], [since]
+        if self_id is not None:
+            clauses.append('self_id=?')
+            params.append(int(self_id))
+        where = ' WHERE ' + ' AND '.join(clauses)
+        rows = await (await self.db.execute(
+            "SELECT tool, COUNT(*) AS calls,"
+            " COALESCE(SUM(status='succeeded'),0) AS succeeded,"
+            " COALESCE(SUM(status='failed'),0) AS failed,"
+            " COALESCE(SUM(status='uncertain'),0) AS uncertain,"
+            " COALESCE(SUM(status='cancelled'),0) AS blocked,"
+            " COALESCE(SUM(status='running'),0) AS running,"
+            " AVG(CASE WHEN finished_at IS NOT NULL THEN (finished_at-created_at)*1000.0 END) AS avg_ms,"
+            " MAX(created_at) AS last_at"
+            " FROM tool_executions" + where + " GROUP BY tool ORDER BY calls DESC, tool", params)).fetchall()
+        # SQLite has no argmax; pair each tool with the newest row that actually recorded an error.
+        error_rows = await (await self.db.execute(
+            "SELECT e.tool,e.error FROM tool_executions e JOIN ("
+            "SELECT tool,MAX(rowid) AS row_id FROM tool_executions" + where + " AND error<>'' GROUP BY tool"
+            ") latest ON e.rowid=latest.row_id", params)).fetchall()
+        last_errors = {row['tool']: row['error'] for row in error_rows}
+        totals = {'tools': 0, 'calls': 0, 'succeeded': 0, 'failed': 0, 'uncertain': 0, 'blocked': 0, 'running': 0}
+        items = []
+        for row in rows:
+            item = {
+                'tool': row['tool'],
+                'calls': int(row['calls']),
+                'succeeded': int(row['succeeded']),
+                'failed': int(row['failed']),
+                'uncertain': int(row['uncertain']),
+                'blocked': int(row['blocked']),
+                'running': int(row['running']),
+                'avg_ms': round(float(row['avg_ms']), 1) if row['avg_ms'] is not None else None,
+                'last_error': last_errors.get(row['tool']),
+                'last_at': float(row['last_at']) if row['last_at'] is not None else None,
+            }
+            totals['tools'] += 1
+            for key in ('calls', 'succeeded', 'failed', 'uncertain', 'blocked', 'running'):
+                totals[key] += item[key]
+            items.append(item)
+        return {'window': {'days': days, 'since': round(since, 3), 'self_id': self_id},
+                'items': items, 'totals': totals}
+
     async def prepare_delivery(self, delivery_id: str, self_id: int, scene: str, scene_id: int,
                                text: str, chunks: list[str], generation: int, turn_id: str = '', metadata: dict | None = None) -> bool:
         async with self.data_lock:
