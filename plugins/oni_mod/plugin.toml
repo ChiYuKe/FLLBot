@@ -1,0 +1,11 @@
+schema_version = 1
+api_version = 1
+name = "oni_mod"
+version = "0.1.0"
+description = "缺氧 Mod 制作助手：参考本地 Mod 写法与 oni_knowledge 源码，生成工程、编译 dll 并连同 mod.yaml/mod_info.yaml 发到当前会话"
+author = ""
+category = "plugin"
+
+requires_fllbot = ">=0.2,<1"
+requires_python = ">=3.11"
+dependencies = []
