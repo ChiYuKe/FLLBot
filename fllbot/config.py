@@ -189,6 +189,9 @@ class LLMConfig(ModelCapabilities):
     fallback_providers: list[str] = Field(default_factory=list)
     group_daily_token_limit: int = Field(default=0, ge=0)
     group_daily_cost_limit: float = Field(default=0.0, ge=0, allow_inf_nan=False)
+    # 私聊额度按「Bot 账号 + 私聊用户」每日累计，与群额度互不影响；0 表示不限。
+    private_daily_token_limit: int = Field(default=0, ge=0)
+    private_daily_cost_limit: float = Field(default=0.0, ge=0, allow_inf_nan=False)
     max_concurrency: int = Field(default=6, ge=1, le=100)
 
     input_price: float = Field(default=0.0, ge=0, allow_inf_nan=False)

@@ -426,8 +426,10 @@ class ChatService:
         *,
         ok: bool,
         error: str = "",
+        self_id: int | None = None,
     ) -> None:
-        return await self.gateway._record_usage(scene, scene_id, provider, model, usage, latency_ms, ok=ok, error=error)
+        return await self.gateway._record_usage(scene, scene_id, provider, model, usage, latency_ms,
+                                                ok=ok, error=error, self_id=self_id)
 
     async def test(self, prompt: str, *, persona_name: str | None = None, provider: str | None = None) -> ChatReply:
         """管理端自测：不带历史，直接用默认人格回答。"""

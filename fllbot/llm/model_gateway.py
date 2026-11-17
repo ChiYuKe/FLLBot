@@ -121,15 +121,30 @@ class ModelGateway:
             self_id=self_id,
             allow_fallback=allow_fallback,
         )
-        if scene != "group" or not (self.config.group_daily_token_limit or self.config.group_daily_cost_limit):
+        private = scene == "private"
+        if private:
+            token_limit = self.config.private_daily_token_limit
+            cost_limit = self.config.private_daily_cost_limit
+        else:
+            token_limit = self.config.group_daily_token_limit
+            cost_limit = self.config.group_daily_cost_limit
+        if scene not in {"group", "private"} or not (token_limit or cost_limit):
             return await self._complete(messages, **options)
-        # Check and record within the same group lock, including concurrent admin/summary calls.
-        async with self._quota_pool.lease(scene_id):
+        # Check and record within the same quota scope lock, including concurrent admin/summary calls.
+        # 群额度按群号共享；私聊额度按「Bot 账号 + 用户」隔离，避免跨账号或跨用户串额。
+        if private:
+            scope = ("private", int(self_id or 0), int(scene_id))
+        else:
+            scope = int(scene_id)
+        async with self._quota_pool.lease(scope):
             name = provider or self.provider_name(scene, scene_id, task, self_id)
             _, resolved = self.client.resolve(provider=name)
             prepared = await self.client.prepare_messages(messages, provider=name, tools=tools, max_tokens=max_tokens)
             midnight = datetime.now().astimezone().replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
-            usage = await self.storage.group_llm_usage(scene_id, midnight)
+            if private:
+                usage = await self.storage.private_llm_usage(scene_id, midnight, self_id=int(self_id or 0))
+            else:
+                usage = await self.storage.group_llm_usage(scene_id, midnight)
             candidates = [resolved]
             if allow_fallback:
                 candidates += [
@@ -145,19 +160,22 @@ class ModelGateway:
                 )
                 for item in candidates
             ]
-            if (
-                self.config.group_daily_token_limit
-                and usage["tokens"] + max(p + o for p, o, _ in reservations) > self.config.group_daily_token_limit
-            ):
-                raise LLMError("本群今日 Token 额度不足，已暂停本次模型调用")
+            if token_limit and usage["tokens"] + max(p + o for p, o, _ in reservations) > token_limit:
+                raise LLMError(
+                    "该用户今日私聊 Token 额度不足，已暂停本次模型调用" if private
+                    else "本群今日 Token 额度不足，已暂停本次模型调用"
+                )
             estimated_cost = max(
                 (p * item.input_price + o * item.output_price) / 1_000_000 for p, o, item in reservations
             )
-            if self.config.group_daily_cost_limit:
+            if cost_limit:
                 if any(item.input_price <= 0 or item.output_price <= 0 for item in candidates):
                     raise LLMError("费用额度已启用，请为使用的模型及备用服务填写正数输入、输出单价")
-                if usage["cost"] + estimated_cost > self.config.group_daily_cost_limit:
-                    raise LLMError("本群今日费用额度不足，已暂停本次模型调用")
+                if usage["cost"] + estimated_cost > cost_limit:
+                    raise LLMError(
+                        "该用户今日私聊费用额度不足，已暂停本次模型调用" if private
+                        else "本群今日费用额度不足，已暂停本次模型调用"
+                    )
             return await self._complete(prepared, **options)
 
     def _truncated_tool_retry_cap(
@@ -227,6 +245,7 @@ class ModelGateway:
                     (time.perf_counter() - started) * 1000,
                     ok=False,
                     error=str(exc),
+                    self_id=self_id,
                 )
                 raise
             for key, value in (result.usage or {}).items():
@@ -249,7 +268,8 @@ class ModelGateway:
         record("model", "response_received", component=result.provider)
         self.last_latency_ms = latency
         self.last_error = None
-        await self._record_usage(scene or "", scene_id, result.provider, result.model, usage, latency, ok=True)
+        await self._record_usage(scene or "", scene_id, result.provider, result.model, usage, latency, ok=True,
+                                 self_id=self_id)
         text = result.text
         tool_calls = result.tool_calls
         if result.finish_reason == "length":
@@ -292,6 +312,7 @@ class ModelGateway:
         *,
         ok: bool,
         error: str = "",
+        self_id: int | None = None,
     ) -> None:
         try:
             if not model:
@@ -314,6 +335,7 @@ class ModelGateway:
                 usage_estimated=bool(usage.get("estimated", 0)),
                 cached_prompt_tokens=usage.get('cached_prompt_tokens'),
                 turn_id=current_turn_id(),
+                self_id=int(self_id or 0),
             )
         except Exception:  # pragma: no cover - 统计失败不影响对话
             self.logger.exception("记录 LLM 用量失败")

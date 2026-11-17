@@ -181,7 +181,13 @@ async def test_private_and_group_context_never_leak_into_each_other(tmp_path, mo
         await bot.permissions.save_group(20002, enabled=True, config={'policy': {
             'auto_group': True, 'trigger_modes': ['all'], 'cooldown_seconds': 0}})
         await enable_private(bot)
-        complete = AsyncMock(return_value=reply('收到'))
+
+        async def model(*args, **kwargs):
+            # 会话起点是首次请求时间 +1ms；假模型必须慢于它，写入的历史才落在起点之后。
+            await asyncio.sleep(0.01)
+            return reply('收到')
+
+        complete = AsyncMock(side_effect=model)
         monkeypatch.setattr(bot.chat, 'complete', complete)
         connection = FakeConnection()
         await dispatch(bot, group_message('GROUP_MARKER', message_id=11), connection)

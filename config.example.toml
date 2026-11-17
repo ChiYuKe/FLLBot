@@ -107,6 +107,9 @@ output_price = 0.0
 # 每个群独立累计，0 表示不限；按服务器本地日期重置。
 group_daily_token_limit = 0
 group_daily_cost_limit = 0.0
+# 每个私聊用户独立累计（按 Bot 账号 + 用户），0 表示不限；与群额度互不影响。
+private_daily_token_limit = 0
+private_daily_cost_limit = 0.0
 # 临时服务故障时按顺序切换；名称必须已在 providers 中配置。
 fallback_providers = []
 # 可选：手动指定上下文窗口（Token），优先于模型目录自动发现；留空时跟随模型目录。

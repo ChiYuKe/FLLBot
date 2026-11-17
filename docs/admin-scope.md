@@ -84,6 +84,8 @@
 | `llm.fallback_providers` | `[]` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `llm.group_daily_token_limit` | `0` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `llm.group_daily_cost_limit` | `0.0` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
+| `llm.private_daily_token_limit` | `0` | 模型默认 | 后续私聊请求/消息；按 Bot 账号+私聊用户每日累计，保存后不追溯已开始操作 |
+| `llm.private_daily_cost_limit` | `0.0` | 模型默认 | 后续私聊请求/消息；按 Bot 账号+私聊用户每日累计，保存后不追溯已开始操作 |
 | `llm.max_concurrency` | `6` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `llm.input_price` | `0.0` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |
 | `llm.output_price` | `0.0` | 模型默认 | 后续请求/消息；保存后不追溯已开始操作 |

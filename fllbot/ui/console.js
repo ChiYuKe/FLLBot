@@ -276,6 +276,8 @@ function loadProviders() {
     var form = h('form', {class:'settings-form'}), grid = h('div', {class:'form-grid'});
     var token = h('input', {type:'number', min:0, step:1, 'aria-label':'每群每日 Token 上限'}); token.value = config.group_daily_token_limit || 0;
     var cost = h('input', {type:'number', min:0, step:'any', 'aria-label':'每群每日费用上限'}); cost.value = config.group_daily_cost_limit || 0;
+    var privateToken = h('input', {type:'number', min:0, step:1, 'aria-label':'每用户每日 Token 上限'}); privateToken.value = config.private_daily_token_limit || 0;
+    var privateCost = h('input', {type:'number', min:0, step:'any', 'aria-label':'每用户每日费用上限'}); privateCost.value = config.private_daily_cost_limit || 0;
     var defaultProvider = h('select', {'aria-label':'默认供应商'});
     items.forEach(function (item) {
       defaultProvider.appendChild(h('option', {value:item.name, text:item.name}));
@@ -285,18 +287,20 @@ function loadProviders() {
     var fallback = h('input', {type:'text', 'aria-label':'备用模型服务', placeholder:'按顺序填写服务名称，用逗号分隔'}); fallback.value = (config.fallback_providers || []).join(', ');
     grid.appendChild(h('label', {class:'setting-field'}, h('span', {text:'每群每日 Token 上限（0 为不限）'}), token));
     grid.appendChild(h('label', {class:'setting-field'}, h('span', {text:'每群每日费用上限（0 为不限）'}), cost));
+    grid.appendChild(h('label', {class:'setting-field'}, h('span', {text:'每用户每日 Token 上限（私聊，0 为不限）'}), privateToken));
+    grid.appendChild(h('label', {class:'setting-field'}, h('span', {text:'每用户每日费用上限（私聊，0 为不限）'}), privateCost));
     grid.appendChild(h('label', {class:'setting-field'}, h('span', {text:'默认供应商'}), defaultProvider));
     grid.appendChild(h('label', {class:'setting-field'}, h('span', {text:'备用模型服务'}), fallback));
     var save = h('button', {type:'submit',class:'btn primary',text:'保存路由与额度'}), note = h('p', {class:'settings-note',role:'status'});
     form.appendChild(h('h3', {text:'额度与故障恢复'})); form.appendChild(grid);
-    form.appendChild(h('p', {class:'settings-note',text:'额度对每个群分别累计，按服务器日期重置，并预留本轮回复预算。费用使用配置单价估算，需为主模型和备用模型填写单价。遇到临时服务故障才尝试备用模型。'}));
+    form.appendChild(h('p', {class:'settings-note',text:'群额度按群分别累计；私聊额度按每个 Bot 账号与私聊用户分别累计，两类互不影响。均按服务器本地日期零点重置，并预留本轮回复预算。费用使用配置单价估算，需为主模型和备用模型填写单价。遇到临时服务故障才尝试备用模型。'}));
     form.appendChild(save); form.appendChild(note);
     form.addEventListener('submit', function (event) {
       event.preventDefault(); if (!form.reportValidity()) return;
       var names = fallback.value.split(/[,，]/).map(function (value) {return value.trim();}).filter(Boolean);
       if (names.some(function (name) {return !items.some(function (item) {return item.name === name;});})) { note.textContent = '备用服务名称必须是上面已有的模型服务'; return; }
       save.disabled = true;
-      request('/api/config', {method:'PATCH',headers:configRevision?{'If-Match':configRevision}:{},body:{llm:{default:defaultProvider.value,group_daily_token_limit:Number(token.value),group_daily_cost_limit:Number(cost.value),fallback_providers:names}}}).then(function (result) {
+      request('/api/config', {method:'PATCH',headers:configRevision?{'If-Match':configRevision}:{},body:{llm:{default:defaultProvider.value,group_daily_token_limit:Number(token.value),group_daily_cost_limit:Number(cost.value),private_daily_token_limit:Number(privateToken.value),private_daily_cost_limit:Number(privateCost.value),fallback_providers:names}}}).then(function (result) {
         if (agentModelRevision === configRevision) {
           agentModelRevision = result.revision;
           modelProviderConfig.default = result.config.llm.default;

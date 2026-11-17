@@ -15,9 +15,13 @@ from .backup import DatabaseFileLock, create_backup
 from .locking import SettingsLock
 from .memory import GroupMemoryStore
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 
 MIGRATIONS: dict[int, list[str]] = {
+    28: [
+        "ALTER TABLE llm_usage ADD COLUMN self_id INTEGER NOT NULL DEFAULT 0",
+        "CREATE INDEX IF NOT EXISTS idx_llm_usage_scope ON llm_usage(self_id, scene, scene_id, created_at)",
+    ],
     27: ["ALTER TABLE group_memory_messages ADD COLUMN mentions TEXT NOT NULL DEFAULT '[]'"],
     26: [
         "ALTER TABLE chat_messages ADD COLUMN images TEXT NOT NULL DEFAULT '[]'",
@@ -1334,6 +1338,7 @@ class Storage:
         usage_estimated: bool = False,
         cached_prompt_tokens: int | None = None,
         turn_id: str = "",
+        self_id: int = 0,
     ) -> None:
         if (cached_prompt_tokens is not None and (isinstance(cached_prompt_tokens, bool)
                 or not isinstance(cached_prompt_tokens, int) or not 0 <= cached_prompt_tokens <= prompt_tokens)):
@@ -1342,7 +1347,8 @@ class Storage:
             try:
                 await self.db.execute(
                     "INSERT INTO llm_usage (scene, scene_id, provider, model, prompt_tokens, completion_tokens,"
-                    " latency_ms, cost, ok, error, created_at, usage_estimated, turn_id,cached_prompt_tokens) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " latency_ms, cost, ok, error, created_at, usage_estimated, turn_id,cached_prompt_tokens,self_id)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
                         scene,
                         int(scene_id),
@@ -1358,6 +1364,7 @@ class Storage:
                         int(usage_estimated),
                         turn_id,
                         cached_prompt_tokens,
+                        int(self_id or 0),
                     ),
                 )
                 await self.db.commit()
@@ -1365,15 +1372,32 @@ class Storage:
                 await self.db.rollback()
                 raise
 
-    async def group_llm_usage(self, group_id: int, since: float) -> dict[str, Any]:
-        cursor = await self.db.execute(
+    async def scene_llm_usage(self, scene: str, scene_id: int, since: float,
+                              *, self_id: int | None = None) -> dict[str, Any]:
+        """按场景作用域汇总某时间点之后的 Token 与费用。
+
+        ``self_id`` 为 ``None`` 时沿用旧的跨 Bot 汇总口径；私聊额度会同时限定 Bot 账号，
+        避免用户 QQ 号相同或跨账号时串额。
+        """
+        query = (
             "SELECT COALESCE(SUM(prompt_tokens + completion_tokens), 0) AS tokens,"
             " COALESCE(SUM(cost), 0) AS cost FROM llm_usage"
-            " WHERE scene = 'group' AND scene_id = ? AND created_at >= ?",
-            (int(group_id), since),
+            " WHERE scene = ? AND scene_id = ? AND created_at >= ?"
         )
+        params: list[Any] = [str(scene), int(scene_id), float(since)]
+        if self_id is not None:
+            query += " AND self_id = ?"
+            params.append(int(self_id))
+        cursor = await self.db.execute(query, params)
         row = await cursor.fetchone()
         return {"tokens": int(row["tokens"]), "cost": float(row["cost"])}
+
+    async def group_llm_usage(self, group_id: int, since: float) -> dict[str, Any]:
+        # 保留旧口径：同群多账号共享群额度，不按 self_id 拆分。
+        return await self.scene_llm_usage("group", group_id, since)
+
+    async def private_llm_usage(self, user_id: int, since: float, *, self_id: int = 0) -> dict[str, Any]:
+        return await self.scene_llm_usage("private", user_id, since, self_id=self_id)
 
     async def llm_usage_summary(self, since: float) -> dict[str, Any]:
         """聚合某时间点之后的调用次数、token、延迟与费用。"""
