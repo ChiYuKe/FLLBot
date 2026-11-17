@@ -12,6 +12,10 @@
 
 ### 变更
 
+- **修复冷启动冷却误判**：`PermissionManager.cooldown_ok` / `cooldown_remaining` 不再用 `0.0` 当作“从未调用”的哨兵值；
+  `time.monotonic()` 从系统启动开始计时，刚开机的机器（例如干净的 CI runner）上它可能小于冷却窗口，导致首次调用
+  被误判为冷却中（真实触发场景：CI 上 emotion 悄悄话工具首次调用返回 `cooldown`）。改用“键不存在”判断，
+  补 `tests/test_cooldown_clock.py` 回归。
 - **工具调用体验（更智能）**：参数校验失败时按 Schema 做有限无损自愈（数字字符串→数字、`"true"/"false"`→布尔、
   单值→数组、`{` 开头的 JSON 字符串→对象，递归 items/properties），修正后仍严格校验，只记 `arguments_repaired`
   追踪且不记录参数值；失败结果统一附中文 `message`，`invalid_arguments` 额外给出人类可读字段路径、期望约束、

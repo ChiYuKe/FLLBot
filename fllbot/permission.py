@@ -261,8 +261,10 @@ class PermissionManager:
         if seconds <= 0:
             return True
         now = time.monotonic()
-        last = self._cooldowns.get(key, 0.0)
-        if now - last < seconds:
+        # monotonic() 从系统启动开始计时，刚启动的机器可能小于任何冷却窗口；
+        # 因此不能拿 0.0 当“从未调用”的哨兵值，否则首次调用会被误判为冷却中。
+        last = self._cooldowns.get(key)
+        if last is not None and now - last < seconds:
             return False
         self._cooldowns[key] = now
         self._cleanup_cooldowns(now)
@@ -271,7 +273,9 @@ class PermissionManager:
     def cooldown_remaining(self, key: tuple[str, str, int], seconds: float) -> float:
         if seconds <= 0:
             return 0.0
-        last = self._cooldowns.get(key, 0.0)
+        last = self._cooldowns.get(key)
+        if last is None:
+            return 0.0
         return max(0.0, seconds - (time.monotonic() - last))
 
     def _cleanup_cooldowns(self, now: float) -> None:
