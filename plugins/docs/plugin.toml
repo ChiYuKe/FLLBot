@@ -1,0 +1,11 @@
+schema_version = 1
+api_version = 1
+name = "docs"
+version = "0.1.0"
+description = "文档生成：按群友要求生成 Word、Excel、PPT，并通过 QQ 文件附件发送"
+author = ""
+category = "plugin"
+
+requires_fllbot = ">=0.2,<1"
+requires_python = ">=3.11"
+dependencies = ["python-docx>=1.2,<2", "openpyxl>=3.1,<4", "python-pptx>=1.0,<2"]
