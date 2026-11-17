@@ -12,6 +12,7 @@ import time
 import zipfile
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -247,6 +248,8 @@ async def test_agent_tools_create_build_and_deliver(tmp_path: Path) -> None:
         )
         assert delivered["sent"] is True
         assert delivered["zip"]["sent"] is True and delivered["dll"]["sent"] is True
+        assert delivered["silent"] is True
+        assert 0 < len(delivered["reply"]) <= 60
         attachments = [
             segment
             for _, _, segments in connection.sent
@@ -263,6 +266,54 @@ async def test_agent_tools_create_build_and_deliver(tmp_path: Path) -> None:
                 "AgentMod/mod_info.yaml",
                 "AgentMod/AgentMod.dll",
             }
+    finally:
+        await bot.stop()
+
+
+def _fake_built_project(root: Path, name: str = "Sample") -> Path:
+    """在会话工作区里放一个“已编译”的假工程，供不起工具链的 deliver 测试使用。"""
+    mod_dir = root / service.PROJECT_ROOT / name
+    _write_all(mod_dir, _files(name))
+    release = mod_dir / "bin" / "Release"
+    release.mkdir(parents=True, exist_ok=True)
+    (release / f"{name}.dll").write_bytes(b"MZfake")
+    (release / service.BUILD_MARKER).write_text(
+        json.dumps({"built_at": time.time(), "dll": f"{name}.dll", "bytes": 6, "project": name}),
+        encoding="utf-8",
+    )
+    return mod_dir
+
+
+async def test_deliver_is_silent_only_when_every_attachment_delivered(tmp_path: Path, monkeypatch) -> None:
+    plugin_dir = tmp_path / "plugins"
+    plugin_dir.mkdir()
+    shutil.copytree(ROOT / "plugins" / "oni_mod", plugin_dir / "oni_mod")
+    bot = await make_bot(tmp_path, plugin_dirs=[plugin_dir])
+    try:
+        installed = bot.plugins.get("oni_mod")
+        assert installed is not None
+        ctx = Context(bot, FakeConnection(), parse_event(group_message("把 mod 发我", at=10001)))
+        ctx.trigger_decision = SimpleNamespace(trigger_kind="at", addressed=True)
+        _fake_built_project(ctx.sandbox.workspace_root)
+
+        monkeypatch.setattr(module, "send_media_reply", AsyncMock(return_value=True))
+        result = await module.deliver(ctx, "Sample")
+        assert result["sent"] is True
+        assert result["zip"]["sent"] is True and result["dll"]["sent"] is True
+        assert result["silent"] is True
+        assert 0 < len(result["reply"]) <= 60
+
+        # 只有部分附件送达时不能直出，让模型如实说明缺了哪部分。
+        monkeypatch.setattr(module, "send_media_reply", AsyncMock(side_effect=[True, False]))
+        partial = await module.deliver(ctx, "Sample")
+        assert partial["sent"] is True and partial["dll"]["sent"] is False
+        assert "silent" not in partial and "reply" not in partial
+
+        # 完全没送达时同样保持普通返回并带 error。
+        monkeypatch.setattr(module, "send_media_reply", AsyncMock(return_value=False))
+        failed = await module.deliver(ctx, "Sample")
+        assert failed["sent"] is False and failed["error"] == "send_failed"
+        assert "silent" not in failed and "reply" not in failed
     finally:
         await bot.stop()
 

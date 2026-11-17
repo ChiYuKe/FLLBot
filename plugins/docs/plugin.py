@@ -36,6 +36,8 @@ class DocsPlugin(Plugin):
 plugin = DocsPlugin.from_manifest(__file__)
 
 _KIND_LABELS = {"docx": "Word 文档", "xlsx": "Excel 表格", "pptx": "PPT 演示文稿"}
+# 附件确实送达后由宿主直出这句确认，省掉一次模型往返；生成或发送失败绝不设置。
+_DELIVERED_REPLY = "文档已经发给你啦"
 
 plugin.setting(
     "enabled",
@@ -283,6 +285,8 @@ async def _send_document(
         ctx.logger.debug("清理旧文档文件失败")
     return {
         "sent": True,
+        "silent": True,
+        "reply": _DELIVERED_REPLY,
         "filename": display_name,
         "format": kind,
         "bytes": len(payload),

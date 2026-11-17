@@ -211,8 +211,49 @@ async def test_send_whisper_tool_requires_addressed_turn(tmp_path, monkeypatch):
         output, _ = await bot.tool_executor.execute(
             ctx, "emotion__send_whisper", {"kind": "secret"}, registry, refresh=lambda _: ([], registry)
         )
-        assert json.loads(output)["error"] == "addressed_required"
+        payload = json.loads(output)
+        assert payload["error"] == "addressed_required"
+        assert "silent" not in payload and "reply" not in payload
         assert connection.calls == []
+    finally:
+        await bot.stop()
+
+
+async def test_send_whisper_tool_is_silent_only_after_delivery(tmp_path, monkeypatch):
+    bot, emotion, engine, connection = await setup_emotion(tmp_path, monkeypatch)
+    try:
+        entry = bot.tools.snapshot().get("emotion__send_whisper")
+        assert entry is not None
+        registry = {entry.name: (entry.owner, entry.spec)}
+        ctx = Context(
+            bot, connection, parse_event(group_message("悄悄跟我说一句", at=SELF)), handler=entry.spec
+        )
+        ctx.trigger_decision = SimpleNamespace(trigger_kind="at", addressed=True)
+        output, silent = await bot.tool_executor.execute(
+            ctx, "emotion__send_whisper", {"kind": "secret"}, registry, refresh=lambda _: ([], registry)
+        )
+        payload = json.loads(output)
+        assert payload["sent"] is True
+        assert payload["silent"] is True
+        assert 0 < len(payload["reply"]) <= 60
+        assert silent is True
+        assert any(call[0] == "send_private_msg" for call in connection.calls)
+
+        # 发送失败（或结果不确定）时不能直出确认，交给模型如实说明。
+        monkeypatch.setattr(
+            engine, "whisper_to", AsyncMock(return_value={"sent": False, "error": "send_failed"})
+        )
+        callback = next(tool.callback for tool in emotion.ai_tools if tool.name == "send_whisper")
+        failed_ctx = Context(
+            bot,
+            connection,
+            parse_event(group_message("悄悄跟我说一句", user_id=OTHER, message_id=2, at=SELF)),
+            plugin=emotion,
+        )
+        failed_ctx.trigger_decision = SimpleNamespace(trigger_kind="at", addressed=True)
+        failed = await callback(failed_ctx, kind="secret")
+        assert failed["sent"] is False and failed["error"] == "send_failed"
+        assert "silent" not in failed and "reply" not in failed
     finally:
         await bot.stop()
 

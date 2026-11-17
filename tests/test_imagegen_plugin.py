@@ -285,6 +285,9 @@ async def test_local_tool_draws_without_remote_service(tmp_path: Path, monkeypat
         assert result["sent"] is True
         assert result["provider"] == "local"
         assert result["expression"] == "angry"
+        assert result["silent"] is True
+        assert 0 < len(result["reply"]) <= 60
+        assert "imagegen__draw" not in result["reply"]
         segments, _ = send_media.call_args.args[1:3]
         assert [segment.type for segment in segments] == ["image"]
     finally:
@@ -341,6 +344,8 @@ async def test_tool_sends_image_and_reports_sent(tmp_path: Path, monkeypatch: py
 
         assert result["sent"] is True
         assert result["size"] == "1024x1024"
+        assert result["silent"] is True
+        assert result["reply"]
         segments, content = send_media.call_args.args[1:3]
         assert [segment.type for segment in segments] == ["image"]
         assert str(segments[0].data["file"]).startswith("base64://")
@@ -372,6 +377,7 @@ async def test_tool_reports_missing_config(tmp_path: Path, monkeypatch: pytest.M
         result = await spec.callback(ctx, prompt="猫")
 
         assert result["error"] == "imagegen_not_configured"
+        assert "silent" not in result and "reply" not in result
         send_media.assert_not_awaited()
     finally:
         await bot.stop()
@@ -413,6 +419,7 @@ async def test_tool_cooldown_returns_retry_after(tmp_path: Path, monkeypatch: py
         assert first["sent"] is True
         assert second["error"] == "imagegen_cooldown"
         assert second["retry_after"] > 0
+        assert "silent" not in second and "reply" not in second
     finally:
         await bot.stop()
 
@@ -440,7 +447,36 @@ async def test_tool_requires_addressed_trigger(tmp_path: Path, monkeypatch: pyte
         result = await spec.callback(ctx, prompt="一只猫")
 
         assert result["error"] == "imagegen_addressed_required"
+        assert "silent" not in result and "reply" not in result
         send_media.assert_not_awaited()
+    finally:
+        await bot.stop()
+
+
+async def test_tool_not_delivered_is_not_silent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    plugin_dir = tmp_path / "plugins"
+    plugin_dir.mkdir()
+    shutil.copytree(ROOT / "plugins" / "imagegen", plugin_dir / "imagegen")
+    bot = await make_bot(tmp_path, plugin_dirs=[plugin_dir])
+    try:
+        installed = bot.plugins.get("imagegen")
+        assert installed is not None
+        await installed.settings.update({"provider": "local", "cooldown_seconds": 0})
+        monkeypatch.setattr(bot.deliveries, "send_media", AsyncMock(return_value=False))
+        spec = next(tool for tool in installed.ai_tools if tool.name == "draw")
+        ctx = Context(
+            bot=bot,
+            connection=FakeConnection(),
+            event=parse_event(group_message("画个猫猫", at=10001)),
+            plugin=installed,
+            handler=spec,
+        )
+
+        result = await spec.callback(ctx, prompt="猫猫")
+
+        assert result["sent"] is False
+        assert result["error"] == "imagegen_not_delivered"
+        assert "silent" not in result and "reply" not in result
     finally:
         await bot.stop()
 

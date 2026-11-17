@@ -157,6 +157,9 @@ async def test_write_docx_generates_reopenable_word_file(docs_bot, monkeypatch) 
         filename="季度总结.docx",
     )
     assert result["sent"] is True
+    assert result["silent"] is True
+    assert 0 < len(result["reply"]) <= 60
+    assert "docs__write_docx" not in result["reply"]
     assert result["format"] == "docx" and result["sections"] == 4 and result["tables"] == 1
     name, payload, content = attachment(sender)
     assert name == "季度总结.docx" and "Word 文档" in content
@@ -195,6 +198,7 @@ async def test_write_xlsx_generates_reopenable_workbook(docs_bot, monkeypatch) -
         filename="成绩.xlsx",
     )
     assert result["sent"] is True
+    assert result["silent"] is True and result["reply"]
     assert (result["rows"], result["columns"], result["header"]) == (3, 3, True)
     name, payload, _content = attachment(sender)
     assert name == "成绩.xlsx"
@@ -234,6 +238,7 @@ async def test_write_pptx_generates_reopenable_presentation(docs_bot, monkeypatc
         filename="项目汇报.pptx",
     )
     assert result["sent"] is True and result["slides"] == 3
+    assert result["silent"] is True and result["reply"]
     name, payload, _content = attachment(sender)
     assert name == "项目汇报.pptx"
 
@@ -261,6 +266,7 @@ async def test_xml_like_text_is_written_literally(docs_bot, monkeypatch) -> None
         sections=[{"paragraph": raw}, {"paragraph": formula}],
     )
     assert result["sent"] is True
+    assert result["silent"] is True and result["reply"]
     _name, payload, _content = attachment(sender)
     document = Document(io.BytesIO(payload))
     texts = [paragraph.text for paragraph in document.paragraphs]
@@ -279,10 +285,12 @@ async def test_filename_forces_extension_and_falls_back_to_title(docs_bot, monke
     for provided, expected in cases:
         result = await callback(context(bot, installed), title="季度报告", sections=SECTIONS, filename=provided)
         assert result["sent"] is True and result["filename"] == expected
+        assert result["silent"] is True and result["reply"]
         assert attachment(sender)[0] == expected
 
     derived = await callback(context(bot, installed), title="周报：总结/结果", sections=SECTIONS)
     assert derived["sent"] is True and derived["filename"] == "周报总结结果.docx"
+    assert derived["silent"] is True and derived["reply"]
 
 
 @pytest.mark.parametrize(
@@ -298,6 +306,7 @@ async def test_filename_rejects_escape_hidden_and_unsafe_names(docs_bot, monkeyp
     )
     assert result["error"] == "docs_filename_invalid"
     assert "message" in result
+    assert "silent" not in result and "reply" not in result
     sender.assert_not_awaited()
     assert data_files(installed) == []
 
@@ -324,6 +333,7 @@ async def test_docx_section_structure_is_restricted(docs_bot, monkeypatch, secti
         context(bot, installed), title="报告", sections=sections
     )
     assert result["error"] == "docs_content_invalid"
+    assert "silent" not in result and "reply" not in result
     sender.assert_not_awaited()
     assert data_files(installed) == []
 
@@ -422,6 +432,7 @@ async def test_automatic_participation_is_blocked_by_sandbox(docs_bot, monkeypat
     output, _ = await bot.tool_executor.execute(explicit, spec.qualified_name, arguments, registry)
     allowed = json.loads(output)
     assert allowed["sent"] is True and allowed["filename"] == "报告.docx"
+    assert allowed["silent"] is True and allowed["reply"]
     sender.assert_awaited_once()
 
 
@@ -460,6 +471,7 @@ async def test_send_failure_reports_error_and_removes_file(docs_bot, monkeypatch
     assert result["sent"] is False
     assert result["error"] == "docs_not_delivered"
     assert "送达" in result["message"]
+    assert "silent" not in result and "reply" not in result
     sender.assert_awaited_once()
     assert other.exists()
     assert data_files(installed) == [other]
@@ -479,6 +491,7 @@ async def test_missing_dependency_returns_readable_error(docs_bot, monkeypatch) 
     )
     assert result["error"] == "docs_dependency_missing"
     assert "python-docx" in result["message"]
+    assert "silent" not in result and "reply" not in result
     sender.assert_not_awaited()
     assert data_files(installed) == []
 
@@ -499,6 +512,7 @@ async def test_generation_failure_keeps_other_files(docs_bot, monkeypatch) -> No
         context(bot, installed), title="报告", sections=SECTIONS
     )
     assert result["error"] == "docs_generate_failed"
+    assert "silent" not in result and "reply" not in result
     sender.assert_not_awaited()
     assert other.exists()
     assert data_files(installed) == [other]
@@ -520,6 +534,7 @@ async def test_validation_failure_removes_only_current_file(docs_bot, monkeypatc
         context(bot, installed), title="报告", sections=SECTIONS
     )
     assert result["error"] == "docs_generate_failed"
+    assert "silent" not in result and "reply" not in result
     sender.assert_not_awaited()
     assert other.exists()
     assert data_files(installed) == [other]
@@ -544,6 +559,7 @@ async def test_old_files_are_cleaned_after_successful_send(docs_bot, monkeypatch
         context(bot, installed), title="新报告", sections=SECTIONS
     )
     assert result["sent"] is True
+    assert result["silent"] is True and result["reply"]
     sender.assert_awaited_once()
     assert not old.exists()
     assert manual.exists()
@@ -609,6 +625,7 @@ async def test_automatic_participation_callback_returns_addressed_required(docs_
     result = await spec(automatic, **arguments)
     assert result["error"] == "docs_addressed_required"
     assert "明确请求" in result["message"]
+    assert "silent" not in result and "reply" not in result
     sender.assert_not_awaited()
     assert data_files(installed) == []
 
@@ -616,6 +633,7 @@ async def test_automatic_participation_callback_returns_addressed_required(docs_
     explicit.trigger_decision = SimpleNamespace(trigger_kind="automatic", addressed=True)
     result = await spec(explicit, **arguments)
     assert result["sent"] is True
+    assert result["silent"] is True and result["reply"]
     sender.assert_awaited_once()
 
 
@@ -663,5 +681,6 @@ async def test_disabled_plugin_returns_readable_error(docs_bot, monkeypatch) -> 
         context(bot, installed), title="汇报", slides=[{"title": "一", "bullets": []}]
     )
     assert result["error"] == "docs_disabled"
+    assert "silent" not in result and "reply" not in result
     sender.assert_not_awaited()
     assert data_files(installed) == []

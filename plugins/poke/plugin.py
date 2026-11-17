@@ -167,4 +167,5 @@ async def poke(ctx: Context, user_id: int | None = None) -> dict:
         await ctx.poke(target)
     except Exception as exc:
         return {"error": "poke_failed", "message": str(exc)[:200] or "戳一戳失败，请稍后再试。"}
-    return {"poked": target}
+    # 戳一戳成功后才让宿主直出确认；失败路径保持普通返回。
+    return {"poked": target, "silent": True, "reply": "戳回去啦"}

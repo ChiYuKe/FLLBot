@@ -1,5 +1,11 @@
 # Changelog
 
+## 未发布
+
+- `oni_mod__deliver` 在本次请求的全部附件（zip、dll、单独发送的 yaml）都确认送达后返回
+  `silent: true` 与简短 `reply`（“dll 和 mod 已经打包发出”），供宿主直出确认；部分失败、回执缺失
+  或编译/未编译错误时不设置，原有 `sent`/`zip`/`dll`/`summary` 字段不变。
+
 ## 0.1.0
 
 - 新增 `oni_mod` 插件：只读浏览 NOIMods 与游戏 `mods/Dev` 参考目录，生成可编译的缺氧 Mod 工程。

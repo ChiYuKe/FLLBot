@@ -404,4 +404,8 @@ async def send_whisper(ctx: Context, kind: str = "") -> dict[str, Any]:
     )
     if result.get("error"):
         result.setdefault("sent", False)
+    elif result.get("sent") is True:
+        # 悄悄话确实送达后才让宿主直出确认；失败或结果不确定保持普通返回。
+        result["silent"] = True
+        result["reply"] = "悄悄话已经说给你啦"
     return result

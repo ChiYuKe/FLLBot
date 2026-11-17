@@ -179,8 +179,11 @@ async def test_poke_tool_pokes_current_scene_member(tmp_path, monkeypatch):
         output, silent = await bot.tool_executor.execute(
             ctx, "poke__poke", {"user_id": 30004}, registry, refresh=lambda _: ([], registry)
         )
-        assert json.loads(output) == {"poked": 30004}
-        assert silent is False
+        payload = json.loads(output)
+        assert payload["poked"] == 30004
+        assert payload["silent"] is True
+        assert 0 < len(payload["reply"]) <= 60
+        assert silent is True
         assert poke_calls(connection) == [{"group_id": GROUP, "user_id": 30004}]
     finally:
         await bot.stop()
@@ -199,12 +202,16 @@ async def test_poke_tool_defaults_to_sender_and_rejects_self(tmp_path, monkeypat
         output, _ = await bot.tool_executor.execute(
             ctx, "poke__poke", {}, registry, refresh=lambda _: ([], registry)
         )
-        assert json.loads(output) == {"poked": USER}
+        payload = json.loads(output)
+        assert payload["poked"] == USER
+        assert payload["silent"] is True and payload["reply"]
 
         output, _ = await bot.tool_executor.execute(
             ctx, "poke__poke", {"user_id": SELF}, registry, refresh=lambda _: ([], registry)
         )
-        assert json.loads(output)["error"] == "invalid_target"
+        failed = json.loads(output)
+        assert failed["error"] == "invalid_target"
+        assert "silent" not in failed and "reply" not in failed
     finally:
         await bot.stop()
 
@@ -223,7 +230,34 @@ async def test_poke_tool_requires_addressed_turn(tmp_path, monkeypatch):
         output, _ = await bot.tool_executor.execute(
             ctx, "poke__poke", {"user_id": USER}, registry, refresh=lambda _: ([], registry)
         )
-        assert json.loads(output)["error"] == "addressed_required"
+        payload = json.loads(output)
+        assert payload["error"] == "addressed_required"
+        assert "silent" not in payload and "reply" not in payload
         assert poke_calls(connection) == []
+    finally:
+        await bot.stop()
+
+
+async def test_poke_tool_failure_is_not_silent(tmp_path, monkeypatch):
+    bot, _ = await setup_bot(tmp_path, monkeypatch)
+    try:
+        connection = FakeConnection()
+        ctx = Context(bot, connection, parse_event(group_message("戳他一下", at=SELF)))
+        entry = bot.tools.snapshot().get("poke__poke")
+        assert entry is not None
+        owner, spec = entry.owner, entry.spec
+        registry = {spec.qualified_name: (owner, spec)}
+
+        async def broken(*args, **kwargs):
+            raise RuntimeError("poke broken")
+
+        monkeypatch.setattr(Context, "poke", broken)
+        output, silent = await bot.tool_executor.execute(
+            ctx, "poke__poke", {"user_id": USER}, registry, refresh=lambda _: ([], registry)
+        )
+        payload = json.loads(output)
+        assert payload["error"] == "poke_failed"
+        assert "silent" not in payload and "reply" not in payload
+        assert silent is False
     finally:
         await bot.stop()

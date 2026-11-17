@@ -1023,15 +1023,22 @@ async def weather_card(ctx: Context, city: str = "", days: int | None = None) ->
     if not image:
         return {"error": "天气卡片渲染失败，请改用 get_weather 的文字结果回答。"}
     sent = await send_media_reply(ctx, [image_segment(image)], weather_caption(data), require_ai=True)
-    return {
+    payload: dict[str, Any] = {
         "sent": bool(sent),
         "city": data.get("city"),
         "observed_at": data.get("observed_at"),
         "current": data.get("current"),
         "daily": data.get("daily"),
         "note": "天气卡片已发送；不要在聊天里重复图内数据，只补一句简短说明。",
-        **({} if sent else {"error": "send_failed", "message": "天气卡片已生成，但未能确认发送"}),
     }
+    if sent:
+        # 卡片确实送达后才让宿主直出确认；渲染失败或发送失败保持普通返回。
+        payload["silent"] = True
+        payload["reply"] = "天气卡片发你啦"
+    else:
+        payload["error"] = "send_failed"
+        payload["message"] = "天气卡片已生成，但未能确认发送"
+    return payload
 
 
 @plugin.on_ai_tool(

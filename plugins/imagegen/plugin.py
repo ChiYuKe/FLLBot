@@ -187,6 +187,9 @@ plugin.agent_instruction(
 
 _SLOTS = asyncio.Semaphore(2)
 _LAST: dict[tuple[int, int, int], float] = {}
+# 图片确实送达后由宿主直出这句确认，省掉一次模型往返；失败路径绝不设置。
+_GROUP_REPLY = "画好啦，已经发到群里"
+_PRIVATE_REPLY = "画好啦，已经发给你啦"
 
 
 def _engine(settings: Any):
@@ -322,10 +325,13 @@ async def _draw(
     sent = await send_media_reply(ctx, segments, content, require_ai=bool(ctx.tool_execution_id))
     if not sent:
         return {"sent": False, "error": "imagegen_not_delivered", "message": "图片没有送达，会话可能已经结束。"}
+    reply = _GROUP_REPLY if ctx.is_group else _PRIVATE_REPLY
     if provider == "local":
         ctx.logger.info("本地图片生成完成：%s/%s %s 字节", expression, palette, len(image))
         return {
             "sent": True,
+            "silent": True,
+            "reply": reply,
             "provider": "local",
             "expression": expression,
             "palette": palette,
@@ -336,6 +342,8 @@ async def _draw(
     ctx.logger.info("图片生成完成：%s %s %s 字节", engine.provider, size or engine.size, len(image))
     return {
         "sent": True,
+        "silent": True,
+        "reply": reply,
         "provider": engine.provider,
         "size": size or engine.size,
         "bytes": len(image),

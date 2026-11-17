@@ -226,6 +226,9 @@ async def test_tool_defaults_to_requester_mailbox(monkeypatch: pytest.MonkeyPatc
     )
     result = await email.send_email_tool(ctx, subject="周报", body="本周完成……")
     assert result["sent"] is True
+    assert result["silent"] is True
+    assert 0 < len(result["reply"]) <= 60
+    assert "email__send_email" not in result["reply"]
     assert result["to"] == ["30003@qq.com"]
     assert captured["recipients"] == ["30003@qq.com"]
     assert captured["subject"] == "周报"
@@ -250,6 +253,7 @@ async def test_explicit_recipient_must_appear_in_current_message(monkeypatch: py
     )
 
     assert result["error"] == "email_recipient_not_requested"
+    assert "silent" not in result and "reply" not in result
     assert not called
 
 
@@ -275,6 +279,7 @@ async def test_explicit_recipient_from_message_or_mention_is_allowed(
         ctx, subject="悄悄话", body="正文", to="2902599249, 953048766"
     )
     assert result["sent"] is True
+    assert result["silent"] is True and result["reply"]
     assert captured[0]["recipients"] == ["2902599249@qq.com", "953048766@qq.com"]
 
     mentioned = SimpleNamespace(
@@ -317,10 +322,12 @@ async def test_tool_requires_an_email_request_in_the_current_message(
     )
     result = await email.send_email_tool(ctx, subject="悄悄话", body="只给你一个人看")
     assert result["error"] == "email_request_missing"
+    assert "silent" not in result and "reply" not in result
     result = await email.send_email_tool(
         ctx, subject="悄悄话", body="只给你一个人看", to="2902599249"
     )
     assert result["error"] == "email_request_missing"
+    assert "silent" not in result and "reply" not in result
     assert not called
 
 
@@ -332,6 +339,7 @@ async def test_tool_reports_missing_configuration(monkeypatch: pytest.MonkeyPatc
     result = await email.send_email_tool(ctx, subject="周报", body="正文")
     assert result["error"] == "email_not_configured"
     assert "发件邮箱" in result["message"]
+    assert "silent" not in result and "reply" not in result
     assert not called
 
 
@@ -391,15 +399,31 @@ async def test_plugin_is_loaded_and_sandboxed(tmp_path: Path, monkeypatch: pytes
         payload = json.loads(output)
         assert payload["error"] == "tool_blocked"
         assert payload["reason"] == "email_disabled"
+        assert "silent" not in payload and "reply" not in payload
         assert not sent
 
         await bot.update_config({"sandbox": {"allow_email": True}})
-        output, _ = await bot.tool_executor.execute(
+        output, silent = await bot.tool_executor.execute(
             ctx, spec.qualified_name, {"subject": "总结", "body": "正文"}, registry
         )
         payload = json.loads(output)
         assert payload["sent"] is True
+        assert payload["silent"] is True and payload["reply"]
+        assert silent is True
         assert payload["to"] == ["30003@qq.com"]
         assert sent[0]["recipients"] == ["30003@qq.com"]
+
+        # SMTP 失败（或部分收件人被拒）时不能直出确认。
+        def broken_send(**kwargs: Any) -> dict[str, Any]:
+            raise service.EmailError("email_send_failed", "邮件发送失败，请稍后再试")
+
+        monkeypatch.setattr(module, "send_email", broken_send)
+        output, silent = await bot.tool_executor.execute(
+            ctx, spec.qualified_name, {"subject": "总结", "body": "正文"}, registry
+        )
+        failed = json.loads(output)
+        assert failed["error"] == "email_send_failed"
+        assert "silent" not in failed and "reply" not in failed
+        assert silent is False
     finally:
         await bot.stop()

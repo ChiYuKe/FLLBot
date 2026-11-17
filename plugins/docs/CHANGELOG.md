@@ -1,5 +1,11 @@
 # 变更记录
 
+## 未发布
+
+- `docs__write_docx` / `write_xlsx` / `write_pptx` 在附件确认送达后返回 `silent: true` 与简短
+  `reply`（“文档已经发给你啦”），供宿主直出确认、省掉一次模型往返；生成成功但发送失败、回执缺失或
+  参数/生成/沙箱失败时不设置，原有成功字段不变。
+
 ## 0.1.1
 
 - 新增周期清理 `cleanup_files`（每 6 小时，`initial_delay` 5 分钟）并在 `on_load` 时清理一次；

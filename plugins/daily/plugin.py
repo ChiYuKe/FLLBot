@@ -67,10 +67,13 @@ async def create_task(ctx: Context, content: str, due_at: str = ""):
         cursor = db.execute(
             "INSERT INTO tasks(bot,scene,owner,content,due) VALUES(?,?,?,?,?)", (bot, scene, ctx.user_id, content, due)
         )
+        # 事务提交成功后才直出确认；写库失败异常会走上面的 except，不设置 silent/reply。
         return {
             "id": cursor.lastrowid,
             "content": content,
             "due_at": datetime.fromtimestamp(due, _LOCAL).isoformat() if due else None,
+            "silent": True,
+            "reply": "记住啦，到点提醒你" if due else "记住啦，已经加入待办",
         }
 
 
@@ -120,7 +123,12 @@ async def update_task(ctx: Context, task_id: int, action: str):
             )
             if result.rowcount:
                 task_store.record(db, task_id, "action", action)
-            return {"updated": bool(result.rowcount)}
+            payload = {"updated": bool(result.rowcount)}
+            if result.rowcount:
+                # 状态确实写进数据库后才直出确认；未命中（不存在/已结束/发送中）保持普通返回。
+                payload["silent"] = True
+                payload["reply"] = "好的，已经标记完成" if action == "complete" else "已经取消了"
+            return payload
 
 
 @plugin.on_ai_tool(

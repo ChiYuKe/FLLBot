@@ -1,5 +1,11 @@
 # 变更记录
 
+## 未发布
+
+- `email__send_email` 在 SMTP 已接受邮件后返回 `silent: true` 与简短 `reply`（“邮件已经发出”），
+  供宿主直出确认、省掉一次模型往返；配置缺失、未明确请求、收件人校验失败或 SMTP 发送失败时
+  不设置，原有 `sent`/`to`/`subject` 字段不变。
+
 ## 0.1.0
 
 - 新增 `email__send_email`：通过 QQ 邮箱 SMTP 发送纯文本邮件，支持 QQ 号自动补 `@qq.com`。

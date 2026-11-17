@@ -259,6 +259,8 @@ async def send_email_tool(ctx: Context, subject: str, body: str, to: str = "") -
 
     return {
         "sent": True,
+        "silent": True,
+        "reply": "邮件已经发出",
         "to": result["recipients"],
         "subject": clean_subject,
         "note": "邮件已发送；只说明发送结果，不要重复正文或声称发送给未列出的地址。",

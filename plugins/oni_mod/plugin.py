@@ -145,6 +145,11 @@ def _attachment(data: bytes, name: str) -> MessageSegment:
     return MessageSegment.file("base64://" + base64.b64encode(data).decode("ascii"), name=name)
 
 
+# 所有请求的附件都确认送达后，才让宿主直出确认；部分失败或回执缺失保持普通返回。
+_PACKAGED_REPLY = "dll 和 mod 已经打包发出"
+_DELIVERED_REPLY = "文件已经发出"
+
+
 # --------------------------------------------------------------------------- #
 # 参考 Mod
 # --------------------------------------------------------------------------- #
@@ -564,6 +569,7 @@ async def deliver(
         if not ctx.data_current:
             return {"error": "context_expired", "message": "当前会话已失效，未发送任何文件"}
         segments: list[MessageSegment] = [MessageSegment.text(summary)]
+        requested: list[bool] = []
         if include_zip:
             segments.append(_attachment(payload, filename))
         sent = await send_media_reply(ctx, segments, summary, require_ai=True)
@@ -574,6 +580,8 @@ async def deliver(
             "zip": {"name": filename, "bytes": len(payload), "sent": bool(sent) if include_zip else False}
             if include_zip else {},
         }
+        if include_zip:
+            requested.append(bool(sent))
         if include_dll:
             dll_bytes = ctx.sandbox.files.read_bytes(f"{rel}/bin/Release/{name}.dll")
             dll_sent = await send_media_reply(
@@ -584,6 +592,7 @@ async def deliver(
             )
             result["dll"] = {"name": f"{name}.dll", "bytes": dll_bytes["bytes"], "sent": bool(dll_sent)}
             result["sent"] = bool(result["sent"] or dll_sent)
+            requested.append(bool(dll_sent))
         if separate_yaml:
             yaml_sent = []
             for yaml_name in ("mod.yaml", "mod_info.yaml"):
@@ -597,9 +606,14 @@ async def deliver(
                 yaml_sent.append({"name": yaml_name, "sent": bool(ok)})
             result["yaml"] = yaml_sent
             result["sent"] = bool(result["sent"] or any(item["sent"] for item in yaml_sent))
+            requested.extend(item["sent"] for item in yaml_sent)
         if not result["sent"]:
             result["error"] = "send_failed"
             result["message"] = "文件已读取，但未能确认发送；请检查连接与发送权限。"
+        elif requested and all(requested):
+            # 只有本次请求的每个附件都确认送达才直出；部分失败保持普通返回让模型说明。
+            result["silent"] = True
+            result["reply"] = _PACKAGED_REPLY if include_zip else _DELIVERED_REPLY
         return result
     except (ValueError, OSError) as exc:
         return _failure(exc)

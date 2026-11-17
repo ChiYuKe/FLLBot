@@ -507,9 +507,43 @@ async def test_weather_card_tool_sends_image(tmp_path: Path, monkeypatch: pytest
 
         assert result["sent"] is True
         assert result["city"] == "武汉"
+        assert result["silent"] is True
+        assert 0 < len(result["reply"]) <= 60
+        assert "web__weather_card" not in result["reply"]
         segments, content = send_media.call_args.args[1:3]
         assert [segment.type for segment in segments] == ["image"]
         assert "武汉" in content and "雨" in content
+    finally:
+        await bot.stop()
+
+
+async def test_weather_card_tool_send_failure_is_not_silent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plugin_dir = tmp_path / "plugins"
+    plugin_dir.mkdir()
+    shutil.copytree(ROOT / "plugins" / "web", plugin_dir / "web")
+    bot = await make_bot(tmp_path, plugin_dirs=[plugin_dir])
+    try:
+        installed = bot.plugins.get("web")
+        assert installed is not None
+        module = sys.modules[installed.module.__name__ + ".plugin"]
+        _patch_client(monkeypatch, module, qq_handler)
+        spec = next(tool for tool in installed.ai_tools if tool.name == "weather_card")
+        monkeypatch.setattr(bot.deliveries, "send_media", AsyncMock(return_value=False))
+        ctx = Context(
+            bot=bot,
+            connection=FakeConnection(),
+            event=parse_event(group_message("来张武汉天气图")),
+            plugin=installed,
+            handler=spec,
+        )
+
+        result = await spec.callback(ctx, city="武汉")
+
+        assert result["sent"] is False
+        assert result["error"] == "send_failed"
+        assert "silent" not in result and "reply" not in result
     finally:
         await bot.stop()
 
@@ -543,6 +577,7 @@ async def test_weather_card_tool_reports_disabled_image(tmp_path: Path, monkeypa
         )
         result = await spec.callback(ctx, city="武汉")
         assert "关闭" in result["error"]
+        assert "silent" not in result and "reply" not in result
     finally:
         await bot.stop()
 

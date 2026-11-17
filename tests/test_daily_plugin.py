@@ -32,15 +32,30 @@ async def test_tasks_persist_and_isolate_owner_scene_and_account(tmp_path):
     future = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
     item = await daily.create_task(ctx, "交作业", future)
     assert item["id"]
+    assert item["silent"] is True
+    assert 0 < len(item["reply"]) <= 60
+    assert item["content"] == "交作业" and item["due_at"]
     assert (await daily.list_tasks(ctx))["items"][0]["content"] == "交作业"
     for other in (context(tmp_path, bot=101), context(tmp_path, group=201), context(tmp_path, user=301)):
         assert not (await daily.list_tasks(other))["items"]
-        assert not (await daily.update_task(other, item["id"], "cancel"))["updated"]
-    assert (await daily.update_task(ctx, item["id"], "complete"))["updated"]
+        missed = await daily.update_task(other, item["id"], "cancel")
+        assert not missed["updated"]
+        assert "silent" not in missed and "reply" not in missed
+    completed = await daily.update_task(ctx, item["id"], "complete")
+    assert completed["updated"]
+    assert completed["silent"] is True and completed["reply"]
     assert not (await daily.list_tasks(ctx))["items"]
     assert (await daily.list_tasks(ctx, True))["items"][0]["state"] == "completed"
-    assert "error" in await daily.create_task(ctx, "过去", "2000-01-01T00:00:00")
-    assert "error" in await daily.create_task(ctx, " ")
+    due_missing = await daily.create_task(ctx, "过去", "2000-01-01T00:00:00")
+    assert "error" in due_missing
+    assert "silent" not in due_missing and "reply" not in due_missing
+    blank = await daily.create_task(ctx, " ")
+    assert "error" in blank
+    assert "silent" not in blank and "reply" not in blank
+    todo = await daily.create_task(ctx, "没有时间的事")
+    assert todo["silent"] is True and "待办" in todo["reply"]
+    cancelled = await daily.update_task(ctx, todo["id"], "cancel")
+    assert cancelled["silent"] is True and "取消" in cancelled["reply"]
 
 
 async def test_knowledge_permissions_and_isolation(tmp_path):
