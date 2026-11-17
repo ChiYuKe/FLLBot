@@ -188,6 +188,17 @@ async def write_note(ctx: Context, path: str, content: str) -> dict:
 能力取值为 `fs.read`、`fs.write`、`net.read`、`net.write`、`email.send`、`qq.send`、`qq.send_file`、`qq.manage`、
 `memory.read`、`memory.write`、`system.read`、`screen.capture`、`process.exec`；`risk` 为 `read`、`write`、`destructive`。未声明能力的旧工具保持原有权限行为。
 默认策略下 `memory.read` / `memory.write` / `system.read` 可用且没有独立开关；`memory.write` 风险为 `write`，自动参与时与其他写能力一样被要求明确请求。
+
+### 工具返回值与直出确认
+
+- 普通数据结果返回 JSON 可序列化对象，宿主按工具的 `max_output_chars` 截断后交给模型。
+- 工具已经完成用户可见交付（发文件、图片、邮件或持久化操作）且确认送达时，成功结果可返回
+  `{"silent": true, "reply": "一句自然中文确认"}`：宿主在**整批工具都 silent 且无失败、无待处理追问**时
+  直接用 `reply` 作为最终回复，不再多请求一轮模型；失败、未送达、结果不确定时不得返回 `silent`/`reply`。
+- `spoken` 只用于“已通过音频等非文字方式表达”的工具（如 `voice__speak`），只有 `spoken` 时宿主不会发送文字。
+- 失败结果应返回稳定的 `error` 代码；宿主会补充中文 `message`。参数校验失败时宿主会整理成字段路径、
+  期望类型、schema description 与修正建议，不回传原始参数值；部分无损类型错误会先被自动修正再严格校验。
+- 同一轮里相同工具与参数的只读调用超过上限会返回 `tool_repeat_limit`，插件不需要自己实现重复保护。
 声明后，宿主按 `[sandbox]` 策略检查能力开关、参数中的路径与链接、发起者权限、自动参与边界和本轮额度；
 被拒绝时回调不会执行，模型收到 `{"error": "tool_blocked", "reason": ...}`。文件与联网应通过
 `ctx.sandbox.files` / `ctx.sandbox.network`，不要自行打开路径或创建 HTTP 客户端。详见

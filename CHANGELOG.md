@@ -12,6 +12,18 @@
 
 ### 变更
 
+- **工具调用体验（更智能）**：参数校验失败时按 Schema 做有限无损自愈（数字字符串→数字、`"true"/"false"`→布尔、
+  单值→数组、`{` 开头的 JSON 字符串→对象，递归 items/properties），修正后仍严格校验，只记 `arguments_repaired`
+  追踪且不记录参数值；失败结果统一附中文 `message`，`invalid_arguments` 额外给出人类可读字段路径、期望约束、
+  schema description 与修正建议，不确定/超时明确提示不要自动重试；同轮相同工具与参数的只读调用超过 12 次返回
+  `tool_repeat_limit` 且不执行（计数器有界、不落库），写入/发送类仍沿用 3/5/8 次重复提醒。AGENT_RULES 增加
+  「工具调用是内部动作、不宣告不复述、互不依赖的只读查询同轮并行、失败用人话说明」等条款（整体提示词字节未增）。
+- **工具直出确认（更快、更自然）**：工具完成用户可见交付并确认送达时返回 `{"silent": true, "reply": "…"}`；
+  `AgentRuntime` 只有在**整批工具全部 silent、无失败、无待处理追问**时直接以 `reply` 收尾并跳过下一轮模型，
+  混合批次继续下一轮模型不丢数据结果，失败批次不提前收尾；`spoken` 仍只用于语音这类无需文字的已表达场景；
+  `agent_conversation` 复用现有发送回调发送 `reply`（含引用、长回复、历史投影）。内置 `text`、`workspace`、`screen`
+  与外置 `imagegen`、`docs`、`oni_mod`、`emotion`、`poke`、`email`、`daily`、`web` 的发送/保存类工具已接入，
+  失败、未送达与结果不确定路径不设置 silent/reply。
 - **沙盒能力补全**：新增宿主 `memory.write` 能力，长期记忆的写入工具（`memory__remember` / `memory__forget`）改为声明该能力，
   自动参与（未 @、未叫到机器人）时由 `ToolExecutor` 在回调前统一拒绝（`tool_blocked` / `automatic_side_effect`），
   不再依赖插件回调自行检查 `trigger_decision.addressed`；`memory.write` 默认放行、无独立策略开关、不要求 `allow_write`，
