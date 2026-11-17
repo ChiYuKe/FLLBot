@@ -13,7 +13,7 @@ fllbot/builtin_plugins/screen/     默认关闭的宿主截屏工具（screen.ca
 plugins/email/                     通过 QQ 邮箱发信的工具（email.send）
 plugins/imagegen/                  本地 Pillow 画机器人形象（可选远程图片模型）
 plugins/docs/                      受控生成 Word/Excel/PPT 并作为附件发送（qq.send_file）
-plugins/memory/                    仅写插件自己数据库的长期记忆工具（无宿主沙盒能力）
+plugins/memory/                    长期记忆工具（memory.read / memory.write，写操作自动参与拒绝）
 ```
 
 ## 1. 为什么需要三层
@@ -86,12 +86,38 @@ plugins/memory/                    仅写插件自己数据库的长期记忆工
 | `qq.send_file` | 发送文件附件（自动参与时拒绝） | write |
 | `qq.manage` | 群成员、群设置等管理动作 | destructive |
 | `memory.read` | 读取本群记忆 | read |
+| `memory.write` | 写入长期记忆（自动参与时拒绝） | write |
 | `system.read` | 读取机器人运行状态 | read |
 | `screen.capture` | 截取运行宿主的屏幕 | destructive |
 | `process.exec` | 执行本机程序（当前未提供执行器） | destructive |
 
 未声明能力的旧工具保持原有“插件权限 + 处理器权限”行为；声明后才会进入沙盒裁决。
 `risk` 不能低于能力下限，避免插件把 `fs.write` 标成只读来绕过策略。
+
+`memory.read` / `memory.write` 没有独立策略开关，与 `system.read` 一样默认放行，不要求
+`allow_write`；但 `memory.write` 属于写能力，自动参与且未明确请求时由 `automatic_side_effect`
+统一拒绝，计入本轮写入额度。记忆插件只写自己的数据库，因此不需要文件路径或工作区围栏。
+
+示例（`plugins/memory`）：
+
+```python
+@plugin.on_ai_tool(
+    "remember",
+    effect="side_effecting",
+    capabilities=("memory.write",),
+    risk="write",
+    title="记住这件事",
+    description="仅在当前用户明确要求记住时，保存说话人本人的事实或偏好...",
+    parameters={...},
+)
+async def remember_tool(ctx: Context, content: str) -> dict:
+    ...
+```
+
+自动参与（未 @、未唤醒）时宿主在回调前返回
+`{"error": "tool_blocked", "reason": "automatic_side_effect", "capability": "memory.write"}`，
+回调不会执行；明确 @ 或唤醒词请求时正常写入。只读的 `memory__recall` 声明 `memory.read`，
+自动参与时仍可用于自然引用已记住的内容。
 
 ## 4. 策略解析
 
@@ -235,6 +261,8 @@ destructive_requires_superuser = true
 - 这是**进程内策略与资源围栏**，不是操作系统级沙箱。插件仍以宿主进程权限运行；
   只安装可信插件，`process.exec` 默认不提供执行器。
 - 沙盒只约束显式声明能力的 AI 工具；插件命令处理器直接操作文件或网络不属于本契约。
+- `memory.write` 默认放行且没有独立开关，只受自动参与、写入额度和风险等级约束；关闭
+  `write_requires_addressed` 会同时放开记忆写入的自动参与边界。
 - 工作区隔离是路径级，不是操作系统用户隔离；同一插件仍能访问其他路径，只应安装可信插件。
 - 文件检查与写入之间存在常规 TOCTOU 窗口；工作区由管理员控制，不存放对抗性内容。
 - 本轮额度保存在事件上下文内，进程重启或任务被取消后不保留；跨轮总量请使用群额度。

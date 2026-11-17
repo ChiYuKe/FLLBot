@@ -13,6 +13,7 @@ from .capabilities import (
     FS_READ,
     FS_WRITE,
     MEMORY_READ,
+    MEMORY_WRITE,
     NET_READ,
     NET_WRITE,
     PROCESS_EXEC,
@@ -113,7 +114,7 @@ class SandboxPolicy:
             return (self.allow_screen, "screen_disabled")
         if capability == PROCESS_EXEC:
             return (self.allow_process, "process_disabled")
-        if capability in (MEMORY_READ, SYSTEM_READ):
+        if capability in (MEMORY_READ, MEMORY_WRITE, SYSTEM_READ):
             return True, ""
         return False, "capability_unknown"
 

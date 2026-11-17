@@ -1,7 +1,7 @@
 schema_version = 1
 api_version = 1
 name = "memory"
-version = "0.1.0"
+version = "0.2.0"
 description = "长期记忆：记住群友本人明确要求保留的事实与偏好，支持回查、删除和过期清理"
 author = ""
 category = "plugin"

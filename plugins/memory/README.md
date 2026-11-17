@@ -25,17 +25,18 @@
 
 ## AI 工具
 
-| 工具 | effect/risk | 说明 |
-| --- | --- | --- |
-| `memory__remember` | `side_effecting` / `write` | 当前用户明确要求「记住……」时保存本人事实或偏好，返回记忆编号 |
-| `memory__recall` | `read_only` / `read` | 查当前用户在当前会话的记忆，可按关键词过滤，返回编号 |
-| `memory__forget` | `side_effecting` / `write` | 按编号删除，或 `all=true` 清空本人记忆 |
+| 工具 | effect/risk | 能力 | 说明 |
+| --- | --- | --- | --- |
+| `memory__remember` | `side_effecting` / `write` | `memory.write` | 当前用户明确要求「记住……」时保存本人事实或偏好，返回记忆编号 |
+| `memory__recall` | `read_only` / `read` | `memory.read` | 查当前用户在当前会话的记忆，可按关键词过滤，返回编号 |
+| `memory__forget` | `side_effecting` / `write` | `memory.write` | 按编号删除，或 `all=true` 清空本人记忆 |
 
 约束：
 
 - 记忆主体固定为当前发言人，**工具参数里没有用户 id**，不能替别人记录或查询。
 - 不能跨群、跨私聊、跨机器人账号，也不能在私聊里看到群记忆。
-- 只在明确请求（@、唤醒词、私聊或显式命令）时写入；**自动参与时 `remember` / `forget` 会返回 `addressed_required` 并拒绝落库**。`recall` 是只读工具，自动参与时可用。
+- 只在明确请求（@、唤醒词、私聊或显式命令）时写入；**自动参与时宿主沙盒会拒绝 `remember` / `forget`，返回 `{"error":"tool_blocked","reason":"automatic_side_effect","capability":"memory.write"}` 且不落库**。`recall` 是只读工具，自动参与时可用。
+- `memory.write` 没有独立策略开关，和 `memory.read` 一样默认可用；不需要打开 `allow_write`，但仍受自动参与边界和本轮写入额度（`max_write_calls_per_turn`）约束。
 - 密码、令牌、验证码、证件号等敏感内容会被拒绝；第三方隐私与猜测不应记录（见工具说明和提示词片段）。
 
 ## 配置
@@ -60,7 +61,8 @@
 
 ## 已知边界
 
-- 当前宿主的沙盒能力表只有 `memory.read`，没有 `memory.write`。因此写工具无法被宿主沙盒的 `automatic_side_effect` 统一裁决，插件按 poke/emotion 的既有先例在回调里检查 `trigger_decision.addressed`。写工具的 `effect` 使用宿主唯一合法的写语义 `side_effecting`，`risk` 显式声明为 `write`；详见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)。
+- 写工具的 `effect` 使用宿主唯一合法的写语义 `side_effecting`（宿主 effect 枚举没有 `write`），`risk` 显式为 `write`；`memory.write` 能力默认放行，自动参与拒绝完全由宿主 `fllbot/sandbox/guard.py` 统一裁决，插件回调不再自行检查 `trigger_decision`。
+- 该包要求宿主已提供 `memory.write` 能力（本仓库 0.2 之后版本）；旧宿主会把它当成未知能力并在插件加载时报错。
 - 隐私判断是提示词级约束加少量确定性兜底，插件不能理解任意语境；对高风险内容应直接拒绝。
 
 开发与维护说明见 [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)，版本变化见 [CHANGELOG.md](CHANGELOG.md)。

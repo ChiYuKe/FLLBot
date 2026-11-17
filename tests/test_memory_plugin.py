@@ -102,8 +102,10 @@ async def test_package_declares_tools_settings_loop_and_data_dir(tmp_path):
         assert set(specs) == {"remember", "recall", "forget"}
         assert specs["remember"].effect == "side_effecting"
         assert specs["remember"].risk == "write"
+        assert specs["remember"].capabilities == ("memory.write",)
         assert specs["forget"].effect == "side_effecting"
         assert specs["forget"].risk == "write"
+        assert specs["forget"].capabilities == ("memory.write",)
         assert specs["recall"].effect == "read_only"
         assert specs["recall"].risk == "read"
         assert specs["recall"].capabilities == ("memory.read",)
@@ -363,11 +365,17 @@ async def test_automatic_participation_rejects_writes_but_allows_recall(tmp_path
         auto = context(bot, memory, "他们聊得真热闹")
         auto.trigger_decision = SimpleNamespace(addressed=False, trigger_kind="automatic")
 
+        # 写工具由宿主沙盒统一拒绝，回调不会执行，因此零落库。
         blocked, silent = await execute(bot, auto, "memory__remember", {"content": "自动参与不该保存"})
-        assert blocked["error"] == "addressed_required"
+        assert blocked["error"] == "tool_blocked"
+        assert blocked["reason"] == "automatic_side_effect"
+        assert blocked["capability"] == "memory.write"
+        assert blocked["risk"] == "write"
         assert silent is False
         blocked, _ = await execute(bot, auto, "memory__forget", {"fact_id": fact["id"]})
-        assert blocked["error"] == "addressed_required"
+        assert blocked["error"] == "tool_blocked"
+        assert blocked["reason"] == "automatic_side_effect"
+        assert blocked["capability"] == "memory.write"
         assert [row["id"] for row in fact_rows(memory)] == [fact["id"]]
 
         # 只读回查在自动参与时仍可用，且只看当前用户自己的记录。
@@ -375,13 +383,14 @@ async def test_automatic_participation_rejects_writes_but_allows_recall(tmp_path
         assert recalled["count"] == 1
         assert recalled["items"][0]["id"] == fact["id"]
 
-        # 明确 @ 的回合可以正常写入。
+        # 默认沙盒（allow_write=False）也放行明确 @ 的 memory.write 写操作。
         addressed = context(bot, memory, "记住我喜欢猫", at=SELF)
         addressed.trigger_decision = SimpleNamespace(addressed=True, trigger_kind="at")
         created, _ = await execute(bot, addressed, "memory__remember", {"content": "我喜欢猫"})
         assert created["content"] == "我喜欢猫"
         assert created["id"] != fact["id"]
         assert len(fact_rows(memory)) == 2
+        assert bot.sandbox.stats.get("denied:automatic_side_effect", 0) == 2
     finally:
         await bot.stop()
 

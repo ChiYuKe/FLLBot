@@ -16,6 +16,7 @@ from urllib.parse import unquote, urlsplit
 from .capabilities import (
     EMAIL_SEND,
     FS_WRITE,
+    MEMORY_WRITE,
     NET_WRITE,
     PROCESS_EXEC,
     QQ_MANAGE,
@@ -193,7 +194,8 @@ def decide(*, tool: str, spec_capabilities: Iterable[str], spec_risk: str,
                            denied_host=verdict.denied_host, hint=verdict.hint)
     if RANK[risk] >= RANK["write"]:
         side_effect_caps = {
-            FS_WRITE, NET_WRITE, EMAIL_SEND, QQ_SEND_FILE, QQ_MANAGE, SCREEN_CAPTURE, PROCESS_EXEC,
+            FS_WRITE, NET_WRITE, EMAIL_SEND, QQ_SEND_FILE, QQ_MANAGE, MEMORY_WRITE,
+            SCREEN_CAPTURE, PROCESS_EXEC,
         }
         if (policy.write_requires_addressed and not addressed
                 and side_effect_caps.intersection(capabilities)):

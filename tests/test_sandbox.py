@@ -10,6 +10,7 @@ from fllbot.onebot.models import parse_event
 from fllbot.plugin.base import AIToolSpec
 from fllbot.plugin.context import Context
 from fllbot.sandbox import (
+    MEMORY_WRITE,
     CapabilityError,
     SandboxError,
     SandboxFiles,
@@ -48,10 +49,12 @@ def policy(tmp_path: Path, **overrides):
 
 def test_capability_and_risk_validation():
     assert normalize(["net.read", "net.read", "net.read"]) == ("net.read",)
+    assert normalize(["memory.write"]) == ("memory.write",)
     with pytest.raises(CapabilityError):
         normalize(["net.teleport"])
     assert effective_risk("read_only", ("fs.read",)) == "read"
     assert effective_risk("side_effecting", ("fs.write",)) == "write"
+    assert effective_risk("side_effecting", (MEMORY_WRITE,)) == "write"
     with pytest.raises(CapabilityError):
         effective_risk("read_only", ("fs.write",))
     with pytest.raises(ValueError):
@@ -134,6 +137,34 @@ def test_file_sending_requires_an_explicit_request(tmp_path):
                       arguments={}, policy=policy(tmp_path, allow_qq_send=False), addressed=True,
                       trigger_kind="at", superuser=False, group_admin=False)
     assert (disabled.allowed, disabled.reason) == (False, "qq_send_disabled")
+
+
+def test_memory_write_needs_no_policy_switch_but_requires_explicit_request(tmp_path):
+    """memory.write 与 memory.read 一样默认可用；自动参与由 guard 统一拒绝。"""
+    current = policy(tmp_path)  # allow_write=False 也不影响记忆库
+    assert current.allows(MEMORY_WRITE) == (True, "")
+
+    explicit = decide(tool="memory__remember", spec_capabilities=(MEMORY_WRITE,), spec_risk="write",
+                      arguments={"content": "记住我喜欢猫"}, policy=current, addressed=True,
+                      trigger_kind="at", superuser=False, group_admin=False)
+    assert explicit.allowed and explicit.reason == "allowed"
+
+    automatic = decide(tool="memory__remember", spec_capabilities=(MEMORY_WRITE,), spec_risk="write",
+                       arguments={"content": "记住我喜欢猫"}, policy=current, addressed=False,
+                       trigger_kind="automatic", superuser=False, group_admin=False)
+    assert (automatic.allowed, automatic.reason) == (False, "automatic_side_effect")
+    assert automatic.capability == MEMORY_WRITE and automatic.risk == "write"
+    assert automatic.payload()["capability"] == MEMORY_WRITE
+
+    # 关闭自动参与边界后写操作放行；不影响只读回忆，也不要求 fs 写入开关。
+    relaxed = policy(tmp_path, write_requires_addressed=False)
+    assert decide(tool="memory__remember", spec_capabilities=(MEMORY_WRITE,), spec_risk="write",
+                  arguments={}, policy=relaxed, addressed=False, trigger_kind="automatic",
+                  superuser=False, group_admin=False).allowed
+    recall = decide(tool="memory__recall", spec_capabilities=("memory.read",), spec_risk="read",
+                    arguments={}, policy=current, addressed=False, trigger_kind="automatic",
+                    superuser=False, group_admin=False)
+    assert recall.allowed and recall.risk == "read"
 
 
 def test_guard_quota_and_legacy_tools(tmp_path):

@@ -167,24 +167,6 @@ def _limits(ctx: Context) -> dict[str, int]:
     }
 
 
-def _addressed(ctx: Context) -> bool:
-    """明确请求时才允许写记忆；自动参与（无人明确要求）返回 False。"""
-    decision = getattr(ctx, "trigger_decision", None)
-    if decision is None:
-        return True
-    explicit = getattr(decision, "addressed", None)
-    if explicit is not None:
-        return bool(explicit)
-    return str(getattr(decision, "trigger_kind", "") or "") in {"at", "prefix"}
-
-
-def _auto_blocked() -> dict[str, str]:
-    return {
-        "error": "addressed_required",
-        "message": "只有当前用户明确要求记住或忘记时才能写入记忆；自动参与时不会保存或删除。",
-    }
-
-
 def _content(raw: Any, max_chars: int) -> str:
     text = " ".join(str(raw or "").split())
     if not text:
@@ -268,6 +250,7 @@ def _schema(properties: dict[str, Any], required: tuple[str, ...] = ()) -> dict[
 @plugin.on_ai_tool(
     "remember",
     effect="side_effecting",
+    capabilities=("memory.write",),
     risk="write",
     title="记住这件事",
     description=(
@@ -275,6 +258,7 @@ def _schema(properties: dict[str, Any], required: tuple[str, ...] = ()) -> dict[
         "记忆主体固定为当前发言人，不能指定其他用户，也不能记录猜测或他人的隐私。"
         "content 用一句客观、完整的话；kind 可选 fact/preference/event/other；tags 是可选标签，"
         "用空格或逗号分隔。禁止保存密码、令牌、验证码、证件号等敏感信息；重复内容会返回已有编号。"
+        "写操作声明 memory.write 能力，自动参与时由宿主沙盒拒绝。"
     ),
     parameters=_schema(
         {
@@ -303,8 +287,6 @@ def _schema(properties: dict[str, Any], required: tuple[str, ...] = ()) -> dict[
 async def remember_tool(ctx: Context, content: str, kind: str = "fact", tags: str = "") -> dict[str, Any]:
     if not _enabled(ctx):
         return _disabled()
-    if not _addressed(ctx):
-        return _auto_blocked()
     limits = _limits(ctx)
     try:
         text = _content(content, limits["max_chars"])
@@ -410,12 +392,14 @@ async def recall_tool(ctx: Context, query: str = "", limit: int = DEFAULT_RECALL
 @plugin.on_ai_tool(
     "forget",
     effect="side_effecting",
+    capabilities=("memory.write",),
     risk="write",
     title="忘记记忆",
     description=(
         "删除当前用户本人的长期记忆。fact_id 与 all 二选一：fact_id 从 memory__recall 或 /记忆 获得，"
         "all=true 清空当前用户在当前会话的全部记忆。不能删除其他用户或其他会话的记忆；"
         "只在用户明确要求忘记时调用，清空全部前先确认。"
+        "写操作声明 memory.write 能力，自动参与时由宿主沙盒拒绝。"
     ),
     parameters=_schema(
         {
@@ -436,8 +420,6 @@ async def recall_tool(ctx: Context, query: str = "", limit: int = DEFAULT_RECALL
 async def forget_tool(ctx: Context, fact_id: int | None = None, all: bool = False) -> dict[str, Any]:
     if not _enabled(ctx):
         return _disabled()
-    if not _addressed(ctx):
-        return _auto_blocked()
     try:
         scope = _scope(ctx)
     except MemoryInputError as exc:

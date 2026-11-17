@@ -18,6 +18,7 @@ QQ_SEND = "qq.send"
 QQ_SEND_FILE = "qq.send_file"
 QQ_MANAGE = "qq.manage"
 MEMORY_READ = "memory.read"
+MEMORY_WRITE = "memory.write"
 SYSTEM_READ = "system.read"
 SCREEN_CAPTURE = "screen.capture"
 PROCESS_EXEC = "process.exec"
@@ -37,6 +38,7 @@ CAPABILITY_TITLES: dict[str, str] = {
     QQ_SEND_FILE: "发送文件附件",
     QQ_MANAGE: "管理群成员或群设置",
     MEMORY_READ: "读取本群记忆",
+    MEMORY_WRITE: "写入长期记忆",
     SYSTEM_READ: "读取机器人运行状态",
     SCREEN_CAPTURE: "截取当前屏幕",
     PROCESS_EXEC: "执行本机程序",
@@ -52,6 +54,7 @@ RISK_BY_CAPABILITY: dict[str, Risk] = {
     QQ_SEND_FILE: "write",
     QQ_MANAGE: "destructive",
     MEMORY_READ: "read",
+    MEMORY_WRITE: "write",
     SYSTEM_READ: "read",
     # 截屏可能暴露宿主桌面上的隐私信息，按高风险能力处理。
     SCREEN_CAPTURE: "destructive",

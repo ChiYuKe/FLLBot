@@ -56,7 +56,7 @@ CREATE INDEX facts_expiry ON facts(expires_at);
 
 `memory__remember` 的顺序：
 
-1. 配置 `enabled`，再检查 `trigger_decision.addressed`（见下）；
+1. 配置 `enabled`；自动参与边界由宿主沙盒在回调前裁决（见下）；
 2. 规范化内容：折叠空白、校验长度、命中敏感词直接拒绝；
 3. 校验 `kind` 与标签（最多 8 个、每个 20 字符，逗号持久化）；
 4. 清理过期记录；
@@ -68,17 +68,19 @@ CREATE INDEX facts_expiry ON facts(expires_at);
 ## effect / risk 与自动参与边界
 
 - `memory__recall`：`effect="read_only"`、`capabilities=("memory.read",)`，风险推导为 `read`；只读工具可参与宿主同轮结果复用。
-- `memory__remember` / `memory__forget`：`effect="side_effecting"`、`risk="write"`，不声明沙盒能力。
+- `memory__remember` / `memory__forget`：`effect="side_effecting"`、`capabilities=("memory.write",)`、`risk="write"`。
 
-宿主 `AIToolSpec` 的 effect 枚举只有 `read_only` / `idempotent` / `side_effecting`，没有 `write`；写语义对应 `side_effecting`。宿主沙盒能力表只有 `memory.read`，没有 `memory.write`，而 `guard.decide()` 的 `automatic_side_effect` 只检查 `fs.write`/`net.write`/`email.send`/`qq.send_file`/`qq.manage`/`screen.capture`/`process.exec`。因此**写工具不会命中宿主级自动参与拒绝**。
+宿主 `AIToolSpec` 的 effect 枚举只有 `read_only` / `idempotent` / `side_effecting`，没有 `write`；写语义对应 `side_effecting`，再通过能力推导风险。`fllbot/sandbox/capabilities.py` 的 `memory.write` 标题为「写入长期记忆」、风险 `write`；`SandboxPolicy.allows()` 把它与 `memory.read` / `system.read` 一样默认放行，**没有独立策略开关**（不需要 `allow_write`）。
 
-为避免把记忆读写伪装成文件/网络能力（会错误要求 `allow_write` 等沙盒开关），本插件沿用 poke/emotion 的既有先例：在 `remember`/`forget` 回调里读取 `ctx.trigger_decision.addressed`，自动参与（未 @、未唤醒、非私聊明确请求）时返回：
+自动参与拒绝由宿主统一完成：`fllbot/sandbox/guard.py` 的 `automatic_side_effect` 集合包含 `MEMORY_WRITE`；当 `[sandbox].write_requires_addressed=true` 且当前轮不是明确请求（未 @、未唤醒、非私聊明确请求）时，`ToolExecutor` 在调用回调前返回：
 
 ```json
-{"error": "addressed_required", "message": "只有当前用户明确要求记住或忘记时才能写入记忆；自动参与时不会保存或删除。"}
+{"error": "tool_blocked", "reason": "automatic_side_effect", "capability": "memory.write", "risk": "write"}
 ```
 
-回调先于任何数据库写入，因此拒绝不会产生记录。`recall` 不拦截：它只读取当前用户自己的记录，自动参与时可用于自然引用记忆。若将来宿主新增 `memory.write` 能力，应改为声明该能力并删除回调内的 addressed 检查，让沙盒统一裁决。
+拒绝发生在任何数据库写入之前，因此零落库；关闭 `write_requires_addressed` 时放行。`memory.write` 仍计入本轮写入额度（`max_write_calls_per_turn`），也受 `destructive_requires_superuser` 之外的既有裁决顺序影响，但风险等级是 `write` 而非 destructive。`recall` 只读，自动参与时不拦截。
+
+插件回调不再自行检查 `ctx.trigger_decision.addressed`；这是与 0.1.0 的主要行为差异。`memory.write` 是宿主能力表的一部分，旧宿主加载本插件会因未知能力失败。
 
 ## 提示词片段
 
@@ -97,10 +99,10 @@ CREATE INDEX facts_expiry ON facts(expires_at);
 ## 验证
 
 ```powershell
-.venv/Scripts/python.exe -m pytest tests/test_memory_plugin.py -q
+.venv/Scripts/python.exe -m pytest tests/test_memory_plugin.py tests/test_sandbox.py -q
 .venv/Scripts/python.exe -m ruff check plugins/memory tests/test_memory_plugin.py
 .venv/Scripts/python.exe -m fllbot plugin check --root . --name memory
 .venv/Scripts/python.exe scripts/check_architecture.py
 ```
 
-离线测试使用 `tests/helpers.py` 的 `FakeConnection` / `group_message` / `make_bot`；不访问真实 QQ 或网络。新增行为时优先补：隔离键、条数/长度上限、去重、过期清理、命令、自动参与拒绝、插件开关与提示词可见性。
+离线测试使用 `tests/helpers.py` 的 `FakeConnection` / `group_message` / `make_bot`；不访问真实 QQ 或网络。`tests/test_sandbox.py` 另有 `memory.write` 的 guard 级断言（默认放行、自动参与拒绝）。新增行为时优先补：隔离键、条数/长度上限、去重、过期清理、命令、自动参与拒绝、插件开关与提示词可见性。
