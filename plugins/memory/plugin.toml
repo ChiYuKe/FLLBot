@@ -1,0 +1,11 @@
+schema_version = 1
+api_version = 1
+name = "memory"
+version = "0.1.0"
+description = "长期记忆：记住群友本人明确要求保留的事实与偏好，支持回查、删除和过期清理"
+author = ""
+category = "plugin"
+
+requires_fllbot = ">=0.2,<1"
+requires_python = ">=3.11"
+dependencies = []
