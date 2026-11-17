@@ -51,6 +51,8 @@ async def test_send_text_file_sends_a_file_attachment(monkeypatch):
     monkeypatch.setattr(module, "send_media_reply", sender)
     result = await module.send_text_file(SimpleNamespace(), "print('hi')\n", "main.py")
     assert result["sent"] is True and result["filename"] == "main.py"
+    assert result["silent"] is True and result["reply"]
+    assert "main.py" not in result["reply"] and "print" not in result["reply"]
     segments, content, require_ai = sent[0]
     assert segments[0].type == "file"
     assert segments[0].data["name"] == "main.py"
@@ -58,6 +60,16 @@ async def test_send_text_file_sends_a_file_attachment(monkeypatch):
     assert raw.startswith("base64://")
     assert base64.b64decode(raw.removeprefix("base64://")).decode("utf-8") == "print('hi')\n"
     assert content == "print('hi')\n" and require_ai is True
+
+
+async def test_send_text_file_failure_is_not_silent(monkeypatch):
+    async def failed(ctx, segments, content, *, require_ai=True):
+        return False
+
+    monkeypatch.setattr(module, "send_media_reply", failed)
+    result = await module.send_text_file(SimpleNamespace(), "print('hi')\n", "main.py")
+    assert result["sent"] is False and result["files"] == 0
+    assert "silent" not in result and "reply" not in result
 
 
 async def test_agent_sends_generated_code_file_to_group(tmp_path, monkeypatch):
@@ -82,6 +94,8 @@ async def test_agent_sends_generated_code_file_to_group(tmp_path, monkeypatch):
         files = [segment for _, _, segments in connection.sent for segment in segments
                  if segment.type == "file"]
         assert len(files) == 1 and files[0].data["name"] == "main.py"
-        assert connection.texts()[-1] == "已发送 main.py。"
+        # 成功交付后工具返回直出确认，宿主可能直接发送而不再请求模型；
+        # 这里只验证附件确实发出、正文没有被重复贴回聊天，不依赖宿主是否发起第二次模型调用。
+        assert all("print('hi')" not in text for text in connection.texts())
     finally:
         await bot.stop()

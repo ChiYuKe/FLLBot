@@ -29,6 +29,9 @@ SEND_DENY_SUFFIXES = {
     ".apk", ".vbs", ".psm1", ".reg", ".hta",
 }
 
+# 附件确认送达后的直出确认；宿主整批静默且无失败时直接发送，不再请求模型。
+FILE_SENT_REPLY = "文件已经发到当前会话"
+
 
 def _safe_name(name: str) -> str:
     value = (name or "").strip()
@@ -302,13 +305,17 @@ async def send_file(ctx: Context, path: str, name: str = "") -> dict[str, Any]:
     segments = [MessageSegment.file(
         "base64://" + base64.b64encode(stored["data"]).decode("ascii"), name=filename)]
     sent = await send_media_reply(ctx, segments, f"（文件：{filename}）", require_ai=True)
-    return {
+    result = {
         "sent": bool(sent),
         "path": stored["path"],
         "filename": filename,
         "bytes": stored["bytes"],
         **({} if sent else {"error": "send_failed", "message": "文件已读取，但未能确认发送"}),
     }
+    if sent:
+        result["silent"] = True
+        result["reply"] = FILE_SENT_REPLY
+    return result
 
 
 @plugin.on_ai_tool(

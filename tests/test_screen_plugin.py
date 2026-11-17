@@ -57,6 +57,8 @@ async def test_capture_tool_sends_image(monkeypatch):
     result = await screen_module.capture_screen(ctx)
     assert result["sent"] is True
     assert result["width"] == 320
+    assert result["silent"] is True and result["reply"]
+    assert "320" not in result["reply"]
     segments, content, require_ai = sender.calls[0]
     assert segments[0].type == "image"
     assert str(segments[0].data["file"]).startswith("base64://")
@@ -68,6 +70,7 @@ async def test_capture_tool_sends_image(monkeypatch):
     monkeypatch.setattr(screen_module, "send_media_reply", failed)
     result = await screen_module.capture_screen(ctx)
     assert result["sent"] is False and result["error"] == "send_failed"
+    assert "silent" not in result and "reply" not in result
 
 
 async def test_capture_file_writes_inside_workspace(tmp_path, monkeypatch):
@@ -81,9 +84,32 @@ async def test_capture_file_writes_inside_workspace(tmp_path, monkeypatch):
                                           "width": 320, "height": 200, "bytes": 1})
     result = await screen_module.capture_screen_file(ctx, "shots/a.png")
     assert result["saved"] is True and result["path"] == "shots/a.png"
+    assert result["silent"] is True and result["reply"]
+    assert "shots" not in result["reply"] and "a.png" not in result["reply"]
     assert (tmp_path / "workspace" / "shots" / "a.png").is_file()
     generated = await screen_module.capture_screen_file(ctx, "")
     assert generated["path"].startswith("screenshots/screen-")
+    assert generated["silent"] is True and generated["reply"]
+
+
+async def test_capture_file_failures_are_not_silent(tmp_path, monkeypatch):
+    def capture_failed(**kwargs):
+        raise service.CaptureError("screenshot_failed", "无法截取屏幕")
+
+    monkeypatch.setattr(screen_module, "capture", capture_failed)
+    ctx = SimpleNamespace(settings={}, sandbox=SimpleNamespace(files=None))
+    failed = await screen_module.capture_screen_file(ctx, "shots/a.png")
+    assert failed["error"] == "screenshot_failed"
+    assert "silent" not in failed and "reply" not in failed
+
+    monkeypatch.setattr(screen_module, "capture",
+                        lambda **kwargs: {"data": _png(), "format": "png",
+                                          "width": 320, "height": 200, "bytes": 1})
+    policy = resolve({"workspace": str(tmp_path / "workspace"), "allow_write": False}, tmp_path)
+    read_only = SimpleNamespace(settings={}, sandbox=SimpleNamespace(files=SandboxFiles(policy)))
+    denied = await screen_module.capture_screen_file(read_only, "shots/a.png")
+    assert denied["error"] == "write_disabled"
+    assert "silent" not in denied and "reply" not in denied
 
 
 def test_screen_capability_requires_opt_in_and_authority(tmp_path):

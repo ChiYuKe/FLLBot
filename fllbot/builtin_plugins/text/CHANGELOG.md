@@ -1,5 +1,12 @@
 # 变更记录
 
+## 0.12.0
+
+- `send_text_file`、`send_html_file`、`send_markdown_file`、`render_image`、`render_diagram` 在确认送达后
+  返回 `silent: true` 和一句简短中文 `reply`，宿主可在整批静默且无失败时直接发送确认，省掉一次模型往返。
+- 直出确认只用于成功交付：发送失败、回执缺失、部分失败或结果不确定时保持原错误返回，不附带 `silent` / `reply`。
+- 指定大小文件（`target_bytes`）成功补足并送达时，确认语会说明已按指定大小补足。
+
 ## 0.11.0
 
 - `send_text_file` 新增 `target_bytes`：只追加注释或空行把文件补到指定字节数（最大 2 MiB），

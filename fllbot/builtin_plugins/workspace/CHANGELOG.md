@@ -1,5 +1,11 @@
 # 变更记录
 
+## 0.3.0
+
+- `send_file` 在附件确认送达后返回 `silent: true` 和简短中文 `reply`，供宿主直出确认、省掉一次模型往返；
+  失败或结果不确定时保持原 `send_failed` 错误，不附加 `silent` / `reply`。
+- `download` 等只保存到工作区、未发送给用户的工具不做直出确认。
+
 ## 0.2.0
 
 - 新增 `stat`、`search`、`make_dir`、`move`、`copy`、`delete`，补全工作区文件管理。

@@ -11,6 +11,11 @@ from fllbot.plugin import Context, MessageSegment, Plugin, send_media_reply
 from .service import CaptureError, capture
 
 plugin = Plugin.from_manifest(__file__)
+
+# 交付成功后的直出确认：截图发送/保存确实完成后由宿主直接回复，不再多请求一轮模型。
+SENT_REPLY = "截好啦，已经发出去"
+SAVED_REPLY = "截图已经保存到工作区"
+
 plugin.setting(
     "all_screens",
     type="bool",
@@ -97,7 +102,7 @@ async def capture_screen(ctx: Context) -> dict:
     segments = [MessageSegment.image(
         "base64://" + base64.b64encode(result["data"]).decode("ascii"))]
     sent = await send_media_reply(ctx, segments, "（屏幕截图）", require_ai=True)
-    return {
+    result = {
         "sent": bool(sent),
         "width": result["width"],
         "height": result["height"],
@@ -105,6 +110,10 @@ async def capture_screen(ctx: Context) -> dict:
         "format": result["format"],
         **({} if sent else {"error": "send_failed", "message": "截图已生成，但未能确认发送"}),
     }
+    if sent:
+        result["silent"] = True
+        result["reply"] = SENT_REPLY
+    return result
 
 
 @plugin.on_ai_tool(
@@ -145,4 +154,6 @@ async def capture_screen_file(ctx: Context, path: str = "") -> dict:
         "height": result["height"],
         "format": result["format"],
         "notice": "文件在沙盒工作区中，不会自动发送；需要发送时请使用 capture_screen。",
+        "silent": True,
+        "reply": SAVED_REPLY,
     }

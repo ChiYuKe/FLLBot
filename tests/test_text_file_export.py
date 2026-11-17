@@ -61,6 +61,8 @@ async def test_send_text_file_pads_to_the_requested_size(tmp_path):
         result = await module.send_text_file(ctx, "int main(){return 0;}\n", "fault.cpp", 1024 * 1024)
         assert result["sent"] is True and result["bytes"] == 1024 * 1024
         assert result["padded"] is True and result["target_bytes"] == 1024 * 1024
+        assert result["silent"] is True and result["reply"]
+        assert "fault.cpp" not in result["reply"]
     finally:
         await bot.stop()
 
@@ -88,6 +90,8 @@ async def test_attachment_routes_to_current_chat_with_guarded_receipt(tmp_path, 
     try:
         result = await tool(ctx, "# 中文", filename="说明")
         assert result["sent"] is True and result["files"] == 1 and result["filename"] == f"说明.{kind}"
+        assert result["silent"] is True and result["reply"]
+        assert "说明" not in result["reply"]
         assert len(connection.sent) == 1
         scene, target, segments = connection.sent[0]
         assert scene == ("private" if private else "group")
@@ -98,7 +102,9 @@ async def test_attachment_routes_to_current_chat_with_guarded_receipt(tmp_path, 
         assert len(payload) == result["bytes"]
         assert (payload.decode("utf-8") == "# 中文") if kind == "md" else b"<html" in payload
         connection._closed = True
-        assert (await tool(ctx, "不能发送"))["sent"] is False
+        failed = await tool(ctx, "不能发送")
+        assert failed["sent"] is False
+        assert "silent" not in failed and "reply" not in failed
         assert len(connection.sent) == 1
     finally:
         await bot.stop()
@@ -124,8 +130,9 @@ async def test_invalid_export_does_not_call_sender(monkeypatch):
     module = importlib.import_module("fllbot.builtin_plugins.text.plugin")
     sender = AsyncMock()
     monkeypatch.setattr(module, "send_media_reply", sender)
-    assert "error" in await module.send_html_file(None, "正文", filename="../x")
-    assert "error" in await module.send_markdown_file(None, "")
+    for result in (await module.send_html_file(None, "正文", filename="../x"),
+                   await module.send_markdown_file(None, "")):
+        assert "error" in result and "silent" not in result and "reply" not in result
     sender.assert_not_called()
     for name in ("send_html_file", "send_markdown_file"):
         tool = next(spec for spec in module.plugin.ai_tools if spec.name == name)

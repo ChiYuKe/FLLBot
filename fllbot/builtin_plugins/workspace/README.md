@@ -27,6 +27,11 @@
 文件路径一律相对工作区；`../`、绝对路径、盘符、软链接逃逸和敏感文件名（`.env`、`config.toml`、
 `data/admin_token.txt`、数据库、日志等）会被拒绝。每次读取/写入/抓取都有字节上限。
 
+`send_file` 在回执确认送达后返回 `silent: true` 和一句简短中文 `reply`（“文件已经发到当前会话”），
+同时保留原有 `sent` / `path` / `filename` / `bytes` 字段；宿主在整批工具成功且静默时直接发送确认，
+不再请求模型。发送失败、回执缺失或结果不确定时不返回 `silent` / `reply`，仍返回 `send_failed` 错误。
+`download` 等只把文件保存到工作区、没有发送给用户的工具不做直出确认。
+
 ## 启用
 
 1. 在 `config.toml` 的 `[sandbox]` 中确认 `enabled = true`，按需设置 `workspace`、`allow_write`、

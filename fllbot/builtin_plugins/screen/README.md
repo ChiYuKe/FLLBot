@@ -9,6 +9,11 @@
 | `screen__capture_screen` | `screen.capture` + `qq.send` | 截取屏幕并把图片发送到当前会话 |
 | `screen__capture_screen_file` | `screen.capture` + `fs.write` | 截取屏幕并保存到沙盒工作区 |
 
+截图发送确认送达或保存确实完成后，工具会返回 `silent: true` 和一句简短中文 `reply`
+（“截好啦，已经发出去” / “截图已经保存到工作区”），宿主在整批工具成功且静默时直接发送确认，
+省掉一次模型往返；原有 `sent` / `saved` / `path` / `width` / `height` / `bytes` / `format` 字段保持不变。
+截屏失败、发送失败、回执缺失或写入失败时不会返回 `silent` / `reply`，保持原错误返回。
+
 注意：截取的是**宿主电脑**的屏幕，不是提问者的设备。截图可能包含桌面上的聊天窗口、令牌、文档等隐私内容。
 
 ## 启用条件

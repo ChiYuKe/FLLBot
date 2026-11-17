@@ -140,7 +140,9 @@ async def test_render_uses_guarded_delivery(monkeypatch):
     monkeypatch.setattr(module, "send_media_reply", sender)
     ctx = SimpleNamespace(settings={})
     result = await module.render_image(ctx, "你好，世界！")
-    assert result == {"sent": True, "images": 1, "pages_in_image": 1}
+    assert result["sent"] is True and result["images"] == 1 and result["pages_in_image"] == 1
+    assert result["silent"] is True and result["reply"]
+    assert "你好" not in result["reply"]
     args, kwargs = sender.call_args
     assert args[0] is ctx and args[2] == "你好，世界！"
     assert kwargs == {"require_ai": True}
@@ -218,7 +220,9 @@ async def test_diagram_tool_renders_and_sends(monkeypatch):
 
     result = await module.render_diagram(ctx, source, "分层")
 
-    assert result == {"sent": True, "images": 1}
+    assert result["sent"] is True and result["images"] == 1
+    assert result["silent"] is True and result["reply"]
+    assert "分层" not in result["reply"]
     args, kwargs = sender.call_args
     assert args[0] is ctx
     assert args[2] == "分层"

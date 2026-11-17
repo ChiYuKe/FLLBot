@@ -52,6 +52,20 @@ plugin.setting(
 plugin.setting("font_size", type="int", label="图片字号", default=24, min=16, max=48)
 plugin.setting("image_width", type="int", label="图片宽度", default=900, min=400, max=1600)
 
+# 交付成功后的直出确认：宿主在整批静默且无失败时直接发送 reply，省掉一次模型往返。
+# 只在回执确认送达后附加；失败、回执缺失或结果不确定时保持原错误返回。
+FILE_SENT_REPLY = "文件已经发到当前会话啦"
+PADDED_FILE_SENT_REPLY = "文件已经发到当前会话，已按指定大小补足"
+IMAGE_SENT_REPLY = "图片已经发出去啦"
+DIAGRAM_SENT_REPLY = "架构图已经发出去了"
+
+
+def _confirmed(result: dict, reply: str) -> dict:
+    if result.get("sent") is True:
+        result["silent"] = True
+        result["reply"] = reply
+    return result
+
 
 def schema(**properties: dict) -> dict:
     return {
@@ -187,7 +201,10 @@ async def render_image(ctx: Context, text: str, format: str = "markdown") -> dic
         return {"error": f"无法合成长图：{exc}"}
     segments = [MessageSegment.image("base64://" + base64.b64encode(image_data).decode("ascii"))]
     sent = await send_media_reply(ctx, segments, text, require_ai=True)
-    return {"sent": sent, "images": 1 if sent else 0, "pages_in_image": len(pages) if sent else 0}
+    return _confirmed(
+        {"sent": sent, "images": 1 if sent else 0, "pages_in_image": len(pages) if sent else 0},
+        IMAGE_SENT_REPLY,
+    )
 
 
 diagram_parameters = {
@@ -238,7 +255,7 @@ async def render_diagram(ctx: Context, text: str, title: str = "") -> dict:
     segments = [MessageSegment.image("base64://" + base64.b64encode(image_data).decode("ascii"))]
     summary = title.strip() or "架构图"
     sent = await send_media_reply(ctx, segments, summary, require_ai=True)
-    return {"sent": sent, "images": 1 if sent else 0}
+    return _confirmed({"sent": sent, "images": 1 if sent else 0}, DIAGRAM_SENT_REPLY)
 
 
 def file_parameters(*, html: bool = False) -> dict:
@@ -268,7 +285,8 @@ async def send_document(
     if kind == "text" and target_bytes:
         result["target_bytes"] = target_bytes
         result["padded"] = len(payload) >= target_bytes > len(text.encode("utf-8"))
-    return result
+    reply = PADDED_FILE_SENT_REPLY if result.get("padded") else FILE_SENT_REPLY
+    return _confirmed(result, reply)
 
 
 @plugin.on_ai_tool(

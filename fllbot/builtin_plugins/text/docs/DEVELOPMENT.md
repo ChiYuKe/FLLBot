@@ -20,6 +20,18 @@ Pillow 在排版时延迟导入，缺失依赖不影响其他文本工具加载�
 新增语法需同步 `tests/test_diagram_render.py` 与 README 的支持列表；调整布局后应检查 TD/LR、回边、同层边、
 分组嵌套和超限报错，单图限制为 60 节点 / 140 连线 / 3200×4800 像素。
 
+## 交付确认（直出快路径）
+
+复用宿主 `send_media_reply` 的图片、架构图与三个文件工具，在 `send_media_reply` 返回 `True`
+（回执确认送达）时才通过 `_confirmed()` 追加 `silent: true` 和一句中文 `reply`。宿主在整批工具
+成功、静默且无失败时直接发送 `reply`，不再请求模型。要点：
+
+- 只在确实送达后设置；`sent is False`、发送抛错（含未知回执）、仅导出未发送时都不加 `silent` / `reply`。
+- 保留原有成功字段（`sent` / `files` / `bytes` / `filename` / `pages_in_image` 等），日志与混合批次继续可用。
+- `reply` 固定为简短中性确认，不复述正文、不含路径、文件名、内部 id 或 JSON。
+- 新增发送类工具时沿用 `_confirmed()`；测试同时覆盖成功（`silent is True`、`reply` 非空）
+  与失败（不含 `silent` / `reply`）两条路径。
+
 `tree_render.py` 专门绘制目录树行、缩进引导线以及名称/说明两列；`format=tree` 直接进入此模块，
 Markdown 代码块由 `code_render.py` 检测树枝后复用同一实现，不修改普通正文排版。
 `elk_layout.cjs` 只负责 stdin/stdout JSON 与本地 ELK 0.12.1 调用；通过参数数组启动 Node，

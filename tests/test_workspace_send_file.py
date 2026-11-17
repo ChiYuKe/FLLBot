@@ -33,6 +33,8 @@ async def test_send_file_sends_workspace_binary_as_attachment(tmp_path, monkeypa
     files.write_bytes("dist/app.py", b"print('hello')\n")
     result = await module.send_file(ctx, "dist/app.py")
     assert result["sent"] is True and result["filename"] == "app.py"
+    assert result["silent"] is True and result["reply"]
+    assert "app.py" not in result["reply"] and "dist" not in result["reply"]
     segments, content, require_ai = sent[0]
     assert segments[0].type == "file" and segments[0].data["name"] == "app.py"
     raw = str(segments[0].data["file"]).removeprefix("base64://")
@@ -41,6 +43,19 @@ async def test_send_file_sends_workspace_binary_as_attachment(tmp_path, monkeypa
 
     renamed = await module.send_file(ctx, "dist/app.py", "renamed.py")
     assert renamed["filename"] == "renamed.py"
+    assert renamed["silent"] is True and renamed["reply"]
+
+
+async def test_send_file_failure_is_not_silent(tmp_path, monkeypatch):
+    async def failed(ctx, segments, content, *, require_ai=True):
+        return False
+
+    monkeypatch.setattr(module, "send_media_reply", failed)
+    ctx, files = _ctx(tmp_path)
+    files.write_bytes("dist/app.py", b"print('hello')\n")
+    result = await module.send_file(ctx, "dist/app.py")
+    assert result["sent"] is False and result["error"] == "send_failed"
+    assert "silent" not in result and "reply" not in result
 
 
 async def test_send_file_rejects_dangerous_types_and_missing_files(tmp_path, monkeypatch):
@@ -75,6 +90,8 @@ async def test_download_saves_binary_and_rejects_oversized(tmp_path):
     ctx = SimpleNamespace(sandbox=SimpleNamespace(policy=policy, files=files, network=network))
     saved = await module.download(ctx, "http://example.com/app.bin", "assets/app.bin")
     assert saved["saved"] is True and saved["bytes"] == 8
+    # 只保存到工作区、没有发送给用户，不能直出确认。
+    assert "silent" not in saved and "reply" not in saved
     assert (tmp_path / "workspace" / "assets" / "app.bin").read_bytes() == b"\x00\x01binary"
     oversized = await module.download(ctx, "http://example.com/big", "assets/big.bin")
     assert oversized["error"] == "download_too_large"

@@ -1,7 +1,7 @@
 schema_version = 1
 api_version = 1
 name = "screen"
-version = "0.1.0"
+version = "0.2.0"
 description = "截取当前屏幕并发送或保存到沙盒工作区（默认关闭）"
 author = ""
 category = "plugin"
