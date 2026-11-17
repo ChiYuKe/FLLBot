@@ -233,9 +233,9 @@ async def test_send_whisper_tool_is_silent_only_after_delivery(tmp_path, monkeyp
             ctx, "emotion__send_whisper", {"kind": "secret"}, registry, refresh=lambda _: ([], registry)
         )
         payload = json.loads(output)
-        assert payload["sent"] is True
-        assert payload["silent"] is True
-        assert 0 < len(payload["reply"]) <= 60
+        assert payload.get("sent") is True, payload
+        assert payload.get("silent") is True, payload
+        assert 0 < len(payload.get("reply") or "") <= 60, payload
         assert silent is True
         assert any(call[0] == "send_private_msg" for call in connection.calls)
 
