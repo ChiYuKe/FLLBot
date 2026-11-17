@@ -105,8 +105,10 @@ plugin.setting(
 plugin.agent_instruction(
     "weather_card",
     tools=["weather_card"],
-    text="用户想直接看到天气、要天气图片或天气卡片时调用 weather_card，卡片会自动发送到当前会话；"
-    "只要数据、准备自己总结时用 get_weather。图片发送成功后不要重复图内的完整数据，只补一句简短说明。",
+    text="用户问天气（今天/明天天气、气温、下不下雨、穿衣、紫外线等）时，默认先调用 weather_card："
+    "它会查询并直接发送天气卡片到当前会话，卡片已包含实时天气和预报。"
+    "只有用户明确只要文字或数据、明确不要图片，或 weather_card 返回被沙盒拒绝、图片已关闭、渲染失败时，"
+    "才改用 get_weather 的文字结果简要回答；卡片发送成功后只补一句简短说明，不要重复图内数据。",
 )
 
 _USER_AGENT = (
@@ -247,6 +249,16 @@ class _PageTextParser(HTMLParser):
         return title, content
 
 
+# 代理软件的 fake-IP DNS 会把任意域名解析到 198.18.0.0/15（RFC 2544 基准测试网段）。
+# 该网段不会出现在真实局域网里，连接由本地代理接管转发，因此按公网地址处理；
+# 否则开了代理的机器上任何网页都会被判成“本机、内网或非公网地址”而读不到。
+_FAKE_IP_RANGE = ipaddress.ip_network("198.18.0.0/15")
+
+
+def _public_address(address) -> bool:
+    return address in _FAKE_IP_RANGE or address.is_global
+
+
 def _validate_public_url(value: str) -> str:
     parsed = urlsplit((value or "").strip())
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password:
@@ -265,7 +277,7 @@ def _validate_public_url(value: str) -> str:
             ]
         except OSError as exc:
             raise ValueError(f"无法解析网页域名：{parsed.hostname}") from exc
-    if not addresses or any(not address.is_global for address in addresses):
+    if not addresses or any(not _public_address(address) for address in addresses):
         raise ValueError("出于安全原因，不能读取本机、内网或非公网地址")
     return value.strip()
 
@@ -942,9 +954,11 @@ async def read_webpage(ctx: Context, url: str, offset: int = 0) -> dict[str, Any
     capabilities=("net.read",),
     title="天气查询",
     description=(
-        "查询城市的实时天气和未来几天预报（默认腾讯 QQ 天气，可配置为 Open-Meteo），只返回结构化文字数据。"
-        "回答天气、气温、下雨、穿衣等问题前必须调用，不要凭记忆或常识回答；"
-        "用户没写城市时用插件配置的默认城市。用户想直接看到天气图片时改用 weather_card。"
+        "查询城市的实时天气和未来几天预报（默认腾讯 QQ 天气，可配置为 Open-Meteo），只返回结构化文字数据，不发送图片。"
+        "用户问天气时默认应调用 weather_card 发送卡片；只有用户明确只要文字/数据、不要图片，"
+        "或 weather_card 被沙盒拒绝、图片配置关闭、渲染失败时，才用本工具并文字作答。"
+        "回答天气、气温、下雨、穿衣等问题前必须调用工具查询，不要凭记忆或常识回答；"
+        "用户没写城市时用插件配置的默认城市。"
     ),
     parameters={
         "type": "object",
@@ -976,10 +990,10 @@ async def get_weather(ctx: Context, city: str = "", days: int | None = None) -> 
     timeout=40,
     max_output_chars=2400,
     description=(
-        "查询城市天气并直接发送一张天气卡片图到当前会话，同时返回结构化摘要。"
-        "用户要求看天气图片、天气卡片，或希望天气结果更直观时调用；只要文字数据时用 get_weather。"
-        "图片已包含实时天气和未来几天预报，发送成功后只补一句简短说明，不要重复图片里的数据。"
-        "被沙盒拒绝（qq_send_disabled 等）时如实说明，不要改用其他工具绕过。"
+        "用户问天气时默认调用：查询城市天气并直接发送一张天气卡片图到当前会话，同时返回结构化摘要。"
+        "卡片已包含实时天气和未来几天预报，发送成功后只补一句简短说明，不要重复图片里的数据。"
+        "只有用户明确只要文字/数据、明确不要图片，或本工具被沙盒拒绝、图片配置关闭、渲染失败时，"
+        "才改用 get_weather 的文字结果回答。被沙盒拒绝（qq_send_disabled 等）时如实说明，不要改用其他工具绕过。"
     ),
     parameters={
         "type": "object",

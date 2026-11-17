@@ -514,6 +514,16 @@ async def test_weather_card_tool_sends_image(tmp_path: Path, monkeypatch: pytest
         await bot.stop()
 
 
+def test_weather_guidance_defaults_to_card() -> None:
+    tools = {spec.name: spec for spec in web.plugin.ai_tools}
+    assert "默认" in tools["weather_card"].description
+    assert "weather_card" in tools["get_weather"].description
+    instructions = {item.name: item.text for item in web.plugin.agent_instructions}
+    text = instructions["weather_card"]
+    assert "默认先调用 weather_card" in text
+    assert "要不要图片" not in text
+
+
 async def test_weather_card_tool_reports_disabled_image(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     plugin_dir = tmp_path / "plugins"
     plugin_dir.mkdir()
@@ -635,3 +645,19 @@ async def test_agent_sees_all_granted_web_tools(tmp_path: Path, monkeypatch: pyt
         }
     finally:
         await bot.stop()
+
+
+def test_read_webpage_allows_proxy_fake_ip_but_not_lan(monkeypatch: pytest.MonkeyPatch) -> None:
+    """代理 fake-IP（198.18.0.0/15）不是真实内网，必须放行；真实内网仍然拒绝。"""
+    resolved = {"proxy.example.com": "198.18.2.80", "lan.example.com": "192.168.1.10"}
+
+    def getaddrinfo(host: str, port: int, **kwargs: Any):
+        return [(2, 1, 6, "", (resolved.get(host, "93.184.216.34"), port))]
+
+    monkeypatch.setattr(web.socket, "getaddrinfo", getaddrinfo)
+    assert web._validate_public_url("https://proxy.example.com/item") == "https://proxy.example.com/item"
+    assert web._validate_public_url("https://public.example.com/item") == "https://public.example.com/item"
+    with pytest.raises(ValueError):
+        web._validate_public_url("https://lan.example.com/item")
+    with pytest.raises(ValueError):
+        web._validate_public_url("http://127.0.0.1/item")

@@ -34,8 +34,9 @@ QQ 天气不提供体感温度和逐日降水概率，这两项会直接从卡�
 
 - `web__web_search`：搜索实时信息
 - `web__read_webpage`：读取用户给出的公开网页正文；页面较长时按片段续读
-- `web__get_weather`：查天气，返回结构化文字数据（回答天气问题前必须调用）
-- `web__weather_card`：查天气并直接发送一张天气卡片图片，同时返回相同的数据
+- `web__weather_card`：问天气时默认调用，查天气并直接发送一张天气卡片，同时返回相同的数据
+- `web__get_weather`：查天气，只返回结构化文字数据；仅当用户明确只要文字/数据、不要图片，
+  或卡片被沙盒拒绝/关闭/渲染失败时使用
 - `web__get_current_time`：查当前时间（回答「现在几点」前必须调用）
 
 `web__weather_card` 声明了 `net.read` 与 `qq.send`，自动参与或沙盒关闭发送时会被拒绝，此时模型会说明限制。
@@ -59,6 +60,9 @@ QQ 天气不提供体感温度和逐日降水概率，这两项会直接从卡�
 
 天气默认来自 [腾讯天气（QQ 天气）](https://tianqi.qq.com/)，不需要密钥；切到 Open-Meteo 时数据来自 [open-meteo.com](https://open-meteo.com/)。
 搜索默认走必应中文结果页。不需要在 `config.toml` 里加配置，全部通过插件配置（管理端或 `PATCH /api/plugins/web/settings`）修改。
+
+> 天气默认发卡片：`/天气` 命令本来就默认回卡片；智能体问天气时也会默认调用 `web__weather_card` 发卡片，
+> 只在用户明确只要文字/数据、或卡片被关闭/拒绝/渲染失败时退回 `web__get_weather` 的文字结果。
 
 ## 启用
 
