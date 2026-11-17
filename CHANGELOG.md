@@ -33,6 +33,30 @@
 
 ### 新增
 
+- **私聊智能体**：`agent` 插件新增全局设置 `private_enabled`（默认关闭）与 `private_allowed_tools`（私聊独立工具白名单），
+  开启后好友私聊的普通文字交给同一套自然语言智能体：使用私聊场景历史、Bot 默认模型/人格/额度，工具执行仍经
+  ToolExecutor 与沙盒裁决。私聊与群聊按场景隔离：群历史、群记忆（含摘要与 `agent__search_history`）不进入私聊，
+  私聊历史也不进入群；群级设置与单群沙盒覆盖不作用于私聊，工作区按 `private_<QQ>` 分目录、沙盒按全局 `[sandbox]`。
+  私聊消息视为明确请求，不参与自动参与评分、不提供 `agent__stay_silent`；`/任务进度`、`/任务取消`、`/任务补充`
+  与执行期间直接追问在私聊同样可用。管理端新增「配置 → 默认行为 → 私聊智能体」开关与工具选择，消息追踪增加
+  `private_disabled`、`private_trigger_matched`、`account_disabled`、`access_denied` 原因码。
+
+- **文档生成插件**：新增独立 `docs` 插件与 `docs__write_docx` / `docs__write_xlsx` / `docs__write_pptx` 工具，
+  让群友“做个表格 / 报告 / PPT 发我”时生成真正的 `.docx` / `.xlsx` / `.pptx` 并通过 QQ 文件附件发送。
+  只接受受控结构（Word 标题/正文/要点/表格、Excel 行列数据、PPT 页标题/要点），不支持图片、超链接、公式、
+  任意 XML 或模板；文件名严格清洗，`=` 开头的单元格按纯文本写入防止公式注入；生成后立即用对应库重新打开校验，
+  失败即删除且不发送。三个工具声明 `qq.send_file`，自动参与被沙盒拒绝、需在「允许调用的工具」授权；
+  默认单文件 8 MB、总字数 50000、Word 60 章节、PPT 30 页、表格 2000 行/50 列/20000 单元格，生成文件在
+  `data/plugins/docs/files/` 按保留天数清理。宿主 `pyproject.toml` 新增 python-docx、openpyxl、python-pptx 依赖。
+
+- **长期记忆插件**：新增独立 `memory` 插件与 `memory__remember` / `memory__recall` / `memory__forget` 工具，
+  按「机器人账号 + 群/私聊 + 用户」三层隔离保存群友本人明确要求记住的事实与偏好；`/记忆`、`/忘记 <编号|全部>`
+  命令只操作本人在当前会话的记录。默认每人 50 条、单条 200 字、保留 180 天，重复内容去重，写入时与每小时清理
+  过期记忆；密码、令牌、验证码、证件号等凭据会被确定性拒绝。写工具在自动参与（未 @、未叫到机器人）时返回
+  `addressed_required` 且不落库，提示词片段只在对应工具可见时注入；v1 没有新增宿主 `memory.write` 能力，
+  自动参与边界暂由插件回调按 `trigger_decision.addressed` 判断（后续若加宿主能力再迁移）。数据保存在
+  `data/plugins/memory/` 独立数据库。
+
 - **缺氧知识库中文翻译索引**：`oni_knowledge` 新增插件设置 `strings_file`，可填游戏简体中文 .po 文件或
   `StreamingAssets/strings` 目录；检索时把「电解器」这类中文显示名按游戏翻译展开成 `Electrolyzer` 等代码标识符，
   结果附带 `translated_terms` 与 `translations`。翻译文件按修改时间缓存，缺失、损坏或超过 64 MB 时退回内置

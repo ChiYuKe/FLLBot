@@ -205,6 +205,7 @@
 - 模型：群 policy.provider → Bot defaults.provider → 任务/场景路由 → 系统默认 → 配置兼容回退。人格：群 llm.persona → Bot defaults.persona → llm.persona → 兜底。
 - 响应：插件默认设置 → Bot reply_mode → 插件旧群覆盖 → groups.config.policy；触发方式组合以群策略为准。唤醒词由全局 chat.wake_word 非空值、Bot wake_word、昵称依次确定。
 - 群 deny_groups 先于允许名单与群 enabled；group_access=auto 兼容旧白名单，listed 可以空名单拒绝全部。私聊由 allow_private 单独约束。插件全局明确停用优先于所有群覆盖；声明默认关闭且未全局明确停用时，群仍可单独开启。群覆盖保留，重新全局启用后继续生效。
+- agent 插件的 `private_enabled` / `private_allowed_tools` 是全局插件设置（保存为 `0:<字段>`），不声明 `group_scoped`：群覆盖、群策略与 Bot 回复方式都不影响私聊；私聊沙盒按全局 `[sandbox]` 解析，工作区按 `private_<QQ>` 隔离，触发/冷却/历史均按私聊场景单独计算。
 - 旧 allowed_plugins 会通过迁移展开为具体 allowed_tools。旧插件群覆盖仍可读；群策略和插件设置不同存储层同时存在时，应使用生效来源检查。人格不再内置于包中，用户文件在项目 personas/；目录顺序后者覆盖前者。
 - 插件字段按 GET /api/plugins/<名称>/settings 的 schema 查看默认值、secret、group_scoped 和类型。全局/群原值由插件管理，群响应旧层不会由读取接口静默迁移。secret 默认值和生效值经管理 API 遮盖。
 

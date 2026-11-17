@@ -12,6 +12,8 @@ fllbot/builtin_plugins/workspace/  使用沙盒的示例工具包
 fllbot/builtin_plugins/screen/     默认关闭的宿主截屏工具（screen.capture）
 plugins/email/                     通过 QQ 邮箱发信的工具（email.send）
 plugins/imagegen/                  本地 Pillow 画机器人形象（可选远程图片模型）
+plugins/docs/                      受控生成 Word/Excel/PPT 并作为附件发送（qq.send_file）
+plugins/memory/                    仅写插件自己数据库的长期记忆工具（无宿主沙盒能力）
 ```
 
 ## 1. 为什么需要三层
@@ -150,6 +152,7 @@ destructive 处理：自动参与不执行，且默认只允许超级管理员�
 FLLBot 启动时自动创建；`GET /api/sandbox` 的 `workspace` 返回实际绝对路径。
 `workspace_scope = "scene"`（默认）会在其下按 `group_<群号>` / `private_<QQ>` 再分目录，
 不同群默认看不到彼此文件；设为 `shared` 才回到所有会话共用一个目录。
+私聊智能体沿用同一规则（工作区为 `private_<QQ>`），但群级沙盒覆盖只作用于群，私聊按全局 `[sandbox]` 裁决。
 `GET /api/sandbox?group_id=` 返回该群实际使用的工作区路径。
 
 `ctx.sandbox.files` 提供 `read_text`、`read_bytes`、`write_text`、`write_bytes`、`list_dir`、

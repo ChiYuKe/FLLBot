@@ -27,6 +27,8 @@
 
 `GET /api/console/traces/{trace_id}` 读取详情，trace_id 为 32 位小写十六进制；不存在或超过保留期返回 404。详情包含账号、场景、场景 ID、协议消息 ID、开始时间、总耗时、结果、truncated 和 steps。每个阶段包含 stage、code、status、component、elapsed_ms，可选 duration_ms。诊断 ID 同时附加到该任务产生的 JSONL/内存日志，近期运行日志可按此 ID 搜索；日志保留范围与诊断表不同。
 
+`GET /api/console/tools/stats` 按工具聚合 `tool_executions` 执行事实，不返回工具参数、结果正文、消息正文或昵称。查询参数：`days` 为 1–90（默认 7），`self_id` 为可选正整数 Bot QQ；非法参数返回 422。响应为 `window`（days/since/self_id）、`items` 与 `totals`：每项含 `tool`、`calls`、`succeeded`、`failed`、`uncertain`、`blocked`（`cancelled`，已认领后被权限/沙盒复核、关闭或繁忙中止）、`running`（瞬态，重启时转 uncertain）、`avg_ms`（仅已结束记录，可为 null）、`last_error`（最近一条错误记录的异常类名，可为 null）与 `last_at`（unix 秒，可为 null）；items 按 `calls DESC, tool ASC` 排序。沙盒在认领前直接拒绝不写入执行表，只出现在消息诊断的 `tool_blocked`。
+
 记录覆盖宿主接收、重复消息、排队/丢弃、准入、处理器匹配与权限、智能体触发/概率/冷却/沉默、模型重试及备用服务、工具调用、宿主发送与 OneBot 发送响应。只记录元数据，不保存消息正文、模型内容、工具参数/结果、URL、密钥或异常字符串。插件自行创建并脱离当前消息生命周期的后台任务不继续写入已完成的消息记录；外部服务内部执行过程也不在该链路中。
 
 数据库版本 8 增加 message_traces 表与索引，查询只展示最近 7 天，写入时清理过期与超过最近 10000 条的记录。每条最多 100 个阶段，超过时标记 truncated，但汇总结果仍统计后续阶段。后台写入队列最多 500 条，满时丢弃新诊断并计数，不阻塞消息队列；写入失败只计数与记录简短运行日志。未完成处理的消息尚无终态记录，异常进程退出可能丢失尚未落库的诊断。

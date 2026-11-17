@@ -14,8 +14,9 @@
 | 有情绪、回复不那么客服腔 | `emotion` 插件 + `emotion__read_mood` | 安装并启用；勾选 `read_mood` 后注入情绪语气提示，不改变工具权限 |
 | 主动给正在聊天的群友发临时会话 | `emotion` 插件自动轮询 / `emotion__send_whisper` | 默认只挑最近和机器人说过话、正在群聊的人；有额度与冷却；显式工具需授权，自动参与拒绝 |
 | 记住近期群聊、回查过去 | 群聊记忆、摘要、`agent__search_history` | 默认可用（可按群关闭） |
+| 记住群友本人说过的事实/偏好并回查 | `memory__remember` / `recall` / `forget`，命令 `/记忆`、`/忘记` | 需授权；按账号+群/私聊+用户隔离，只记本人；默认 50 条/200 字/180 天；自动参与不写 |
 | 人格、模型路由、长回复转图片/转发 | Chat 设置与人格库 | 默认可用 |
-| 私聊 | 仅命令与显式入口；群聊 Agent 不处理私聊 | 按配置 |
+| 私聊聊天与工具 | `agent` 私聊智能体（默认关闭，独立全局工具白名单） | 按配置；私聊历史与群记忆隔离，群级设置不适用 |
 
 ## 文件与工作区
 
@@ -23,6 +24,7 @@
 | --- | --- | --- |
 | 生成代码/文本并作为附件发送 | `text__send_text_file` | 需授权；明确请求；30k 字符正文，可用 `target_bytes` 补足到 2 MiB |
 | 生成 HTML / Markdown 文件 | `text__send_html_file`、`text__send_markdown_file` | 需授权；明确请求 |
+| 生成 Word / Excel / PPT 文件 | `docs__write_docx` / `write_xlsx` / `write_pptx` | 需授权；明确请求；受控结构、严格文件名清洗、自动参与拒绝 |
 | 长文本转图片、架构图 | `text__render_image`、`text__render_diagram` | 需授权 |
 | 读写工作区文件 | `workspace__read_file` / `write_file` | 读写分别受 `allow_read` / `allow_write` 控制 |
 | 列出、查看、搜索工作区 | `workspace__list_files`、`stat`、`search` | 只读；有界 |
@@ -56,18 +58,19 @@
 | 需求 | 原因/替代 |
 | --- | --- |
 | 执行本机命令、跑测试、编译 | 进程执行拥有宿主权限，不是当前沙盒能隔离的；默认不提供。需要时用独立 CI/容器或专用插件，并单独评审 |
-| PDF / Word / Excel / PPT 生成 | 当前仅 HTML/Markdown/图片；需要引入文档库与模板治理，建议独立插件 |
+| PDF / Word / Excel / PPT 生成 | Word / Excel / PPT 已由 `docs` 插件提供（受控结构，无模板/图片/公式）；PDF 仍不提供，需要时另做插件 |
 | 邮件附件、HTML 邮件、抄送/密送 | `email` 插件只发送纯文本单封邮件；附件与富文本需要单独评审 |
 | 解压/压缩 ZIP | 可下载 ZIP，但没有解压工具；避免路径穿越与炸弹风险，需专用实现 |
 | 修改机器人配置、插件源码、数据库 | Agent 只调用显式工具，不能直接改宿主；管理操作走管理 API |
-| 跨群/跨账号记忆与文件 | 默认隔离；需要共享时显式把 `workspace_scope` 设为 `shared` 并接受隐私影响 |
+| 跨群/跨账号记忆与文件 | 记忆按账号+场景+用户隔离（`memory` 插件），工作区默认 `scene` 隔离；需要共享时显式把 `workspace_scope` 设为 `shared` 并接受隐私影响 |
 | 自动给所有人发文件/截屏 | 自动参与拒绝 `qq.send_file`、`fs.write`、`screen.capture`；必须明确请求 |
 
 ## 开启顺序
 
 1. `[sandbox]`：按需打开 `allow_write`、`allow_network`、`allow_email`、`allow_screen` 等；默认只读联网。
-2. 插件管理：启用 `text`、`workspace`、`email`、`screen`、`imagegen` 等插件，并配置好外部凭据
-   （`imagegen` 默认本地绘制，无需配置；要画任意画面才需要图片服务地址、密钥与模型）。
+2. 插件管理：启用 `text`、`workspace`、`email`、`screen`、`imagegen`、`memory`、`docs` 等插件，并配置好外部凭据
+   （`imagegen` 默认本地绘制，无需配置；要画任意画面才需要图片服务地址、密钥与模型；`docs` 需要宿主已安装
+   python-docx / openpyxl / python-pptx）。
 3. 工具授权：在「智能体 → 允许调用的工具」逐个勾选，插件启用不等于工具授权。
 4. 群策略：可用 `sandbox_write`、`sandbox_network`、`sandbox_private_network`、`sandbox_email`、`sandbox_screen` 收紧或放宽。
 5. 使用：文件发送、截屏、写入等副作用必须由群友 **@ 或唤醒词明确请求**；自动参与只做只读判断。

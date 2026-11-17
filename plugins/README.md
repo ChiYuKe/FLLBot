@@ -1,9 +1,9 @@
 # 用户插件目录
 
 此目录的每个直接子文件夹就是一个完整 FLLBot 插件包。当前 `voice/`、`web/`、`email/`、`poke/`、`daily/`、
-`steam_workshop/`、`oni_mod/`、`emotion/` 与 `imagegen/` 分别封装语音、联网、QQ 邮箱、戳一戳、定时提醒、
-创意工坊、缺氧 Mod 制作、群聊情绪/悄悄话和图片生成，代码、包头、使用和开发文档归属于各自包内，不再平铺
-`voice.py` / `voice.md`。
+`steam_workshop/`、`oni_mod/`、`emotion/`、`imagegen/`、`memory/` 与 `docs/` 分别封装语音、联网、QQ 邮箱、
+戳一戳、定时提醒、创意工坊、缺氧 Mod 制作、群聊情绪/悄悄话、图片生成、长期记忆和 Word/Excel/PPT 文档生成，
+代码、包头、使用和开发文档归属于各自包内，不再平铺 `voice.py` / `voice.md`。
 
 新建插件：
 
