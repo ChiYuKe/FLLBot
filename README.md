@@ -147,6 +147,22 @@ LLM 客户端和管理 API 可供自定义插件调用。WebUI 将行为与群�
 需要阅读指定链接时授权「读取网页」，需要天气图片时授权「天气图片」；在「智能体 → 允许调用的工具」（或单群详细设置的“可用工具”）里勾选对应工具后，模型才会看到它们；配置项（搜索后端、
 API Key、天气服务、默认城市、预报天数、超时）都在插件配置里，详见 [plugins/web/README.md](plugins/web/README.md)。
 
+## 图片生成（imagegen 插件）
+
+`plugins/imagegen/` 让机器人和智能体按一句话画画：表情包、头像、情绪图都可以。
+
+- **默认本地模式**：用 Pillow 直接画机器人自己的猫娘形象（银灰发、丸子头、猫耳、黑旗袍、大尾巴），
+  不需要密钥、不需要联网，也不落盘。支持 11 种表情（normal/happy/angry/sad/shy/sleepy/surprised/
+  smug/love/cry/blank）、6 种配色（night/sakura/rain/sunset/mint/mono）、最多 16 字气泡和随机种子；
+  提示词里的“生气 / 雨夜 / 樱花 / 委屈”等关键词会自动选表情和配色。
+- **入口**：`/画 <描述>`（`画图` `绘图` `draw`）或智能体工具 `imagegen__draw`；工具还能指定
+  `expression`、`palette`、`caption`、`seed`，换一张时换 seed 即可。
+- **可选远程模式**：管理员可切换 `openai`（OpenAI 兼容 `/images/generations`）、`siliconflow`
+  （Kolors）或 `sdwebui`（本机 Stable Diffusion WebUI），画任意画面；远程结果同样校验后转 PNG 发送。
+- 本地模式画不了别的角色、写实照片或复杂构图，遇到这类请求会如实说明；不会用文字图冒充。
+- 工具声明 `qq.send`，自动参与（没有 @ 或唤醒词）时拒绝生成；未在「智能体 → 允许调用的工具」
+  里授权时模型看不到它。配置与后端示例见 [plugins/imagegen/README.md](plugins/imagegen/README.md)。
+
 ## 邮件发送（email 插件）
 
 `plugins/email/` 让智能体通过 QQ 邮箱发纯文本邮件。群友邮箱通常就是 `QQ号@qq.com`，所以工具直接收 QQ 号，
@@ -166,6 +182,16 @@ API Key、天气服务、默认城市、预报天数、超时）都在插件配�
 - 群级设置 `poke_reply`、`poke_back` 控制是否回应和回戳，`poke_reply_seconds` / `poke_back_seconds` 控制冷却（默认 10 秒）；
 - 智能体工具 `poke__poke` 需在「允许调用的工具」里勾选；只限当前会话，自动参与时拒绝执行；
 - 私聊戳、群友互戳不会触发；被戳回应走 `ctx.llm`，不依赖 `agent` 插件。完整说明见 [plugins/poke/README.md](plugins/poke/README.md)。
+
+## 情绪与悄悄话（emotion 插件）
+
+`plugins/emotion/` 让机器人有按群记录的情绪，并在群友正聊天时偶尔发一条只有对方能看到的群临时会话：
+
+- 被夸、被凶、被复读、深夜、被 @、被戳都会轻微影响心情和精神，情绪按半衰期缓慢回落；
+- `/情绪` 查看当前心情与额度，`/哄哄` 可以哄它，`/悄悄话 关闭` 可按用户关闭主动私聊；
+- 只挑最近和机器人说过话、并且正在群里发言的人，带同群间隔、个人冷却、每群/全局每日额度和安静时段；
+- 勾选 `emotion__read_mood` 后会给智能体附加情绪语气提示，减少客服腔；`emotion__send_whisper` 让模型在群友明确要求时发临时会话；
+- 模型不可用时使用内置情绪化短句；发送失败只进入冷却，不自动重试。完整说明见 [plugins/emotion/README.md](plugins/emotion/README.md)。
 
 ## 沙盒工作区（workspace 插件）
 

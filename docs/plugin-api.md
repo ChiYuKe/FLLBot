@@ -346,7 +346,7 @@ from fllbot.plugin import (
 
 - 同一条消息的处理器按 `priority` 升序执行（命令默认 10，普通消息默认 20，兜底建议 90+）
 - `block=True` 或调用 `ctx.stop()` / `ctx.finish()` 后，后续处理器不再执行
-- 处理器抛异常只会记录日志，不会影响其他插件；配置 `bot.error_reply` 可回一句提示
+- 处理器抛异常只会记录日志，不会影响其他插件；默认按 `bot.error_reply` 回一句提示（留空则只记日志）；发送/协议类失败（`ActionError`、无效回执、连接错误）不再回复
 - 单个处理器受 `plugin.handler_timeout` 限制
 
 ## 存储

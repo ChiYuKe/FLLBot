@@ -11,6 +11,8 @@
 | @ / 唤醒词 / 引用回复 | 触发策略与引用消息解析 | 默认可用 |
 | 被群友戳一戳 | `poke` 插件（复用 `ctx.llm` 回合） | 安装并启用插件；可关回应/回戳并设冷却 |
 | 主动戳群友 | `poke__poke` | 需授权；只限当前会话，自动参与拒绝，必须明确请求或叫到机器人 |
+| 有情绪、回复不那么客服腔 | `emotion` 插件 + `emotion__read_mood` | 安装并启用；勾选 `read_mood` 后注入情绪语气提示，不改变工具权限 |
+| 主动给正在聊天的群友发临时会话 | `emotion` 插件自动轮询 / `emotion__send_whisper` | 默认只挑最近和机器人说过话、正在群聊的人；有额度与冷却；显式工具需授权，自动参与拒绝 |
 | 记住近期群聊、回查过去 | 群聊记忆、摘要、`agent__search_history` | 默认可用（可按群关闭） |
 | 人格、模型路由、长回复转图片/转发 | Chat 设置与人格库 | 默认可用 |
 | 私聊 | 仅命令与显式入口；群聊 Agent 不处理私聊 | 按配置 |
@@ -45,8 +47,9 @@
 | 需求 | 工具 | 状态 |
 | --- | --- | --- |
 | 把文字读出来 | `voice__speak` | 需授权；公开语音服务 |
+| 画图：表情包、头像、情绪图 | `imagegen__draw`（或 `/画`） | 需授权；默认本地 Pillow 画机器人猫娘形象，无需配置；远程模型可选；自动参与拒绝 |
+| 把文字排版成图片、架构图 | `text__render_image`、`text__render_diagram` | 需授权 |
 | 截取宿主屏幕 | `screen__capture_screen` / `capture_screen_file` | **默认关闭**；需超级管理员/群管理 + 明确请求 |
-| 图片生成/发送 | `text__render_image`、`screen__*` | 需授权 |
 
 ## 刻意不提供或需要额外插件
 
@@ -63,7 +66,8 @@
 ## 开启顺序
 
 1. `[sandbox]`：按需打开 `allow_write`、`allow_network`、`allow_email`、`allow_screen` 等；默认只读联网。
-2. 插件管理：启用 `text`、`workspace`、`email`、`screen` 等插件，并配置好外部凭据。
+2. 插件管理：启用 `text`、`workspace`、`email`、`screen`、`imagegen` 等插件，并配置好外部凭据
+   （`imagegen` 默认本地绘制，无需配置；要画任意画面才需要图片服务地址、密钥与模型）。
 3. 工具授权：在「智能体 → 允许调用的工具」逐个勾选，插件启用不等于工具授权。
 4. 群策略：可用 `sandbox_write`、`sandbox_network`、`sandbox_private_network`、`sandbox_email`、`sandbox_screen` 收紧或放宽。
 5. 使用：文件发送、截屏、写入等副作用必须由群友 **@ 或唤醒词明确请求**；自动参与只做只读判断。
