@@ -1,0 +1,68 @@
+name: verify
+
+# 统一验证入口：每次 push 到 master、PR 和手动触发都跑一遍 scripts/verify.ps1
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+# 只读仓库内容即可，本工作流不写回任何东西
+permissions:
+  contents: read
+
+# 同一分支/PR 只保留最新一次运行，推送新提交时取消仍在跑的旧任务
+concurrency:
+  group: verify-${{ github.ref }}
+  cancel-in-progress: true
+
+# Windows runner 默认控制台编码并非 UTF-8，显式指定避免中文日志乱码
+env:
+  PYTHONUTF8: "1"
+  PYTHONIOENCODING: utf-8
+
+jobs:
+  verify:
+    name: Windows / Python 3.12 / Node 20
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # 架构图/结构树渲染测试依赖 Node，确保 runner 上 node 可用
+      - name: Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-dependency-glob: pyproject.toml
+
+      - name: Show toolchain versions
+        shell: pwsh
+        run: |
+          python --version
+          node --version
+          uv --version
+
+      - name: Create virtual environment
+        shell: pwsh
+        run: python -m venv .venv
+
+      # 安装到 .venv 而不是 setup-uv 的隔离环境，与本地 .\scripts\verify.ps1 保持一致
+      - name: Install project with dev extras
+        shell: pwsh
+        run: uv pip install --python .venv\Scripts\python.exe -e ".[dev]"
+
+      - name: Run verify.ps1
+        shell: pwsh
+        run: .\scripts\verify.ps1
