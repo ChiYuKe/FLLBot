@@ -1,0 +1,11 @@
+schema_version = 1
+api_version = 1
+name = "emotion"
+version = "0.1.0"
+description = "群聊情绪与主动悄悄话：记录心情、让回复更有情绪，并向最近聊天的群友发送临时会话"
+author = ""
+category = "plugin"
+
+requires_fllbot = ">=0.2,<1"
+requires_python = ">=3.11"
+dependencies = []
