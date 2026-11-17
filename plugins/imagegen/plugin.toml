@@ -1,0 +1,11 @@
+schema_version = 1
+api_version = 1
+name = "imagegen"
+version = "0.1.0"
+description = "图片生成：按提示词画表情包、头像和插画，支持 OpenAI 兼容接口、硅基流动与本机 SD WebUI"
+author = ""
+category = "plugin"
+
+requires_fllbot = ">=0.2,<1"
+requires_python = ">=3.11"
+dependencies = []
