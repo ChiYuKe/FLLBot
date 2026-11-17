@@ -6,11 +6,16 @@ import csv
 import heapq
 import json
 import ntpath
+import os
 import re
 from functools import lru_cache
 from pathlib import Path
 
 DEFAULT_INDEX = r"C:\Users\Administrator\Desktop\Project\ONI缺氧\NOIMods\ONI源码\Assembly-CSharp\_INDEX"
+DEFAULT_STRINGS = (
+    r"D:\Program Files (x86)\Steam\steamapps\common\OxygenNotIncluded"
+    r"\OxygenNotIncluded_Data\StreamingAssets\strings\strings_preinstalled_zh_klei.po"
+)
 ALIASES = {
     "复制人": ("MinionConfig", "BaseMinionConfig", "MinionIdentity", "MinionBrain", "MinionResume", "Minion"),
     "小人": ("MinionConfig", "BaseMinionConfig", "MinionIdentity", "Minion"),
@@ -26,10 +31,185 @@ ALIASES = {
     "技能": ("MinionResume", "Skill"),
     "存档": ("Save", "Serialize"),
 }
+# 游戏只把显示名放在翻译文件里；中文名必须靠它映射回代码标识符，别名表只是兜底。
+NAME_FIELDS = {"NAME", "NAME_PRETTY", "TITLE"}
+MAX_TRANSLATION_BYTES = 64 * 1024 * 1024
+MAX_TRANSLATION_TERMS = 8
+CJK_RUN = re.compile(r"[\u3400-\u9fff]+")
+_TAG = re.compile(r"<[^>]*>")
+_PLACEHOLDER = re.compile(r"\{[^{}]*\}")
+_PO_LINK = re.compile(r'<link="([A-Za-z0-9_]+)"')
+_PO_ESCAPES = {"n": "\n", "t": "\t", "r": "\r", '"': '"', "\\": "\\"}
 
 
 class KnowledgeError(ValueError):
     pass
+
+
+def _po_quoted(line: str) -> str:
+    start = line.find('"')
+    if start < 0:
+        return ""
+    match = re.match(r'((?:\\.|[^"\\])*)"', line[start + 1:])
+    return match.group(1) if match else ""
+
+
+def _po_unescape(value: str) -> str:
+    return re.sub(r"\\(.)", lambda item: _PO_ESCAPES.get(item.group(1), item.group(1)), value)
+
+
+def _po_entries(path: Path) -> list[tuple[str, str, str]]:
+    """读取 Klei 的 .po 翻译文件；支持多行 msgid/msgstr 与转义引号。"""
+    entries: list[tuple[str, str, str]] = []
+    context, source, target, mode = "", [], [], ""
+
+    def flush() -> None:
+        nonlocal context, source, target, mode
+        if context and target:
+            entries.append((context, "".join(source), "".join(target)))
+        context, source, target, mode = "", [], [], ""
+
+    with path.open(encoding="utf-8-sig", errors="replace") as stream:
+        for raw in stream:
+            line = raw.rstrip("\r\n")
+            if not line.strip():
+                flush()
+                continue
+            if line.startswith("#"):
+                continue
+            if line.startswith("msgctxt "):
+                flush()
+                context = _po_unescape(_po_quoted(line))
+                mode = "ctxt"
+            elif line.startswith("msgid_plural "):
+                mode = "plural"
+            elif line.startswith("msgid "):
+                source = [_po_unescape(_po_quoted(line))]
+                mode = "id"
+            elif line.startswith("msgstr["):
+                mode = "str_plural"
+            elif line.startswith("msgstr "):
+                target = [_po_unescape(_po_quoted(line))]
+                mode = "str"
+            elif line.startswith('"'):
+                value = _po_unescape(_po_quoted(line))
+                if mode in {"id", "plural"}:
+                    source.append(value)
+                elif mode == "str":
+                    target.append(value)
+    flush()
+    return entries
+
+
+def _plain(value: str) -> str:
+    """去掉富文本标签与占位符，只留下可比较的显示名。"""
+    text = _PLACEHOLDER.sub("", _TAG.sub("", value))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _identifier(key: str, text: str) -> str:
+    """用 <link="ID"> 或 STRINGS 键倒数第二段得到代码里的标识符（大小写无关匹配）。"""
+    link = _PO_LINK.search(text)
+    parts = key.split(".")
+    candidate = link.group(1) if link else (parts[-2] if len(parts) >= 3 else "")
+    return candidate if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{1,60}", candidate or "") else ""
+
+
+class TranslationIndex:
+    """中文显示名 → 代码标识符；只保留名称与截断后的描述，内存有界。"""
+
+    __slots__ = ("names", "descriptions")
+
+    def __init__(self, entries: list[tuple[str, str, str]]) -> None:
+        names: dict[str, list[tuple[str, str, str]]] = {}
+        prefixes: dict[str, str] = {}
+        descriptions: dict[str, str] = {}
+        for key, msgid, text in entries:
+            parts = key.split(".")
+            if len(parts) < 3 or parts[0] != "STRINGS" or parts[-1] not in NAME_FIELDS:
+                continue
+            identifier = _identifier(key, text)
+            display = _plain(text)
+            if not identifier or not display or len(display) > 30:
+                continue
+            prefixes[".".join(parts[:-1])] = identifier
+            bucket = names.setdefault(display, [])
+            if len(bucket) < 4 and all(item[0] != identifier for item in bucket):
+                bucket.append((identifier, key, _plain(msgid)[:120]))
+        for key, _msgid, text in entries:
+            parts = key.split(".")
+            if len(parts) < 3 or parts[0] != "STRINGS" or parts[-1] != "DESC":
+                continue
+            display = _plain(text)
+            identifier = prefixes.get(".".join(parts[:-1])) or _identifier(key, text)
+            if identifier and display and identifier not in descriptions:
+                descriptions[identifier] = display[:300]
+        self.names = {text: tuple(items) for text, items in names.items()}
+        self.descriptions = descriptions
+
+    def match(self, query: str) -> tuple[list[str], list[dict[str, str]]]:
+        """在中文句子里找已知显示名，按最长匹配优先，返回标识符与命中明细。"""
+        runs = [run for run in CJK_RUN.findall(query) if run]
+        if not runs:
+            return [], []
+        identifiers: list[str] = []
+        hits: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for run in runs:
+            candidates: list[str] = []
+            for length in range(min(len(run), 16), 1, -1):
+                for start in range(0, len(run) - length + 1):
+                    text = run[start:start + length]
+                    if text in self.names:
+                        candidates.append(text)
+            if len(run) == 1 and run in self.names:
+                candidates.append(run)
+            for text in candidates:
+                if text in seen:
+                    continue
+                seen.add(text)
+                for identifier, key, english in self.names[text]:
+                    if identifier in identifiers:
+                        continue
+                    identifiers.append(identifier)
+                    hit = {"key": key, "text": text, "identifier": identifier}
+                    if english:
+                        hit["english"] = english
+                    if identifier in self.descriptions:
+                        hit["description"] = self.descriptions[identifier]
+                    hits.append(hit)
+                    if len(identifiers) >= MAX_TRANSLATION_TERMS:
+                        return identifiers, hits
+        return identifiers, hits
+
+
+@lru_cache(maxsize=2)
+def _translations(path: str, stamp: int, size: int) -> TranslationIndex:
+    source = Path(path)
+    entries = _po_entries(source)
+    current = source.stat()
+    if (current.st_mtime_ns, current.st_size) != (stamp, size):
+        raise KnowledgeError("翻译文件正在更新，请稍后再试")
+    return TranslationIndex(entries)
+
+
+def resolve_strings_file(configured: str) -> Path | None:
+    """接受 .po 文件或 strings 目录；目录里优先选简体中文翻译。"""
+    raw = (configured or "").strip()
+    if not raw:
+        return None
+    path = Path(os.path.expandvars(os.path.expanduser(raw)))
+    if path.is_dir():
+        for name in ("strings_preinstalled_zh_klei.po", "strings_preinstalled_zh_hans_klei.po"):
+            candidate = path / name
+            if candidate.is_file():
+                return candidate
+        for pattern in ("*zh*.po", "*.po"):
+            candidates = sorted(path.glob(pattern))
+            if candidates:
+                return candidates[0]
+        return None
+    return path if path.is_file() else None
 
 
 def _inside(path: Path, root: Path) -> Path:
@@ -55,7 +235,7 @@ def _types(path: str, stamp: int, size: int) -> tuple:
 
 
 class KnowledgeBase:
-    def __init__(self, index_path: str):
+    def __init__(self, index_path: str, strings_path: str = ""):
         try:
             self.index = Path(index_path).expanduser().resolve(strict=True)
             if not self.index.is_dir():
@@ -67,6 +247,16 @@ class KnowledgeBase:
             self.files = {row["file"].replace("\\", "/") for row in self.types}
         except (OSError, UnicodeError, csv.Error):
             raise KnowledgeError("无法读取知识库索引，请检查插件中的索引目录设置") from None
+        # 翻译文件只是中文显示名到代码标识符的补充；缺失或损坏时退回别名表，不影响源码检索。
+        self.translation: TranslationIndex | None = None
+        try:
+            strings = resolve_strings_file(strings_path)
+            if strings is not None:
+                info = strings.stat()
+                if info.st_size <= MAX_TRANSLATION_BYTES:
+                    self.translation = _translations(str(strings), info.st_mtime_ns, info.st_size)
+        except (OSError, UnicodeError, KnowledgeError):
+            self.translation = None
 
     def _index_file(self, name: str, maximum: int) -> Path:
         path = _inside(self.index / name, self.index)
@@ -99,6 +289,11 @@ class KnowledgeBase:
                 hints.extend(aliases)
         if "仿生" in query:
             hints = [*ALIASES["仿生"], *hints]
+        translated_terms, translation_hits = (
+            self.translation.match(query) if self.translation is not None else ([], [])
+        )
+        if translated_terms:
+            hints = [*hints, *translated_terms]
         terms = list(dict.fromkeys([*terms, *hints]))
         folded = [term.casefold() for term in terms]
         total = 0
@@ -153,7 +348,7 @@ class KnowledgeBase:
                 break
             # Index rows are hints; implementations must be read before making claims.
             results.append(row)
-        return {
+        result = {
             "query": query,
             "kind": kind,
             "expanded_terms": terms,
@@ -163,6 +358,14 @@ class KnowledgeBase:
             "next_offset": offset + len(results) if offset + len(results) < total else None,
             "notice": "索引只用于定位；请按 file、line 读取实际源码。反编译版本可能不同于当前游戏。",
         }
+        if translation_hits:
+            result["translated_terms"] = translated_terms
+            result["translations"] = translation_hits
+            result["notice"] = (
+                "中文名已按游戏翻译文件展开为代码标识符；翻译只证明显示名，不证明实现。"
+                "元素名可用 kind=members 继续查 SimHashes 成员。索引只用于定位；请按 file、line 读取实际源码。"
+            )
+        return result
 
     def read(self, file: str, start_line: int = 1, max_lines: int = 160) -> dict:
         normalized = file.replace("\\", "/")

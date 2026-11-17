@@ -7,7 +7,7 @@ import csv
 
 from fllbot.plugin import Context, Plugin
 
-from .service import DEFAULT_INDEX, KnowledgeBase, KnowledgeError
+from .service import DEFAULT_INDEX, DEFAULT_STRINGS, KnowledgeBase, KnowledgeError
 
 plugin = Plugin.from_manifest(__file__)
 plugin.setting(
@@ -17,12 +17,24 @@ plugin.setting(
     default=DEFAULT_INDEX,
     description="管理员配置的 _INDEX 目录，内含 types.csv 和 members.csv；只读访问其对应源码。",
 )
+plugin.setting(
+    "strings_file",
+    type="string",
+    label="游戏中文翻译文件（.po）",
+    default=DEFAULT_STRINGS,
+    description=(
+        "缺氧 StreamingAssets/strings 下的简体中文 .po 文件（也可填 strings 目录）。"
+        "用于把「电解器」这类中文显示名映射成 Electrolyzer 等代码标识符；留空则只用内置中文别名。"
+    ),
+)
 plugin.agent_instruction(
     "source_retrieval",
     tools=["search", "read_source"],
     text=(
         "缺氧/ONI 相关问题或出现 Minion、KMonoBehaviour、Klei 等相关代码符号时，按需要自主检索本地源码知识库；"
         "无关闲聊、普通编程问题不必查询。先 search 定位类型或成员，再 read_source 读取实际实现并按 next_line 分页。"
+        "中文建筑、生物、元素名可直接搜：知识库会按游戏中文翻译把「电解器」展开成 ELECTROLYZER，"
+        "返回 translated_terms / translations；元素名可改用 kind=members 查 SimHashes 成员。"
         "复制人的组件装配从 MinionConfig.CreatePrefab 追踪到 BaseMinionConfig.BaseMinion、BasePrefabInit、BaseOnSpawn，"
         "读取装配代码的完整相关范围，并继续读取相关组件定义，不能只罗列类名就推断其职责；"
         "索引不是实现证据，区分普通复制人与仿生复制人，说明源码版本未知，不猜测游戏最新版本行为。"
@@ -38,9 +50,11 @@ async def _run(ctx, operation, **arguments):
     if not ctx.data_current:
         return {"error": "当前会话已失效"}
     index = str(ctx.settings.get("index_path") or DEFAULT_INDEX)
+    configured = ctx.settings.get("strings_file")
+    strings = DEFAULT_STRINGS if configured is None else str(configured)
 
     def work():
-        return getattr(KnowledgeBase(index), operation)(**arguments)
+        return getattr(KnowledgeBase(index, strings), operation)(**arguments)
 
     try:
         result = await asyncio.to_thread(work)
@@ -59,7 +73,9 @@ async def _run(ctx, operation, **arguments):
     timeout=20,
     max_output_chars=26000,
     description="检索管理员提供的 ONI/缺氧反编译源码类型或成员索引。支持中文功能词和 C# 符号；"
-    "复制人组件可查“复制人组件”或 MinionConfig/BaseMinionConfig。kind=members 时可按 type_name 缩小到具体类。"
+    "中文显示名会先按游戏翻译文件展开成代码标识符（例如「电解器」→ ELECTROLYZER → Electrolyzer，"
+    "并返回 translated_terms 与 translations）。复制人组件可查“复制人组件”或 MinionConfig/BaseMinionConfig。"
+    "kind=members 时可按 type_name 缩小到具体类；元素中文名可改查 kind=members 找 SimHashes 成员。"
     "返回 file、line、声明与分页位置；默认排除 STRINGS 本地化容器。索引命中后须读取实际实现。",
     parameters={
         "type": "object",

@@ -5,8 +5,13 @@ from types import SimpleNamespace
 import pytest
 from jsonschema import ValidationError
 
+from fllbot.builtin_plugins.oni_knowledge import service as knowledge
 from fllbot.builtin_plugins.oni_knowledge.plugin import plugin, read_source, search
-from fllbot.builtin_plugins.oni_knowledge.service import KnowledgeBase, KnowledgeError
+from fllbot.builtin_plugins.oni_knowledge.service import (
+    KnowledgeBase,
+    KnowledgeError,
+    resolve_strings_file,
+)
 from fllbot.plugin.agent import instruction_sections
 from fllbot.tool_executor import encode_result, parse_arguments
 from helpers import make_bot
@@ -151,7 +156,7 @@ def test_resolved_paths_cannot_escape_root(index, monkeypatch, tmp_path):
 
 
 async def test_plugin_tools_use_admin_setting_and_fail_closed(index):
-    ctx = SimpleNamespace(data_current=True, settings={"index_path": str(index)})
+    ctx = SimpleNamespace(data_current=True, settings={"index_path": str(index), "strings_file": ""})
     assert (await search(ctx, "复制人"))["results"]
     assert (await read_source(ctx, "MinionConfig.cs"))["content"].startswith("class MinionConfig")
     result = await read_source(ctx, "../secret.cs")
@@ -196,3 +201,111 @@ async def test_builtin_loader_discovers_plugin_with_configurable_index(tmp_path)
         assert loaded.readme and loaded.agent_instructions
     finally:
         await bot.stop()
+
+PO_TEXT = (
+    'msgid ""\n'
+    'msgstr ""\n'
+    '"Content-Type: text/plain; charset=UTF-8\\n"\n'
+    '\n'
+    'msgctxt "STRINGS.BUILDINGS.PREFABS.ELECTROLYZER.NAME"\n'
+    'msgid "<link=\\"ELECTROLYZER\\">Electrolyzer</link>"\n'
+    'msgstr "<link=\\"ELECTROLYZER\\">电解器</link>"\n'
+    '\n'
+    'msgctxt "STRINGS.BUILDINGS.PREFABS.ELECTROLYZER.DESC"\n'
+    'msgid "Water goes in one end, life sustaining oxygen comes out the other."\n'
+    'msgstr "一端进水，另一端出来维持生命的氧气。"\n'
+    '\n'
+    'msgctxt "STRINGS.BUILDINGS.PREFABS.WATERPURIFIER.NAME"\n'
+    'msgid "Water Purifier"\n'
+    'msgstr "净水器"\n'
+    '\n'
+    'msgctxt "STRINGS.BUILDINGS.PREFABS.WATERPURIFIER.DESC"\n'
+    'msgid "Filters dirty water."\n'
+    'msgstr "过滤脏水。"\n'
+    '\n'
+    'msgctxt "STRINGS.ELEMENTS.WATER.NAME"\n'
+    'msgid ""\n'
+    '"Water"\n'
+    'msgstr ""\n'
+    '"<link=\\"WATER\\">水</link>"\n'
+)
+
+
+def make_translation_index(tmp_path, names=("Electrolyzer", "ElectrolyzerConfig", "WaterPurifier", "WaterPurifierConfig")):
+    root = tmp_path / "Assembly-CSharp"
+    directory = root / "_INDEX"
+    directory.mkdir(parents=True)
+    rows = [
+        {"type": name, "file": f"{name}.cs", "line": "1", "base": "IBuildingConfig", "namespace": ""}
+        for name in names
+    ]
+    write_csv(directory / "types.csv", rows)
+    write_csv(
+        directory / "members.csv",
+        [
+            {"member": "CreateBuildingDef", "type": name, "file": f"{name}.cs", "line": "2", "signature": ""}
+            for name in names
+        ],
+    )
+    for name in names:
+        (root / f"{name}.cs").write_text(f"class {name}\n", encoding="utf-8")
+    return directory
+
+
+def test_translation_index_maps_chinese_display_names(tmp_path):
+    index = make_translation_index(tmp_path)
+    strings = tmp_path / "strings"
+    strings.mkdir()
+    (strings / "strings_preinstalled_zh_klei.po").write_text(PO_TEXT, encoding="utf-8")
+    kb = KnowledgeBase(str(index), str(strings))
+
+    result = kb.search("帮我看看电解器哪些能改的")
+    assert [row["type"] for row in result["results"][:2]] == ["Electrolyzer", "ElectrolyzerConfig"]
+    assert result["translated_terms"] == ["ELECTROLYZER"]
+    hit = result["translations"][0]
+    assert hit["text"] == "电解器" and hit["identifier"] == "ELECTROLYZER"
+    assert "一端进水" in hit["description"]
+
+    assert kb.search("净水器")["results"][0]["type"] == "WaterPurifier"
+    assert kb.search("水")["translated_terms"] == ["WATER"]
+
+
+def test_translation_setting_accepts_file_or_directory_and_degrades(tmp_path):
+    index = make_translation_index(tmp_path)
+    strings = tmp_path / "strings"
+    strings.mkdir()
+    po = strings / "strings_preinstalled_zh_klei.po"
+    po.write_text(PO_TEXT, encoding="utf-8")
+    assert resolve_strings_file(str(strings)) == po
+    assert resolve_strings_file(str(po)) == po
+    assert resolve_strings_file(str(tmp_path / "absent.po")) is None
+    assert resolve_strings_file("") is None
+
+    fallback = KnowledgeBase(str(index), "")
+    assert fallback.translation is None
+    result = fallback.search("电解器")
+    assert result["results"] == [] and "translations" not in result
+
+
+def test_po_parser_handles_multiline_and_escaped_quotes(tmp_path):
+    path = tmp_path / "strings.po"
+    path.write_text(PO_TEXT, encoding="utf-8")
+    entries = {key: (msgid, text) for key, msgid, text in knowledge._po_entries(path)}
+    assert entries["STRINGS.BUILDINGS.PREFABS.ELECTROLYZER.NAME"] == (
+        '<link="ELECTROLYZER">Electrolyzer</link>',
+        '<link="ELECTROLYZER">电解器</link>',
+    )
+    assert entries["STRINGS.ELEMENTS.WATER.NAME"] == ("Water", '<link="WATER">水</link>')
+
+
+async def test_plugin_search_uses_translation_setting(tmp_path):
+    index = make_translation_index(tmp_path)
+    po = tmp_path / "strings_preinstalled_zh_klei.po"
+    po.write_text(PO_TEXT, encoding="utf-8")
+    ctx = SimpleNamespace(data_current=True, settings={"index_path": str(index), "strings_file": str(po)})
+    result = await search(ctx, "电解器")
+    assert result["results"][0]["type"] == "Electrolyzer"
+    assert result["translations"][0]["identifier"] == "ELECTROLYZER"
+    ctx.settings["strings_file"] = ""
+    plain = await search(ctx, "电解器")
+    assert plain["results"] == [] and "translations" not in plain
