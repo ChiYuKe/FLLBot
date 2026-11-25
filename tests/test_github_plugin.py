@@ -1113,6 +1113,8 @@ def test_builtin_manifest_and_agent_tools():
 
     assert not plugin.handlers
     assert [tool.name for tool in plugin.ai_tools] == [
+        "bind_repository",
+        "list_my_repositories",
         "read_repository",
         "list_directory",
         "read_sources",
@@ -1135,10 +1137,11 @@ def test_builtin_manifest_and_agent_tools():
         "font_path",
     }
     assert plugin.agent_instructions[0].name == "repository_analysis"
-    assert plugin.agent_instructions[0].tools == ("read_repository",)
+    assert "bind_repository" in plugin.agent_instructions[0].tools
+    assert "list_my_repositories" in plugin.agent_instructions[0].tools
     assert "read_contributors" in plugin.agent_instructions[0].text
     assert "render_card" in plugin.agent_instructions[0].text
-    read_only = [tool for tool in plugin.ai_tools if tool.name != "render_card"]
+    read_only = [tool for tool in plugin.ai_tools if tool.name not in {"render_card", "bind_repository"}]
     assert all(tool.effect == "read_only" for tool in read_only)
     render_tool = next(tool for tool in plugin.ai_tools if tool.name == "render_card")
     assert render_tool.effect == "side_effecting"
@@ -1146,7 +1149,8 @@ def test_builtin_manifest_and_agent_tools():
     assert set(render_tool.parameters["properties"]["kind"]["enum"]) == set(
         ("repository", "contributors", "issues", "pull_requests", "issue", "commit", "releases", "branches")
     )
-    properties = plugin.ai_tools[0].parameters["properties"]
+    repository_tool = next(tool for tool in plugin.ai_tools if tool.name == "read_repository")
+    properties = repository_tool.parameters["properties"]
     assert {"repository", "view", "depth", "tree_path"} <= set(properties)
 
 
@@ -1185,6 +1189,7 @@ async def test_render_card_tool_renders_and_sends(monkeypatch):
     )
 
     assert result["sent"] is True
+    assert result["silent"] is True
     assert result["kind"] == "contributors"
     assert result["bytes"] > 1000
     args, kwargs = sender.call_args
@@ -1195,6 +1200,10 @@ async def test_render_card_tool_renders_and_sends(monkeypatch):
     assert image.startswith(b"\x89PNG")
 
     sender.reset_mock()
+    ctx.turn_input = "仓库情况用文字回答"
+    assert "要求文字" in (await tool.callback(ctx, "https://github.com/owner/people"))["error"]
+    sender.assert_not_called()
+    ctx.turn_input = None
     failed = await tool.callback(ctx, "https://github.com/owner/people", kind="issue")
     assert "number" in failed["error"]
     sender.assert_not_called()

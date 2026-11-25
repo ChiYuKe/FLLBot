@@ -38,7 +38,7 @@ DEFAULT_WIDTH = 960
 MAX_CONTRIBUTORS = 30
 MAX_ISSUES = 15
 MAX_PULLS = 15
-MAX_COMMENTS = 4
+MAX_COMMENTS = 8
 MAX_FILES = 15
 MAX_RELEASES = 5
 MAX_BRANCHES = 20
@@ -231,6 +231,22 @@ def _file_style(filename: str) -> tuple[str, str]:
 
 def _language_color(language: Any) -> str:
     return _LANGUAGE_COLORS.get(str(language or "").strip(), "#6e7781")
+
+
+def _label_chip(name: str, payload: dict[str, Any]) -> Chip:
+    colors = payload.get("label_colors") if isinstance(payload.get("label_colors"), dict) else {}
+    raw = str(colors.get(name) or "").strip().lstrip("#")
+    if not re.fullmatch(r"[0-9a-fA-F]{6}", raw):
+        lowered = name.casefold()
+        if "bug" in lowered or "defect" in lowered or "crash" in lowered:
+            return Chip(name, RED, RED_BG, "tag")
+        if "enhancement" in lowered or "feature" in lowered:
+            return Chip(name, GREEN, GREEN_BG, "tag")
+        return Chip(name, BLUE, BLUE_BG, "tag")
+    rgb = tuple(int(raw[index:index + 2], 16) for index in (0, 2, 4))
+    foreground = "#" + "".join(f"{round(value * 0.72):02x}" for value in rgb)
+    background = "#" + "".join(f"{round(value * 0.12 + 255 * 0.88):02x}" for value in rgb)
+    return Chip(name, foreground, background, "tag")
 
 
 def _wrap(text: Any, font, width: int, max_lines: int) -> list[str]:
@@ -488,6 +504,23 @@ class _Builder:
                 self.text(draw, (self.x, y + index * line_height), line, size=size, color=color)
 
         self._items.append((height, paint))
+
+    def add_markdown(self, text: str) -> None:
+        """Render Markdown through the shared Pillow renderer and place its pages in this card."""
+        from PIL import Image
+
+        from fllbot.plugin.rendering import render_markdown
+
+        font, _ = self.font(17)
+        pages = render_markdown(str(text or ""), font, self.content_width)
+        for encoded in pages:
+            with Image.open(io.BytesIO(encoded)) as source:
+                raster = source.convert("RGB").copy()
+
+            def paint(draw, y: int, *, raster=raster) -> None:
+                self._canvas.paste(raster, (self.x, y))
+
+            self._items.append((raster.height, paint))
 
     def add_section(self, title: str, icon: str = "") -> None:
         def paint(draw, y: int) -> None:
@@ -1098,13 +1131,31 @@ def _issue(builder: _Builder, payload: dict[str, Any]) -> None:
     subtitle: list[str] = [label]
     if payload.get("author"):
         subtitle.append(f"作者 {payload['author']}")
-    when = _when(payload.get("updated_at") or payload.get("created_at"), with_time=True)
-    if when:
-        subtitle.append(f"更新 {when}")
+    created = _when(payload.get("created_at"), with_time=True)
+    if created:
+        subtitle.append(f"创建 {created}")
+    updated = _when(payload.get("updated_at"), with_time=True)
+    if updated and updated != created:
+        subtitle.append(f"更新 {updated}")
+    closed = _when(payload.get("closed_at"), with_time=True)
+    if closed:
+        subtitle.append(f"关闭 {closed}")
     builder.subtitle = " · ".join(subtitle)
     labels = [str(value) for value in payload.get("labels") or []][:6]
-    if labels:
-        builder.add_chips([Chip(value, BLUE, BLUE_BG, "tag") for value in labels])
+    chips = [_label_chip(value, payload) for value in labels]
+    if not is_pull and payload.get("comments") is not None:
+        chips.append(Chip(f"{_count(payload.get('comments'))} 条评论", INK, GRAY_BG, "comment"))
+    if chips:
+        builder.add_chips(chips)
+    reason = str(payload.get("state_reason") or "").strip().lower()
+    reason_labels = {
+        "completed": "处理结论：已完成",
+        "not_planned": "处理结论：暂不处理",
+        "duplicate": "处理结论：重复问题",
+        "reopened": "处理结论：已重新打开",
+    }
+    if reason in reason_labels:
+        builder.add_paragraph(reason_labels[reason], size=15, color=MUTED, max_lines=1, gap=6)
     if is_pull:
         chips = [
             Chip(f"{_count(pull.get('additions'))}", GREEN, GREEN_BG, "plus"),
@@ -1119,7 +1170,9 @@ def _issue(builder: _Builder, payload: dict[str, Any]) -> None:
     body = str(payload.get("body") or "").strip()
     if body:
         builder.add_section("正文", "file")
-        builder.add_paragraph(body, size=17, max_lines=9, gap=14)
+        builder.add_markdown(body)
+        if payload.get("body_truncated"):
+            builder.add_paragraph("正文超过读取上限，以上为截断内容。", size=14, color=FAINT, max_lines=1, gap=8)
     thread = [item for item in payload.get("recent_comments") or [] if isinstance(item, dict)][:MAX_COMMENTS]
     if thread:
         builder.add_section(f"最近评论（共 {_count(payload.get('comments'))} 条）", "comment")
@@ -1127,9 +1180,7 @@ def _issue(builder: _Builder, payload: dict[str, Any]) -> None:
             author = str(comment.get("author") or "匿名").strip() or "匿名"
             when = _when(comment.get("created_at"), with_time=True)
             text = str(comment.get("body") or "").strip()
-            lines = _wrap(text, builder.font(16)[0], builder.content_width - 34, 2)
             avatar_url = str(comment.get("avatar") or "")
-            height = 26 + len(lines) * 24 + 16
 
             def paint(
                 draw,
@@ -1137,7 +1188,6 @@ def _issue(builder: _Builder, payload: dict[str, Any]) -> None:
                 *,
                 author=author,
                 when=when,
-                lines=lines,
                 avatar_url=avatar_url,
             ) -> None:
                 builder.avatar(draw, avatar_url, author, builder.x, y, 24)
@@ -1145,10 +1195,10 @@ def _issue(builder: _Builder, payload: dict[str, Any]) -> None:
                 if when:
                     author_width = round(builder.font(15, bold=True)[0].getlength(author)) + 44
                     builder.text(draw, (builder.x + author_width, y + 3), when, size=13, color=FAINT)
-                for index, line in enumerate(lines):
-                    builder.text(draw, (builder.x + 32, y + 24 + index * 24), line, size=16, color=INK)
 
-            builder.add_row(height, paint)
+            builder.add_row(34, paint)
+            if text:
+                builder.add_markdown(text)
     elif payload.get("comments"):
         builder.add_paragraph(
             f"共有 {_count(payload.get('comments'))} 条评论，评论内容未读取。",
@@ -1157,6 +1207,10 @@ def _issue(builder: _Builder, payload: dict[str, Any]) -> None:
             max_lines=1,
             gap=8,
         )
+    if thread and payload.get("comments_truncated") and payload.get("comments"):
+        remaining = max(0, int(payload.get("comments") or 0) - len(thread))
+        if remaining:
+            builder.add_paragraph(f"另有 {remaining} 条较早评论未显示。", size=14, color=FAINT, max_lines=1, gap=8)
 
 
 def _releases(builder: _Builder, payload: dict[str, Any]) -> None:

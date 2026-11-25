@@ -273,6 +273,21 @@ def _label_names(item: dict, *, maximum: int = 10) -> list[str]:
     return names
 
 
+def _label_colors(item: dict, *, maximum: int = 10) -> dict[str, str]:
+    labels = item.get("labels")
+    result: dict[str, str] = {}
+    for label in labels if isinstance(labels, list) else []:
+        if not isinstance(label, dict):
+            continue
+        name = str(label.get("name") or "").strip()
+        color = str(label.get("color") or "").strip().lstrip("#")
+        if name and re.fullmatch(r"[0-9a-fA-F]{6}", color):
+            result[name] = color.lower()
+        if len(result) >= maximum:
+            break
+    return result
+
+
 def _trim(value: Any, limit: int) -> str:
     return str(value or "").strip()[:limit]
 
@@ -1652,6 +1667,7 @@ async def read_issue(
         "author": _login(item.get("user")),
         "author_avatar": _avatar_url(item.get("user")),
         "labels": _label_names(item),
+        "label_colors": _label_colors(item),
         "is_pull_request": is_pull,
         "created_at": item.get("created_at") or "",
         "updated_at": item.get("updated_at") or "",
