@@ -15,6 +15,7 @@ from typing import Any
 
 from jsonschema import Draft202012Validator, ValidationError
 
+from .delivery_policy import active_chat_dispatch
 from .plugin.agent import ToolContent, ToolEvent, ToolRejection
 
 # 只有纯读取类能力的结果才可复用；带 qq.send / fs.write 等能力的一律不缓存。
@@ -629,14 +630,18 @@ class ToolExecutor:
         execution_id = uuid.uuid4().hex
         scene = 'group' if ctx.is_group else 'private'
         call_id = ctx.tool_call_id or uuid.uuid4().hex
+        dispatch = active_chat_dispatch(ctx) if ingress_plugin == "agent" else None
         claimed, record = await self.storage.claim_tool(
             execution_id, ctx.self_id, scene, ctx.group_id if ctx.is_group else ctx.user_id,
-            ctx.message_id or 0, name, spec.effect, ctx.data_epoch, ctx.turn_id, call_id, fingerprint)
+            ctx.message_id or 0, name, spec.effect, ctx.data_epoch, ctx.turn_id, call_id, fingerprint,
+            deduplicate_delivery=bool(dispatch and dispatch.deduplicate_delivery(spec.capabilities)))
         if not record:
             return failure('context_cleared')
         if not claimed:
             if record['tool'] != name or record['arguments_hash'] != fingerprint:
                 return failure('call_identity_conflict')
+            if record['call_id'] != call_id:
+                ctx.trace_event('tool', 'duplicate_delivery', 'skipped', name)
             if record['status'] == 'succeeded' and record['content'] is not None:
                 return record['content'], bool(record['silent'])
             return failure('tool_' + record['status'])

@@ -9,6 +9,7 @@ from fllbot.onebot.connection import ActionError, OneBotConnection
 from fllbot.onebot.models import MessageEvent
 from fllbot.onebot.segments import MessageSegment, normalize_message
 from fllbot.plugin.context import Context
+from helpers import FakeConnection
 
 
 class EchoSocket:
@@ -43,6 +44,10 @@ def connection(status="ok"):
      {"group_id": 123, "user_id": 456, "special_title": "头衔"}),
     ("set_essence_msg", (789,), {}, "set_essence_msg", {"message_id": 789}),
     ("send_like", (456, 5), {}, "send_like", {"user_id": 456, "times": 5}),
+    ("send_friend_request", (456,), {"message": "你好"}, "send_friend_request",
+     {"user_id": 456, "message": "你好"}),
+    ("set_friend_add_request", ("friend-flag",), {"approve": True}, "set_friend_add_request",
+     {"flag": "friend-flag", "approve": True, "remark": ""}),
     ("upload_group_file", (123, "file:///a.txt", "a.txt"), {}, "upload_group_file",
      {"group_id": 123, "file": "file:///a.txt", "name": "a.txt"}),
     ("upload_group_file", (123, "a.txt", "a.txt"), {"folder": "/abc"}, "upload_group_file",
@@ -67,6 +72,71 @@ async def test_action_permission_failure():
     with pytest.raises(ActionError, match="permission denied"):
         await conn.set_group_admin(123, 456)
     assert not conn._pending
+
+
+@pytest.mark.parametrize("receipt", [
+    {}, {"status": "ok"}, {"status": "ok", "retcode": False}, {"status": "async", "retcode": 1},
+])
+async def test_friend_request_requires_a_definite_receipt(receipt):
+    conn, socket = connection()
+
+    async def send_text(text):
+        payload = json.loads(text)
+        await conn._handle_payload({"echo": payload["echo"], **receipt})
+
+    socket.send_text = send_text
+    with pytest.raises(ActionError, match="好友申请缺少明确的成功回执"):
+        await conn.send_friend_request(456, message="你好")
+    assert not conn._pending
+
+
+@pytest.mark.parametrize(("message_type", "sub_type", "entrypoint"), [
+    ("private", "group", "qq"),
+    ("group", "anonymous", "qq"),
+    ("group", "normal", "admin_debug"),
+])
+async def test_friend_request_requires_a_real_group_sender(message_type, sub_type, entrypoint):
+    conn, _ = connection()
+    conn.send_friend_request = AsyncMock()
+    event = MessageEvent(
+        self_id=10001, user_id=456, group_id=123, message_id=10,
+        message_type=message_type, sub_type=sub_type, message="加我好友",
+    )
+    ctx = Context(bot=SimpleNamespace(), connection=conn, event=event, entrypoint=entrypoint)
+    assert (await ctx.request_friendship())["status"] == "ineligible"
+    conn.send_friend_request.assert_not_awaited()
+
+
+async def test_auto_approve_incoming_friend_requests(bot, monkeypatch):
+    first = FakeConnection()
+    second = FakeConnection(10002)
+    complete = AsyncMock()
+    monkeypatch.setattr(bot.chat, "complete", complete)
+    plugin = bot.plugins.get("chat_dispatch")
+    request = {"post_type": "request", "request_type": "friend", "user_id": 456, "flag": "friend-flag"}
+
+    await bot.on_raw_event(first, {**request, "flag": "disabled-flag"})
+    await bot.dispatcher._queue.join()
+    assert first.calls == []
+
+    await plugin.settings.set("auto_approve_friend_requests", True)
+    await bot.on_raw_event(first, request)
+    await bot.on_raw_event(first, {**request, "self_id": first.self_id, "time": 123})
+    await bot.on_raw_event(second, {**request, "self_id": second.self_id})
+    await bot.on_raw_event(first, {**request, "request_type": "group", "sub_type": "invite", "group_id": 123})
+    await bot.on_raw_event(first, {**request, "flag": " "})
+    await bot.on_raw_event(first, {**request, "flag": "self-request", "user_id": first.self_id})
+    await bot.on_raw_event(first, {**request, "flag": "wrong-account", "self_id": second.self_id})
+    await bot.dispatcher._queue.join()
+
+    approval = ("set_friend_add_request", {"flag": "friend-flag", "approve": True, "remark": ""})
+    assert first.calls == second.calls == [approval]
+    complete.assert_not_awaited()
+
+    await plugin.settings.set("auto_approve_friend_requests", False)
+    await bot.on_raw_event(first, {**request, "flag": "switched-off"})
+    await bot.dispatcher._queue.join()
+    assert first.calls == [approval]
 
 
 @pytest.mark.parametrize("group_id", [None, 123])

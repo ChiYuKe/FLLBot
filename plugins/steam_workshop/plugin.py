@@ -97,6 +97,7 @@ async def workshop_command(ctx: Context) -> None:
 @plugin.on_ai_tool(
     "read_item",
     effect="read_only",
+    capabilities=("net.read",),
     title="读取创意工坊物品",
     timeout=45,
     max_output_chars=16000,
@@ -128,6 +129,7 @@ async def read_item(ctx: Context, item: str) -> dict[str, Any]:
 @plugin.on_ai_tool(
     "find_comments",
     effect="read_only",
+    capabilities=("net.read",),
     title="查找创意工坊评论",
     timeout=60,
     max_output_chars=18000,

@@ -287,6 +287,7 @@ async def test_package_registers_command_and_tool(tmp_path: Path) -> None:
         loaded = bot.plugins.get("steam_workshop")
         assert loaded is not None
         assert [tool.name for tool in loaded.ai_tools] == ["read_item", "find_comments"]
+        assert all(tool.capabilities == ("net.read",) for tool in loaded.ai_tools)
         assert loaded.ai_tools[0].qualified_name == "steam_workshop__read_item"
         assert any(spec.usage and "工坊" in spec.usage for spec in bot.dispatcher.command_handlers())
         assert loaded.readme.startswith("# steam_workshop")

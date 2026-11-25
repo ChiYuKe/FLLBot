@@ -1,0 +1,10 @@
+schema_version = 1
+api_version = 1
+name = "chat_dispatch"
+version = "0.3.0"
+description = "聊天调度：选择 QQ 回复方式、处理长回复，并支持好友申请"
+author = ""
+category = "plugin"
+
+requires_fllbot = ">=0.2,<1"
+requires_python = ">=3.11"

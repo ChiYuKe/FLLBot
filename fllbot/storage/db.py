@@ -1036,11 +1036,23 @@ class Storage:
 
     async def claim_tool(self, execution_id: str, self_id: int, scene: str, scene_id: int,
                          message_id: int, name: str, effect: str, generation: int,
-                         turn_id: str, call_id: str, arguments_hash: str) -> tuple[bool, dict]:
+                         turn_id: str, call_id: str, arguments_hash: str, *,
+                         deduplicate_delivery: bool = False) -> tuple[bool, dict]:
         async with self.data_lock:
             if generation != self.conversation_generation:
                 return False, {}
             try:
+                if deduplicate_delivery:
+                    previous = await (await self.db.execute(
+                        "SELECT e.*,r.content,r.silent FROM tool_executions e "
+                        "LEFT JOIN tool_results r USING(execution_id) WHERE e.turn_id=? AND "
+                        "(e.call_id=? OR (e.tool=? AND e.arguments_hash=? "
+                        "AND e.status IN ('running','succeeded','uncertain'))) "
+                        "ORDER BY (e.call_id=?) DESC,e.created_at DESC LIMIT 1",
+                        (turn_id, call_id, name, arguments_hash, call_id),
+                    )).fetchone()
+                    if previous is not None:
+                        return False, dict(previous)
                 cursor = await self.db.execute(
                     "INSERT OR IGNORE INTO tool_executions(execution_id,self_id,scene,scene_id,message_id,tool,effect,"
                     "status,created_at,turn_id,call_id,arguments_hash) VALUES (?,?,?,?,?,?,?,'running',?,?,?,?)",
