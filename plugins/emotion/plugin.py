@@ -4,7 +4,9 @@
 - 按群记录机器人的心情和精神，随聊天内容与时间缓慢变化；
 - 给智能体一个实时心情工具和一段语气提示，让回复不那么像客服；
 - 在群友正聊天时，按冷却和额度给其中一人发一条群临时会话（私聊），
-  内容可能是牢骚或悄悄话；模型不可用时使用本地句子。
+  内容可能是牢骚或悄悄话；模型不可用时使用本地句子；
+- 悄悄话送达后打开一段私聊互聊窗口：这段时间内对方的私聊回复由
+  轻量快聊直接接话（不调用工具、不走智能体），超过时长就不再回复。
 """
 
 from __future__ import annotations
@@ -139,10 +141,22 @@ plugin.setting(
     "max_chars",
     type="int",
     label="悄悄话最长字数",
-    default=60,
+    default=150,
     min=16,
     max=200,
-    description="生成或本地句子会被裁剪到这个长度以内。",
+    description="生成或本地句子会被裁剪到这个长度以内；默认 150，够写两到四句。",
+)
+plugin.setting(
+    "chat_window_minutes",
+    type="int",
+    label="私聊互聊时长（分钟）",
+    default=20,
+    min=0,
+    max=120,
+    description=(
+        "发完悄悄话后，对方在这段时间内的私聊回复会由轻量快聊直接接话（不调用工具）；"
+        "超过时长就不再回复，群里的正常功能不受影响。0 表示不开启互聊。"
+    ),
 )
 plugin.setting(
     "llm_enabled",
@@ -273,6 +287,43 @@ async def whisper_tick(bot: Any) -> None:
         await engine.tick(bot)
     except Exception:
         plugin.logger.debug("悄悄话轮询失败", exc_info=True)
+
+
+@plugin.on_message(priority=85, name="whisper_session_chat")
+async def whisper_session_chat(ctx: Context) -> None:
+    """互聊窗口内先接话，再让其他私聊处理器处理剩余消息。"""
+    engine = plugin.engine
+    if engine is None or not ctx.is_private:
+        return
+    text = ctx.text
+    if any(text.startswith(prefix) for prefix in ctx.config.bot.command_prefix):
+        return
+    if not bool(ctx.settings.get("enabled", True)):
+        return
+    started = engine.session_started(ctx.self_id, ctx.user_id)
+    if not started:
+        return
+    is_temp_private = getattr(ctx, "is_temp_private", False)
+    segment_types = {segment.type for segment in ctx.message}
+    media_types = {"image", "mface", "face"}
+    if segment_types - (media_types | {"text", "at", "reply"}) or not ctx.bot.chat.available:
+        return
+    if segment_types & media_types:
+        text = ctx.readable
+    if not text:
+        return
+    if is_temp_private and ctx.temp_private_group_id is None:
+        ctx.temp_private_group_fallback = engine.session_group_id(ctx.self_id, ctx.user_id)
+        if ctx.temp_private_group_id is None:
+            ctx.trace_event("send", "temp_private_group_missing", "skipped")
+            return
+    try:
+        reply = await engine.session_reply(bot=ctx.bot, ctx=ctx, text=text, started_at=started)
+    except Exception:
+        plugin.logger.debug("私聊互聊处理失败", exc_info=True)
+        return
+    if reply:
+        ctx.stop()
 
 
 @plugin.on_command("情绪", aliases=("心情", "mood"), priority=8, block=True)

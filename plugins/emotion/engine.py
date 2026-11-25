@@ -27,9 +27,20 @@ MAX_GROUPS = 50
 MAX_TICK_GROUPS = 50
 FLUSH_SECONDS = 10.0
 DEFAULT_LLM_TIMEOUT = 45.0
+MAX_SESSION_WINDOW_MINUTES = 120
+WHISPER_MAX_TOKENS = 350
 BASE_VALENCE = 0.12
 BASE_ENERGY = 0.55
 _LOCAL = timezone(timedelta(hours=8))
+
+# 悄悄话后的私聊闲聊规则：覆盖人格提示词，让模型明白这是熟人短聊，不是智能体任务。
+SESSION_CHAT_RULES = (
+    "\n\n当前是悄悄话之后的临时私聊：你刚给对方发了一条悄悄话，现在 TA 回来找你单聊。"
+    "像熟悉的群友一样直接回话，简短自然，一般两三句以内；不要列条目，不要发链接或二维码。"
+    "不要提“20分钟”“私聊窗口”“临时会话”这类规则性说法，也不要提模型、AI 或提示词。"
+    "收到图片或表情时结合前文自然接话。只有占位文字时，不要猜测画面内容。"
+    "这里没有任何工具可用：不要声称要去查资料、执行操作或稍后回复，做不到就直接说出来。"
+)
 
 
 def _clamp(value: float, low: float, high: float) -> float:
@@ -124,6 +135,10 @@ class EmotionEngine:
         self._moods: dict[tuple[int, int], Mood] = store.load_moods()
         self._activity: dict[tuple[int, int], deque[Activity]] = {}
         self._optouts: set[tuple[int, int]] = store.load_optouts()
+        # 每个 Bot、用户保留各来源群和投递方式的窗口，避免缺群号时误选。
+        self._sessions = store.recent_sent_targets(
+            self._now() - MAX_SESSION_WINDOW_MINUTES * 60
+        )
         self._dirty: set[tuple[int, int]] = set()
         self._lock = asyncio.Lock()
         self._rng = random.Random()
@@ -270,12 +285,100 @@ class EmotionEngine:
     def opt_out(self, self_id: int, user_id: int) -> None:
         key = (int(self_id), int(user_id))
         self._optouts.add(key)
+        self._sessions.pop(key, None)
         self.store.set_optout(key[0], key[1], True)
 
     def opt_in(self, self_id: int, user_id: int) -> None:
         key = (int(self_id), int(user_id))
         self._optouts.discard(key)
         self.store.set_optout(key[0], key[1], False)
+
+    # -- 悄悄话后的私聊互聊 ------------------------------------------------ #
+    def _chat_window_seconds(self) -> int:
+        view = self.plugin.settings.view(None)
+        return max(0, _int_setting(view, "chat_window_minutes", 20)) * 60
+
+    def session_started(self, self_id: int, user_id: int) -> float:
+        """互聊窗口的开始时间；不在窗口内（或已过期）返回 ``0.0``。"""
+        sessions = self._active_sessions(self_id, user_id)
+        return max(sessions.values(), default=0.0)
+
+    def _active_sessions(self, self_id: int, user_id: int) -> dict[tuple[int, str], float]:
+        key = (int(self_id), int(user_id))
+        window = self._chat_window_seconds()
+        if key in self._optouts or window <= 0:
+            return {}
+        cutoff = self._now() - window
+        return {source: started for source, started in self._sessions.get(key, {}).items() if started >= cutoff}
+
+    def session_group_id(self, self_id: int, user_id: int) -> int | None:
+        """群号缺失时，只用当前窗口内唯一可确认的临时会话来源。"""
+        sessions = self._active_sessions(self_id, user_id)
+        possible_groups = {group_id for group_id, delivery in sessions if delivery != "private"}
+        if len(possible_groups) == 1:
+            group_id = next(iter(possible_groups))
+            if group_id > 0 and (group_id, "temp") in sessions:
+                return group_id
+        return None
+
+    def _prune_sessions(self, now: float) -> None:
+        cutoff = now - MAX_SESSION_WINDOW_MINUTES * 60
+        for key, sessions in list(self._sessions.items()):
+            remaining = {source: started for source, started in sessions.items() if started >= cutoff}
+            if remaining:
+                self._sessions[key] = remaining
+            else:
+                del self._sessions[key]
+
+    async def session_reply(
+        self,
+        *,
+        bot: Any,
+        ctx: Context,
+        text: str,
+        started_at: float,
+    ) -> str:
+        """在互聊窗口内沿用对话历史快聊。"""
+        ctx.turn_input = text
+        async with bot.conversations.turn(ctx) as accepted:
+            if not accepted:
+                return ""
+            persona = str(self.plugin.settings.view(None).get("persona") or "").strip()
+            try:
+                messages = await bot.chat.build_messages(
+                    "private",
+                    ctx.user_id,
+                    text,
+                    ctx=ctx,
+                    persona_name=persona or None,
+                    include_history=True,
+                    # 只带这次悄悄话之后的历史，避免把很久以前的私聊旧账翻出来。
+                    history_since=started_at,
+                    system_rules=SESSION_CHAT_RULES,
+                )
+                reply = await asyncio.wait_for(
+                    bot.chat.complete(
+                        messages,
+                        scene="private",
+                        scene_id=ctx.user_id,
+                        task="chat",
+                        self_id=ctx.self_id,
+                    ),
+                    timeout=DEFAULT_LLM_TIMEOUT,
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # 与智能体路径一致：模型失败静默收尾，不让 dispatcher 发通用错误提示。
+                ctx.turn_reason = "model_failed"
+                self.plugin.logger.debug("私聊互聊生成失败：%s", type(exc).__name__)
+                return ""
+            reply_text = str(getattr(reply, "text", "") or "").strip()
+            if not reply_text or not ctx.data_current:
+                return ""
+            await bot.conversations.project_input(ctx, ctx.context_input or text)
+            await bot.deliveries.send_text(ctx, reply_text, require_ai=False)
+            return reply_text
 
     # -- 周期任务 --------------------------------------------------------- #
     async def tick(
@@ -295,6 +398,7 @@ class EmotionEngine:
             self._decay_all(moment)
             self._maybe_flush(moment)
             self._prune_activity(moment)
+            self._prune_sessions(moment)
             for key in self._groups():
                 self_id, group_id = key
                 view = self.plugin.settings.view(group_id)
@@ -476,7 +580,7 @@ class EmotionEngine:
         if connection is None:
             return {"sent": False, "error": "bot_offline"}
         chosen = kind if kind in KIND_LABELS else choose_kind(str(view.get("style", "mix")), self._mood(*key), rng)
-        max_chars = max(16, min(200, _int_setting(view, "max_chars", 60)))
+        max_chars = max(16, min(200, _int_setting(view, "max_chars", 150)))
         recent = self._recent_lines(key)
         text = ""
         if bool(view.get("llm_enabled", True)) and bool(getattr(bot.chat, "available", False)):
@@ -521,6 +625,7 @@ class EmotionEngine:
                 "kind": chosen,
             }
 
+        sent_at = self._now()
         try:
             self.store.record_whisper(
                 self_id=self_id,
@@ -529,8 +634,9 @@ class EmotionEngine:
                 nickname=member.nickname,
                 kind=chosen,
                 content=text,
-                created_at=now,
+                created_at=sent_at,
                 status="sent",
+                delivery=delivery,
             )
         except Exception:
             self.plugin.logger.debug("记录悄悄话发送结果失败", exc_info=True)
@@ -553,6 +659,13 @@ class EmotionEngine:
                 )
             except Exception:
                 self.plugin.logger.debug("悄悄话写入私聊历史失败", exc_info=True)
+        # 悄悄话送达即打开私聊互聊窗口：这段时间内对方的私聊由 session_reply 快速接话。
+        window_minutes = max(0, _int_setting(view, "chat_window_minutes", 20))
+        if window_minutes > 0:
+            sessions = self._sessions.setdefault((int(self_id), int(member.user_id)), {})
+            sessions[(int(group_id), delivery)] = sent_at
+        else:
+            self._sessions.pop((int(self_id), int(member.user_id)), None)
         return {
             "sent": True,
             "explicit": bool(explicit),
@@ -603,7 +716,7 @@ class EmotionEngine:
             reply = await asyncio.wait_for(
                 bot.chat.complete(
                     messages,
-                    max_tokens=200,
+                    max_tokens=WHISPER_MAX_TOKENS,
                     scene="group",
                     scene_id=group_id,
                     task="chat",

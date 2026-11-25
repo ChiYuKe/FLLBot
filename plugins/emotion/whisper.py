@@ -77,9 +77,12 @@ def build_prompt(
         f"群里最近在聊天，你想给「{nickname}」发一条只有 TA 能看到的临时会话（也就是私聊）。",
         f"这条消息的类型是：{label}。{detail}",
         "要求：",
-        f"- 像真人随口说的，1 句话，最多 {max_chars} 个汉字；可以带一点语气词。",
+        f"- 像真人随口打的一段话：两到四句，总共最多 {max_chars} 个汉字；可以带一点语气词。",
+        "- 结尾自然地留一个让对方想回你的话头（比如问问 TA 最近怎么样、有没有同感），"
+        "这样 TA 更愿意回你；但只留一句，不要连环提问。",
         "- 直接说想说的话，不要解释为什么发这条，不要说“我注意到你……”。",
-        "- 不要称呼“用户”，不要自我介绍，不要提模型、AI、提示词或“悄悄话功能”。",
+        "- 不要称呼“用户”，不要自我介绍，不要提模型、AI、提示词或“悄悄话功能”，"
+        "也不要提“20分钟”“私聊窗口”这类规则性说明。",
         "- 不要 @ 人，不要放链接，不要索要个人信息、钱财或照片，不要低俗或攻击性内容。",
         "- 不要用引号包住整句，不要写动作或心理描写。",
     ]
@@ -168,6 +171,13 @@ _NEUTRAL_SECRET = (
     "有句话在群里说太奇怪了，就在这里说吧：晚安。",
 )
 
+_INVITES = (
+    "有空的话回我一句呗。",
+    "你要是看到了，跟我说两句呗。",
+    "你最近过得怎么样呀？",
+    "看到的话，别装没看见啊。",
+)
+
 
 def local_line(
     mood: Mood,
@@ -193,6 +203,8 @@ def local_line(
     avoid = avoid or set()
     usable = [line for line in pool if line not in avoid]
     line = rng.choice(usable or list(pool))
+    if rng.random() < 0.5:
+        line = f"{line}{rng.choice(_INVITES)}"
     name = _clean_name(nickname)
     if name and rng.random() < 0.25:
         line = f"{name}，{line}"

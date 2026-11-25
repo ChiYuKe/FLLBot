@@ -4,8 +4,8 @@
 
 | 文件 | 职责 |
 | --- | --- |
-| `plugin.py` | 包头实例、配置声明、命令/AI 工具、生命周期与周期任务装配 |
-| `engine.py` | 情绪状态、群活跃内存、选人、限额、发送与提示词调用 |
+| `plugin.py` | 包头实例、配置声明、命令/AI 工具、生命周期、周期任务与私聊互聊处理器 |
+| `engine.py` | 情绪状态、群活跃内存、选人、限额、发送、提示词调用与互聊窗口 |
 | `mood.py` | 心情数据结构、标签/语气、确定性情绪信号 |
 | `store.py` | SQLite：情绪、悄悄话记录、用户关闭设置 |
 | `whisper.py` | 生成提示词、输出清洗、本地备用短句 |
@@ -50,7 +50,7 @@
 ## 生成与发送
 
 `_model_line()` 使用宿主当前群的人格构造 system 消息，再把 `whisper.build_prompt()` 作为 user 消息，
-通过 `bot.chat.complete` 单轮生成（最多 200 tokens，45 秒超时，不写群历史）。失败、空输出、
+通过 `bot.chat.complete` 单轮生成（最多 350 tokens，45 秒超时，不写群历史）。失败、空输出、
 超长或包含禁用内容时回退到 `whisper.local_line()`。
 
 `_deliver()` 调用 `connection.send_private_msg()`：
@@ -59,7 +59,25 @@
 - `delivery="private"`：普通私聊，仅对好友有效。
 
 成功后写入 `whispers`，并可选写入宿主私聊历史（`scene="private"`、`role="assistant"`），
-让群友从临时会话回复时能接上前文。失败只记录错误类型并进入冷却，不自动重试。
+让群友从临时会话回复时能接上前文；同时打开私聊互聊窗口。失败只记录错误类型并进入冷却，不自动重试。
+
+## 私聊互聊窗口
+
+`_deliver()` 发送成功后，按 Bot、用户、来源群和投递方式保存窗口开始时间。
+`recent_sent_targets()` 在引擎初始化时从 `whispers` 表恢复近期窗口。
+`session_started()` 按全局 `chat_window_minutes` 筛选有效窗口，`opt_out()` 会移除窗口。
+
+`plugin.py` 的 `whisper_session_chat` 处理器（priority=85，抢在智能体的 90 之前）：
+
+1. 处理私聊文字、图片和表情，也接受文字和图片混发。命令及其他媒体交给后续处理器；
+2. 在有效窗口内处理。临时会话优先使用事件中的来源群号，缺失时只补齐唯一可确认的来源群；
+3. `engine.session_reply()` 走 `conversations.turn` 领取轮次，用 `chat.build_messages`
+   （`history_since=窗口开始`，附 `SESSION_CHAT_RULES`）加 `chat.complete` 快聊。
+   图片由宿主判断是否作为模型输入，模型失败静默收尾；
+4. 通过 `deliveries.send_text(require_ai=False)` 投递（分段/长回复/投递记录与智能体一致），
+   输入投影和助手消息落库由宿主统一完成；成功后 `ctx.stop()`，智能体不再处理同一条消息。
+
+## 存储
 
 ## 存储
 
@@ -94,4 +112,5 @@
 ```
 
 离线测试使用 `tests/helpers.py` 的 `FakeConnection`，通过 `engine.clock` 注入固定时间，避免依赖真实时钟。
-新增行为时优先补：情绪信号、互动记录、选人排除、额度/间隔、安静时段、用户关闭、临时会话发送参数。
+新增行为时优先补：情绪信号、互动记录、选人排除、额度/间隔、安静时段、用户关闭、临时会话发送参数、
+互聊窗口的开启/过期/恢复与快聊上下文。

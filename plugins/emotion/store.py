@@ -41,6 +41,7 @@ class MoodStore:
     def _create_schema(self) -> None:
         db = self._connection()
         with db:
+            db.execute("BEGIN IMMEDIATE")
             db.execute(
                 "CREATE TABLE IF NOT EXISTS moods("
                 "self_id INTEGER NOT NULL, group_id INTEGER NOT NULL, "
@@ -55,8 +56,11 @@ class MoodStore:
                 "group_id INTEGER NOT NULL, user_id INTEGER NOT NULL, "
                 "nickname TEXT NOT NULL DEFAULT '', kind TEXT NOT NULL, "
                 "content TEXT NOT NULL, created_at REAL NOT NULL, "
-                "status TEXT NOT NULL, error TEXT NOT NULL DEFAULT '')"
+                "status TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', "
+                "delivery TEXT NOT NULL DEFAULT '')"
             )
+            if "delivery" not in {row["name"] for row in db.execute("PRAGMA table_info(whispers)")}:
+                db.execute("ALTER TABLE whispers ADD COLUMN delivery TEXT NOT NULL DEFAULT ''")
             db.execute(
                 "CREATE INDEX IF NOT EXISTS whispers_group ON whispers(self_id, group_id, created_at)"
             )
@@ -130,12 +134,13 @@ class MoodStore:
         created_at: float,
         status: str,
         error: str = "",
+        delivery: str = "",
     ) -> None:
         db = self._connection()
         with db:
             db.execute(
-                "INSERT INTO whispers(self_id, group_id, user_id, nickname, kind, content, created_at, status, error) "
-                "VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO whispers(self_id, group_id, user_id, nickname, kind, content, created_at, status, error, delivery) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
                     int(self_id),
                     int(group_id),
@@ -146,6 +151,7 @@ class MoodStore:
                     float(created_at),
                     str(status or "sent")[:20],
                     str(error or "")[:120],
+                    delivery,
                 ),
             )
 
@@ -194,6 +200,19 @@ class MoodStore:
             (int(self_id), int(group_id), max(1, int(limit))),
         ).fetchall()
         return [str(row["content"]) for row in rows]
+
+    def recent_sent_targets(self, since: float) -> dict[tuple[int, int], dict[tuple[int, str], float]]:
+        """按 Bot、用户及投递来源恢复最近的互聊窗口。"""
+        rows = self._connection().execute(
+            "SELECT self_id, user_id, group_id, delivery, MAX(created_at) AS last_at FROM whispers "
+            "WHERE status='sent' AND created_at>=? GROUP BY self_id, user_id, group_id, delivery",
+            (float(since),),
+        )
+        result: dict[tuple[int, int], dict[tuple[int, str], float]] = {}
+        for row in rows:
+            sessions = result.setdefault((row["self_id"], row["user_id"]), {})
+            sessions[(row["group_id"], row["delivery"])] = row["last_at"]
+        return result
 
     # -- opt-outs --------------------------------------------------------- #
     def load_optouts(self) -> set[tuple[int, int]]:
