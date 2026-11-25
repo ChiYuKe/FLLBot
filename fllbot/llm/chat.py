@@ -10,6 +10,7 @@ from contextlib import contextmanager
 from typing import TYPE_CHECKING, Any
 
 from ..conversation import ConversationKey, ConversationLockPool
+from ..delivery_policy import active_chat_dispatch, can_dispatch_reply, requests_text_only
 from ..onebot.models import MessageEvent
 from .client import LLMClient, LLMError
 from .context_assembly import ContextAssembler
@@ -257,6 +258,27 @@ class ChatService:
     async def build_messages(self, scene: str, scene_id: int, user_text: str, **options) -> list[dict[str, Any]]:
         ctx = options.get("ctx")
         with self.execution_scope(scene, scene_id, ctx.self_id if ctx else None):
+            if ctx is not None and (turn_input := getattr(ctx, "turn_input", None)) is not None:
+                rules = options.get("system_rules", "")
+                text_only = requests_text_only(turn_input)
+                if text_only:
+                    rules += (
+                        "\n\n本轮要求可直接复制的文本。把完整正文放在最终回复里，保留需要复制的换行和缩进。"
+                        "请勿使用发送图片、文件或语音的工具来交付正文，也不要只回复交付确认。"
+                    )
+                reply_settings = getattr(ctx, "reply_settings", None) or self.execution_config.chat
+                dispatch = active_chat_dispatch(ctx)
+                if dispatch is not None:
+                    tool_names = {item["function"]["name"] for item in options.get("tools") or ()}
+                    rules += dispatch.tool_instructions(tool_names, text_only=text_only)
+                if dispatch is not None and can_dispatch_reply(ctx, reply_settings.reply_mode, dispatch):
+                    chunk_size = (
+                        reply_settings.reply_chunk_size
+                        or getattr(ctx, "reply_default_chunk_size", 0)
+                        or self.execution_config.llm.chunk_size
+                    )
+                    rules += dispatch.instructions(chunk_size)
+                options["system_rules"] = rules
             snapshot = await self.context_builder.build(scene, scene_id, user_text, **options)
             ctx = options.get("ctx")
             if ctx is not None:
@@ -472,6 +494,8 @@ class ChatService:
             )
             if result.response is None:
                 raise LLMError("上下文已失效")
+            result.response.text = result.text
+            result.response.reply_mode = result.reply_mode
             return result.response, len(messages)
 
     async def preview(
@@ -559,7 +583,7 @@ class ChatService:
 
             from .output import send_chat_reply
 
-            await send_chat_reply(ctx, reply.text)
+            await send_chat_reply(ctx, reply.text, model_reply_mode=reply.reply_mode)
             return reply
 
     async def clear(self, scene: str, scene_id: int, self_id: int = 0) -> int:

@@ -14,7 +14,7 @@ from typing import Any
 from starlette.websockets import WebSocket, WebSocketDisconnect
 
 from ..tracing import span
-from .segments import MessageSegment, as_segments
+from .segments import MessageSegment, as_segments, normalize_message
 
 
 class ActionError(RuntimeError):
@@ -50,6 +50,7 @@ def confirmed_message_id(receipt: Any) -> str:
 
 MESSAGE_SEND_ACTIONS = frozenset({'send_msg', 'send_group_msg', 'send_private_msg',
                                   'send_group_forward_msg', 'send_private_forward_msg'})
+FRIEND_REQUEST_ACTION = "send_friend_request"
 
 
 class OneBotConnection:
@@ -77,6 +78,8 @@ class OneBotConnection:
         self._on_event = on_event
         self._pending: dict[str, asyncio.Future[dict[str, Any]]] = {}
         self._send_lock = asyncio.Lock()
+        self._delivery_reconcile_lock = asyncio.Lock()
+        self._reconciled_message_ids: set[str] = set()
         self._closed = False
 
         self.connected_at = time.time()
@@ -149,30 +152,67 @@ class OneBotConnection:
             if self._closed:
                 raise ActionError(action, message="连接已关闭")
 
+            params = params or {}
+            baseline_message_ids: set[str] | None = None
+            if action in {"send_group_msg", "send_msg"} and params.get("group_id"):
+                if any(segment.type == "markdown" for segment in normalize_message(params.get("message"))):
+                    baseline_message_ids = await self._recent_group_message_ids(int(params["group_id"]))
+            send_started_at = time.time() if action in MESSAGE_SEND_ACTIONS else 0.0
             echo = uuid.uuid4().hex
             loop = asyncio.get_running_loop()
             future: asyncio.Future[dict[str, Any]] = loop.create_future()
             self._pending[echo] = future
             self.actions_sent += 1
+            call_error: ActionError | None = None
+            call_error_cause: BaseException | None = None
+            response: dict[str, Any] | None = None
             try:
-                await self.send_json({"action": action, "params": params or {}, "echo": echo})
+                await self.send_json({"action": action, "params": params, "echo": echo})
                 response = await asyncio.wait_for(future, timeout or self.call_timeout)
             except TimeoutError as exc:
-                raise ActionError(action, message="调用超时") from exc
+                call_error = ActionError(action, message="调用超时")
+                call_error_cause = exc
             except asyncio.CancelledError:
                 raise
             finally:
                 self._pending.pop(echo, None)
 
+            if call_error is not None:
+                receipt = await self._reconcile_group_send_timeout(
+                    action, params, send_started_at, baseline_message_ids
+                )
+                if receipt is not None:
+                    self.logger.info(
+                        "NapCat 未返回发送回执；群消息记录已确认送达 message_id=%s",
+                        receipt.get("message_id"),
+                    )
+                    return receipt
+                self.errors += 1
+                raise call_error from call_error_cause
+
+            assert response is not None
             status = str(response.get("status") or "")
             retcode = response.get("retcode")
             if status == "failed" or (retcode is not None and retcode not in (0, 1)):
-                self.errors += 1
-                raise ActionError(
+                error = ActionError(
                     action,
                     retcode=retcode,
                     message=str(response.get("msg") or response.get("wording") or ""),
                 )
+                receipt = await self._reconcile_group_send_timeout(
+                    action, params, send_started_at, baseline_message_ids
+                )
+                if receipt is not None:
+                    self.logger.info(
+                        "NapCat 返回发送超时；群消息记录已确认送达 message_id=%s",
+                        receipt.get("message_id"),
+                    )
+                    return receipt
+                self.errors += 1
+                raise error
+            if action == FRIEND_REQUEST_ACTION and (status != "ok" or type(retcode) is not int or retcode != 0):
+                self.errors += 1
+                raise ActionError(action, message="好友申请缺少明确的成功回执")
             data = response.get("data")
             if action in MESSAGE_SEND_ACTIONS:
                 try:
@@ -181,6 +221,92 @@ class OneBotConnection:
                     self.errors += 1
                     raise
             return data if data is not None else response
+
+    async def _recent_group_message_ids(self, group_id: int) -> set[str] | None:
+        """Snapshot recent IDs before a Markdown send so old duplicate text cannot confirm it."""
+        errors_before = self.errors
+        try:
+            history = await self.call(
+                "get_group_msg_history", {"group_id": group_id, "count": 50}, timeout=min(5.0, self.call_timeout)
+            )
+        except Exception as exc:
+            self.errors = errors_before
+            self.logger.debug("发送前读取群记录失败：%s", type(exc).__name__)
+            return None
+        entries = history.get("messages", []) if isinstance(history, dict) else history
+        if not isinstance(entries, list):
+            return None
+        result: set[str] = set()
+        for item in entries:
+            if not isinstance(item, dict):
+                continue
+            try:
+                result.add(confirmed_message_id(item))
+            except InvalidDeliveryReceipt:
+                continue
+        return result
+
+    async def _reconcile_group_send_timeout(
+        self, action: str, params: dict[str, Any], send_started_at: float,
+        baseline_message_ids: set[str] | None = None,
+    ) -> dict[str, Any] | None:
+        """Confirm a timed-out group send from recent history without retrying it."""
+        if action not in {"send_group_msg", "send_msg"}:
+            return None
+        try:
+            group_id = int(params.get("group_id") or 0)
+        except (TypeError, ValueError):
+            return None
+        expected = normalize_message(params.get("message"))
+        if group_id <= 0 or not expected or self._closed:
+            return None
+
+        async with self._delivery_reconcile_lock:
+            try:
+                history = await self.call(
+                    "get_group_msg_history",
+                    {"group_id": group_id, "count": 30},
+                    timeout=min(5.0, self.call_timeout),
+                )
+            except Exception as exc:
+                self.logger.debug("发送超时后的群记录核验失败：%s", type(exc).__name__)
+                return None
+
+            entries = history.get("messages", []) if isinstance(history, dict) else history
+            if not isinstance(entries, list):
+                return None
+            now = time.time()
+            for item in reversed(entries):
+                if not isinstance(item, dict):
+                    continue
+                try:
+                    sender_id = int(item.get("user_id") or (item.get("sender") or {}).get("user_id") or 0)
+                    created_at = float(item.get("time") or 0)
+                except (TypeError, ValueError):
+                    continue
+                tolerance = 60 if baseline_message_ids is not None else 2
+                if sender_id != self.self_id or not (send_started_at - tolerance <= created_at <= now + 2):
+                    continue
+                try:
+                    message_id = confirmed_message_id(item)
+                except InvalidDeliveryReceipt:
+                    continue
+                if baseline_message_ids is not None and message_id in baseline_message_ids:
+                    continue
+                if message_id in self._reconciled_message_ids:
+                    continue
+                actual = normalize_message(item.get("message"))
+                if len(actual) != len(expected):
+                    continue
+                matches = all(
+                    wanted.type == found.type
+                    and all(found.data.get(key) == value for key, value in wanted.data.items())
+                    for wanted, found in zip(expected, actual)
+                )
+                if matches:
+                    self._reconciled_message_ids.add(message_id)
+                    return item
+        return None
 
     async def read_loop(self) -> None:
         """持续读取 NapCat 上报，直到连接断开。"""
@@ -309,6 +435,12 @@ class OneBotConnection:
 
     async def set_group_card(self, group_id: int, user_id: int, card: str = "") -> Any:
         return await self.call("set_group_card", {"group_id": int(group_id), "user_id": int(user_id), "card": card})
+
+    async def send_friend_request(self, user_id: int, *, message: str) -> Any:
+        """Submit an outbound request through an adapter that supports the extension."""
+        return await self.call(
+            FRIEND_REQUEST_ACTION, {"user_id": int(user_id), "message": message}, timeout=12.0
+        )
 
     async def set_friend_add_request(self, flag: str, approve: bool = True, remark: str = "") -> Any:
         return await self.call(

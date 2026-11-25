@@ -7,7 +7,7 @@ from fllbot.llm.output import send_chat_reply
 from fllbot.onebot.connection import ActionError, InvalidDeliveryReceipt
 from fllbot.onebot.models import parse_event
 from fllbot.plugin.context import Context
-from helpers import FakeConnection, group_message, make_bot
+from helpers import FakeConnection, group_message, make_bot, private_message
 
 
 async def failed_reply(bot, connection, failure):
@@ -52,6 +52,34 @@ async def test_uncertain_send_cannot_be_recovered(tmp_path):
         with pytest.raises(ValueError):
             await bot.deliveries.recover(ctx.turn_id)
         assert connection.send_group_msg.await_count == 2
+    finally:
+        await bot.stop()
+
+
+async def test_temp_private_recovery_uses_original_group(tmp_path):
+    bot = await make_bot(tmp_path, builtin=False, overrides={"chat": {
+        "reply_mode": "forward", "reply_chunk_size": 50, "reply_interval_ms": 0}})
+    connection = FakeConnection()
+    bot.manager.add(connection)
+    try:
+        event = parse_event(dict(private_message("hello"), sub_type="group"))
+        ctx = Context(bot, connection, event)
+        ctx.temp_private_group_fallback = 20002
+        connection.send_private_msg = AsyncMock(side_effect=[
+            {"message_id": 1}, ActionError("send_private_msg", retcode=100),
+        ])
+        with pytest.raises(ActionError):
+            async with bot.conversations.turn(ctx):
+                await send_chat_reply(ctx, "x" * 100)
+        assert [call.kwargs["group_id"] for call in connection.send_private_msg.call_args_list] == [20002, 20002]
+
+        connection.send_private_msg = AsyncMock(return_value={"message_id": 2})
+        result = await bot.deliveries.recover(ctx.turn_id)
+
+        assert result["status"] == "delivered"
+        connection.send_private_msg.assert_awaited_once()
+        assert connection.send_private_msg.call_args.args[0] == event.user_id
+        assert connection.send_private_msg.call_args.kwargs["group_id"] == 20002
     finally:
         await bot.stop()
 

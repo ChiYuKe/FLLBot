@@ -117,7 +117,7 @@ class AgentConversationService:
                         await self.conversations.project_input(ctx, record_text)
                         ctx.input_projected = True
                     if result.text:
-                        await self.send(ctx, result.text)
+                        await self.send(ctx, result.text, model_reply_mode=result.reply_mode)
                         self.triggers.observe_reply(ctx)
                     elif result.reply:
                         # 直出快路径：工具已完成用户可见交付，用现有发送回调发它给的一句确认。

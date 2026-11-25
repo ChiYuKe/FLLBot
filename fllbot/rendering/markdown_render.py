@@ -61,12 +61,28 @@ def wrap(runs: list[Run], font, width: int) -> list[list[tuple[str, Run, float]]
     return lines
 
 
-def render_markdown(text: str, font, width: int) -> list[bytes]:
+def _markdown_tokens(text: str):
     from markdown_it import MarkdownIt
-    from PIL import Image, ImageDraw, ImageFont
 
     parser = MarkdownIt("commonmark", {"html": False}).enable(["table", "strikethrough"])
-    tokens = parser.parse(text)
+    return parser.parse(text)
+
+
+def markdown_table_spans(text: str) -> list[tuple[int, int]]:
+    """Locate tables with the same Markdown rules used by the image renderer."""
+    if "|" not in text or "-" not in text:
+        return []
+    tables = [token.map for token in _markdown_tokens(text) if token.type == "table_open" and token.map]
+    if not tables:
+        return []
+    offsets = [0, *(match.end() for match in re.finditer(r"\r\n|\n|\r", text)), len(text)]
+    return [(offsets[start], offsets[end]) for start, end in tables]
+
+
+def render_markdown(text: str, font, width: int) -> list[bytes]:
+    from PIL import Image, ImageDraw, ImageFont
+
+    tokens = _markdown_tokens(text)
     padding, page_height = 56, 1800
     # Each row: height, cells[(x, width, glyphs)], font, background, quote depth, border, heading.
     rows = []

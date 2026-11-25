@@ -6,12 +6,15 @@ import logging
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..conversation import ConversationLockPool, current_turn_id
 from ..tracing import record, span
 from .budget import request_tokens
 from .client import DEFAULT_CONTEXT_WINDOW, LLMError
+
+if TYPE_CHECKING:
+    from ..delivery_policy import ReplyModeHint
 
 # 输出被截断且模型正在调用工具时，允许一次更大上限的重试。
 TRUNCATED_TOOL_RETRY_MIN_TOKENS = 2048
@@ -31,6 +34,7 @@ class ChatReply:
     tool_calls: list[dict[str, Any]] = field(default_factory=list)
     finish_reason: str = ""
     reasoning_content: str | None = field(default=None, repr=False)
+    reply_mode: ReplyModeHint | None = None
 
     def summary(self) -> dict[str, Any]:
         return {

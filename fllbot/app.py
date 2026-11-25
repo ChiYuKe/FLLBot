@@ -39,7 +39,7 @@ from .llm.reply import ReplyService
 from .logging_setup import configure_logging
 from .maintenance import BackupManager
 from .onebot.connection import OneBotConnection
-from .onebot.models import MessageEvent, MetaEvent, NoticeEvent, parse_event
+from .onebot.models import MessageEvent, MetaEvent, NoticeEvent, RequestEvent, parse_event
 from .onebot.server import ConnectionManager, create_ws_router
 from .permission import PermissionManager
 from .plugin.loader import PluginLoader
@@ -334,7 +334,7 @@ class FLLBot:
             self.logger.warning("事件解析失败（%s）",type(exc).__name__)
             return
 
-        if isinstance(event, MessageEvent) and not event.self_id:
+        if isinstance(event, (MessageEvent, RequestEvent)) and not event.self_id:
             event.self_id = int(connection.self_id or 0)
         trace = MessageTrace(event, connection) if isinstance(event, MessageEvent) else None
         if trace:
@@ -450,8 +450,10 @@ class FLLBot:
         if plan['scene'] == 'group' and metadata.get('permission'):
             info = await connection.get_group_member_info(plan['scene_id'], metadata['user_id'])
             sender = Sender.model_validate(info)
+        temp_group_id = metadata.get('temp_private_group_id') if plan['scene'] == 'private' else None
         event = MessageEvent(self_id=plan['self_id'],message_type=plan['scene'],
-                             group_id=plan['scene_id'] if plan['scene']=='group' else None,
+                             sub_type='group' if temp_group_id else 'normal',
+                             group_id=plan['scene_id'] if plan['scene']=='group' else temp_group_id,
                              user_id=metadata['user_id'],sender=sender)
         ctx = Context(self,connection,event,plugin=owner)
         ctx.handler = SimpleNamespace(permission=metadata.get('permission'))
@@ -542,7 +544,7 @@ def _iso(timestamp: float) -> str:
 
 
 def _dedupe_key(event: Any) -> str | None:
-    """同一条消息 / 通知在重连后被重放时用于去重。"""
+    """同一条消息、通知或好友请求在重连后被重放时用于去重。"""
     if isinstance(event, MessageEvent) and event.message_id:
         return f"message:{event.self_id}:{event.scene}:{event.scene_id}:{event.message_id}"
     if isinstance(event, MessageEvent):
@@ -555,6 +557,9 @@ def _dedupe_key(event: Any) -> str | None:
             f"notice:{event.self_id}:{event.notice_type}:{event.sub_type}:"
             f"{event.group_id}:{event.user_id}:{event.time}"
         )
+    if isinstance(event, RequestEvent) and event.request_type == "friend" and event.flag.strip():
+        digest = hashlib.sha256(event.flag.encode()).hexdigest()
+        return f"friend_request:{event.self_id}:{digest}"
     return None
 
 

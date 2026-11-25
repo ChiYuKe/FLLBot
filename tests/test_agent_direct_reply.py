@@ -5,10 +5,15 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import shutil
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 
 from fllbot.llm.agent_runtime import AgentRuntime
+from fllbot.onebot.connection import ActionError
 from helpers import FakeConnection, group_message, make_bot
 
 GROUP = 20002
@@ -26,6 +31,7 @@ calls = []
     'deliver', description='把整理好的资料交付给用户',
     parameters={'type': 'object', 'properties': {}, 'additionalProperties': False},
     effect='side_effecting',
+    capabilities=('qq.send',),
 )
 async def deliver(ctx):
     calls.append('deliver')
@@ -36,6 +42,7 @@ async def deliver(ctx):
     'notify', description='再补一条交付通知',
     parameters={'type': 'object', 'properties': {}, 'additionalProperties': False},
     effect='side_effecting',
+    capabilities=('qq.send',),
 )
 async def notify(ctx):
     calls.append('notify')
@@ -164,6 +171,46 @@ async def test_runtime_merges_deduplicates_and_short_circuits_silent_batch():
 # --------------------------------------------------------------------------- #
 
 
+@pytest.mark.parametrize(("error", "expected"), [
+    (None, "submitted"),
+    (ActionError("send_friend_request", retcode=1404), "unsupported"),
+    (ActionError("send_friend_request", message="调用超时"), "tool_uncertain"),
+])
+async def test_group_friend_request_targets_only_current_qq_sender(tmp_path, monkeypatch, error, expected):
+    bot = await make_bot(tmp_path, llm=LLM)
+    connection = FakeConnection()
+    connection.send_friend_request = AsyncMock(side_effect=error)
+    name = "chat_dispatch__request_friendship"
+    malicious = _tool_call("other-target", name)
+    malicious["function"]["arguments"] = '{"user_id":99999}'
+    results = {}
+
+    async def complete(messages, **options):
+        if not (outputs := _tool_results(messages)):
+            assert name in {tool["function"]["name"] for tool in options["tools"]}
+            return SimpleNamespace(text="", tool_calls=[
+                malicious, _tool_call("current-sender", name), _tool_call("duplicate", name),
+            ])
+        results.update(outputs)
+        return SimpleNamespace(text=outputs["current-sender"]["message"], tool_calls=[])
+
+    try:
+        await _configure(bot, tools=[name])
+        monkeypatch.setattr(bot.chat, "complete", complete)
+        event = group_message("加我好友吧", at=SELF_ID, message_id=7)
+        await _deliver(bot, connection, event)
+        connection.send_friend_request.assert_awaited_once_with(
+            event["user_id"], message="你好，我是群里收到你请求的机器人。"
+        )
+        assert results["other-target"]["error"] == "invalid_arguments"
+        result = results["current-sender"]
+        assert result.get("status", result.get("error")) == expected
+        assert results["duplicate"] == result
+        assert connection.texts() == [result["message"]]
+    finally:
+        await bot.stop()
+
+
 async def test_silent_reply_tool_requests_model_once_and_sends_reply(tmp_path, monkeypatch):
     plugin_dir = _write_plugins(tmp_path, {"directdemo": _DIRECT_PLUGIN})
     bot = await make_bot(tmp_path, plugin_dirs=[plugin_dir], llm=LLM)
@@ -191,6 +238,205 @@ async def test_silent_reply_tool_requests_model_once_and_sends_reply(tmp_path, m
         detail = await _turn(bot)
         assert detail["status"] == "delivered"
         assert [item["tool"] for item in detail["tools"]] == ["directdemo__deliver"]
+    finally:
+        await bot.stop()
+
+
+async def test_copyable_text_request_recovers_when_model_calls_image_tool(tmp_path, monkeypatch):
+    bot = await make_bot(tmp_path, llm=LLM, overrides={"chat": {
+        "reply_mode": "image", "reply_interval_ms": 0,
+    }})
+    connection = FakeConnection()
+    answer = "正向：clean lineart, soft shadows\n负向：extra fingers"
+    call = _tool_call("format-image", "text__render_image")
+    call["function"]["arguments"] = json.dumps({"text": answer})
+    requests = []
+
+    async def complete(messages, **options):
+        requests.append(copy.deepcopy(messages))
+        if len(requests) == 1:
+            return SimpleNamespace(text="", tool_calls=[call])
+        return SimpleNamespace(text=answer, tool_calls=[])
+
+    try:
+        await _configure(bot, tools=["text__render_image"])
+        monkeypatch.setattr(bot.chat, "complete", complete)
+        await _deliver(bot, connection, group_message("不要转图片，直接发可复制文本", at=SELF_ID))
+
+        assert len(requests) == 2
+        assert any("本轮要求可直接复制的文本" in message["content"] for message in requests[0]
+                   if message["role"] == "system")
+        assert "可直接复制" in _tool_results(requests[1])["format-image"]["error"]
+        assert connection.texts() == [answer]
+        assert all(segment.type in {"reply", "at", "text"} for _, _, segments in connection.sent
+                   for segment in segments)
+    finally:
+        await bot.stop()
+
+
+@pytest.mark.parametrize("request_text, marker, expect_forward", [
+    ("给我一份可以直接复制的", "<REPLY_FORWARD>", True),
+    ("不要转图片，直接发可复制文本", "<REPLY_FORWARD>", False),
+    ("介绍一下这个项目", "<REPLY_TEXT>", False),
+])
+async def test_model_selects_qq_reply_format(tmp_path, monkeypatch, request_text, marker, expect_forward):
+    bot = await make_bot(tmp_path, llm=LLM, overrides={"chat": {
+        "reply_mode": "auto_image", "forward_threshold": 200, "reply_interval_ms": 0,
+    }})
+    connection = FakeConnection()
+    connection.send_group_forward_msg = AsyncMock(return_value={"message_id": 1234})
+    answer = "第一段。\n\n    第二段要保留缩进。" * 16
+    complete = AsyncMock(return_value=SimpleNamespace(text=f"{marker}\n{answer}", tool_calls=[]))
+
+    try:
+        await _configure(bot, tools=[])
+        monkeypatch.setattr(bot.chat, "complete", complete)
+        await _deliver(bot, connection, group_message(request_text, at=SELF_ID))
+
+        complete.assert_awaited_once()
+        rules = complete.call_args.args[0][0]["content"]
+        assert ("<REPLY_FORWARD>" in rules) == (not request_text.startswith("不要转图片"))
+        if expect_forward:
+            connection.send_group_forward_msg.assert_awaited_once()
+            nodes = connection.send_group_forward_msg.await_args.args[1]
+            assert "".join(segment["data"]["text"] for node in nodes for segment in node["data"]["content"]
+                           if segment["type"] == "text" and segment["data"]["text"] != " ") == answer
+            assert not connection.sent
+        else:
+            connection.send_group_forward_msg.assert_not_awaited()
+            assert connection.texts() == [answer]
+    finally:
+        await bot.stop()
+
+
+@pytest.mark.parametrize("opening", ["<REPLY_TEXT>\n", ""])
+async def test_long_copyable_prompt_uses_one_chat_record_and_strips_closing_marker(tmp_path, monkeypatch, opening):
+    bot = await make_bot(tmp_path, llm=LLM, overrides={"chat": {
+        "reply_mode": "auto_image", "reply_chunk_size": 180, "reply_interval_ms": 0,
+    }})
+    connection = FakeConnection()
+    connection.send_group_forward_msg = AsyncMock(return_value={"message_id": 1234})
+    positive = "soft lighting, white background, clean lineart, " * 8
+    answer = f"正向提示词\n```\n{positive}\n```\n\n负向提示词\n```\nblurry, watermark\n```"
+    complete = AsyncMock(return_value=SimpleNamespace(
+        text=f"{opening}{answer}\n</REPLY_TEXT>", tool_calls=[]
+    ))
+    try:
+        await _configure(bot, tools=[])
+        monkeypatch.setattr(bot.chat, "complete", complete)
+        await _deliver(bot, connection, group_message("帮我分析图片，给我可复制的提示词", at=SELF_ID))
+
+        assert "180 字符" in complete.call_args.args[0][0]["content"]
+        connection.send_group_forward_msg.assert_awaited_once()
+        assert not connection.sent
+        nodes = connection.send_group_forward_msg.await_args.args[1]
+        assert len(nodes) >= 3
+        assert "".join(node["data"]["content"][-1]["data"]["text"] for node in nodes) == answer
+        assert (await _chat(bot))[-1] == ("assistant", answer)
+    finally:
+        await bot.stop()
+
+
+async def test_chat_dispatch_can_be_disabled_per_group(tmp_path, monkeypatch):
+    bot = await make_bot(tmp_path, llm=LLM, overrides={"chat": {
+        "reply_mode": "auto_image", "reply_interval_ms": 0,
+    }})
+    connection = FakeConnection()
+    connection.send_group_forward_msg = AsyncMock(return_value={"message_id": 1234})
+    complete = AsyncMock(return_value=SimpleNamespace(
+        text="<REPLY_FORWARD>\n这条是普通群消息。", tool_calls=[]
+    ))
+    try:
+        entry = bot.plugins.entry_for("chat_dispatch")
+        assert entry is not None and entry.builtin and entry.plugin.enabled_by_default
+        await _configure(bot, tools=[])
+        await bot.permissions.set_plugin_enabled("chat_dispatch", False, GROUP)
+        assert bot.permissions.plugin_enabled("chat_dispatch", GROUP + 1)
+        monkeypatch.setattr(bot.chat, "complete", complete)
+        await _deliver(bot, connection, group_message("介绍一下项目", at=SELF_ID))
+
+        assert "<REPLY_FORWARD>" not in complete.call_args.args[0][0]["content"]
+        connection.send_group_forward_msg.assert_not_awaited()
+        assert connection.texts() == ["这条是普通群消息。"]
+    finally:
+        await bot.stop()
+
+
+async def test_chat_dispatch_covers_all_shipped_tool_plugins(tmp_path):
+    root = Path(__file__).resolve().parents[1]
+    plugin_dir = tmp_path / "plugins"
+    external = sorted((root / "plugins").glob("*/plugin.toml"))
+    builtin = sorted((root / "fllbot" / "builtin_plugins").glob("*/plugin.toml"))
+    for manifest in external:
+        shutil.copytree(manifest.parent, plugin_dir / manifest.parent.name, ignore=shutil.ignore_patterns("__pycache__"))
+    bot = await make_bot(tmp_path, plugin_dirs=[plugin_dir], llm=LLM)
+    try:
+        assert set(bot.plugins.names()) == {manifest.parent.name for manifest in [*builtin, *external]}
+        assert not bot.plugins.failed
+        routing = bot.plugins.get("chat_dispatch").chat_dispatch
+        snapshot = bot.tools.snapshot()
+        for owner in snapshot.plugins:
+            visible = {entry.name for entry in snapshot.by_plugin(owner)}
+            hints = routing.tool_instructions(visible)
+            assert "\n- " in hints, owner
+            assert hints.count("\n- ") == 1, owner
+        assert "web__weather_card" not in routing.tool_instructions({"web__get_weather"})
+        assert "github__render_card" not in routing.tool_instructions({"github__read_repository"})
+        assert "github__render_card" in routing.tool_instructions({"github__render_card"})
+    finally:
+        await bot.stop()
+
+
+async def test_chat_dispatch_reuses_delivery_with_new_call_id(tmp_path, monkeypatch):
+    plugin_dir = _write_plugins(tmp_path, {"directdemo": _DIRECT_PLUGIN})
+    bot = await make_bot(tmp_path, plugin_dirs=[plugin_dir], llm=LLM)
+    connection = FakeConnection()
+    complete = AsyncMock(return_value=SimpleNamespace(text="", tool_calls=[
+        _tool_call("delivery-1", "directdemo__deliver"),
+        _tool_call("delivery-2", "directdemo__deliver"),
+    ]))
+    try:
+        await _configure(bot, tools=["directdemo__deliver"])
+        monkeypatch.setattr(bot.chat, "complete", complete)
+        await _deliver(bot, connection, group_message("请把资料发到群里", at=SELF_ID))
+
+        complete.assert_awaited_once()
+        assert bot.plugins.get("directdemo").module.calls == ["deliver"]
+        assert connection.texts() == ["资料已经发给你了。"]
+        assert len((await _turn(bot))["tools"]) == 1
+    finally:
+        await bot.stop()
+
+
+async def test_chat_dispatch_does_not_replay_uncertain_delivery(tmp_path, monkeypatch):
+    plugin_dir = _write_plugins(tmp_path, {"directdemo": _DIRECT_PLUGIN})
+    bot = await make_bot(tmp_path, plugin_dirs=[plugin_dir], llm=LLM)
+    connection = FakeConnection()
+    requests = []
+
+    async def uncertain(ctx):
+        raise TimeoutError("connection timed out after submission")
+
+    async def complete(messages, **options):
+        requests.append(copy.deepcopy(messages))
+        if len(requests) == 1:
+            return SimpleNamespace(text="", tool_calls=[
+                _tool_call("first", "directdemo__notify"),
+                _tool_call("retry", "directdemo__notify"),
+            ])
+        return SimpleNamespace(text="发送结果暂时无法确认。", tool_calls=[])
+
+    try:
+        await _configure(bot, tools=["directdemo__notify"])
+        spec = next(spec for spec in bot.plugins.get("directdemo").ai_tools if spec.name == "notify")
+        spec.callback = AsyncMock(side_effect=uncertain)
+        monkeypatch.setattr(bot.chat, "complete", complete)
+        await _deliver(bot, connection, group_message("发个通知", at=SELF_ID))
+
+        spec.callback.assert_awaited_once()
+        results = _tool_results(requests[1])
+        assert {result["error"] for result in results.values()} == {"tool_uncertain"}
+        assert connection.texts() == ["发送结果暂时无法确认。"]
     finally:
         await bot.stop()
 

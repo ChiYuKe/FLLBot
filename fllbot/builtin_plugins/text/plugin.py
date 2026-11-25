@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 
-from fllbot.plugin import Context, MessageSegment, Plugin, send_media_reply
+from fllbot.plugin import Context, MessageSegment, Plugin, requests_text_only, send_media_reply
 from fllbot.plugin.rendering import join_pages as _join_pages
 from fllbot.plugin.rendering import render_diagram as render_diagram_image
 
@@ -58,6 +58,7 @@ FILE_SENT_REPLY = "文件已经发到当前会话啦"
 PADDED_FILE_SENT_REPLY = "文件已经发到当前会话，已按指定大小补足"
 IMAGE_SENT_REPLY = "图片已经发出去啦"
 DIAGRAM_SENT_REPLY = "架构图已经发出去了"
+TEXT_ONLY_REPLY_ERROR = "用户要求可直接复制的文字，请将完整正文放在最终回复里。"
 
 
 def _confirmed(result: dict, reply: str) -> dict:
@@ -181,6 +182,8 @@ image_parameters["properties"]["format"]["default"] = "markdown"
     parameters=image_parameters,
 )
 async def render_image(ctx: Context, text: str, format: str = "markdown") -> dict:
+    if requests_text_only(getattr(ctx, "turn_input", None)):
+        return {"error": TEXT_ONLY_REPLY_ERROR}
     settings = ctx.settings
     try:
         pages = await asyncio.to_thread(
@@ -241,6 +244,8 @@ diagram_parameters = {
     parameters=diagram_parameters,
 )
 async def render_diagram(ctx: Context, text: str, title: str = "") -> dict:
+    if requests_text_only(getattr(ctx, "turn_input", None)):
+        return {"error": TEXT_ONLY_REPLY_ERROR}
     settings = ctx.settings
     try:
         image_data = await asyncio.to_thread(
@@ -272,6 +277,8 @@ def file_parameters(*, html: bool = False) -> dict:
 async def send_document(
     ctx: Context, text: str, kind: str, filename: str, *, format: str = "markdown", target_bytes: int = 0
 ) -> dict:
+    if requests_text_only(getattr(ctx, "turn_input", None)):
+        return {"error": TEXT_ONLY_REPLY_ERROR}
     try:
         if kind == "text":
             name, payload = await asyncio.to_thread(export_text_file, text, filename, target_bytes)

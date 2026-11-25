@@ -114,9 +114,11 @@ def join_pages(pages: list[bytes]) -> bytes:
             image.close()
 
 
-def render_reply_image(text: str) -> bytes:
+def render_reply_image(text: str, *, markdown_only: bool = False) -> bytes:
     try:
         pages = render(text, font_size=24, format="markdown")
     except ValueError:
+        if markdown_only:
+            raise
         pages = render(text, font_size=24, format="plain")
     return join_pages(pages)

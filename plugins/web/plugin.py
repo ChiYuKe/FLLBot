@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, urljoin, urlsplit
 
 import httpx
 
-from fllbot.plugin import Context, MessageSegment, Plugin, send_media_reply
+from fllbot.plugin import Context, MessageSegment, Plugin, requests_text_only, send_media_reply
 
 from .qq_weather import CityNotFound
 from .qq_weather import resolve as resolve_qq_city
@@ -105,10 +105,10 @@ plugin.setting(
 plugin.agent_instruction(
     "weather_card",
     tools=["weather_card"],
-    text="用户问天气（今天/明天天气、气温、下不下雨、穿衣、紫外线等）时，默认先调用 weather_card："
+    text="用户问标准天气预报（今天/明天天气、气温、下不下雨等）时，默认先调用 weather_card："
     "它会查询并直接发送天气卡片到当前会话，卡片已包含实时天气和预报。"
-    "只有用户明确只要文字或数据、明确不要图片，或 weather_card 返回被沙盒拒绝、图片已关闭、渲染失败时，"
-    "才改用 get_weather 的文字结果简要回答；卡片发送成功后只补一句简短说明，不要重复图内数据。",
+    "用户要求文字、想比较多个城市、需要结合行程给建议，或卡片不可用时，用已授权的 get_weather 查询并作答。"
+    "只有卡片能独立完成请求时才直接交付；卡片发送成功后只补一句简短说明，不要重复图内数据。",
 )
 
 _USER_AGENT = (
@@ -955,8 +955,8 @@ async def read_webpage(ctx: Context, url: str, offset: int = 0) -> dict[str, Any
     title="天气查询",
     description=(
         "查询城市的实时天气和未来几天预报（默认腾讯 QQ 天气，可配置为 Open-Meteo），只返回结构化文字数据，不发送图片。"
-        "用户问天气时默认应调用 weather_card 发送卡片；只有用户明确只要文字/数据、不要图片，"
-        "或 weather_card 被沙盒拒绝、图片配置关闭、渲染失败时，才用本工具并文字作答。"
+        "标准预报有已授权的 weather_card 时优先发卡片。需要对比、解释、个性化建议、文字或卡片不可用时，"
+        "优先用本工具查询并据实作答。"
         "回答天气、气温、下雨、穿衣等问题前必须调用工具查询，不要凭记忆或常识回答；"
         "用户没写城市时用插件配置的默认城市。"
     ),
@@ -992,8 +992,8 @@ async def get_weather(ctx: Context, city: str = "", days: int | None = None) -> 
     description=(
         "用户问天气时默认调用：查询城市天气并直接发送一张天气卡片图到当前会话，同时返回结构化摘要。"
         "卡片已包含实时天气和未来几天预报，发送成功后只补一句简短说明，不要重复图片里的数据。"
-        "只有用户明确只要文字/数据、明确不要图片，或本工具被沙盒拒绝、图片配置关闭、渲染失败时，"
-        "才改用 get_weather 的文字结果回答。被沙盒拒绝（qq_send_disabled 等）时如实说明，不要改用其他工具绕过。"
+        "卡片应覆盖完整请求；需要结合数据对比、解释、提供建议、用户要求文字或本工具不可用时，"
+        "用已授权的 get_weather 查数据并作答。被沙盒拒绝时如实说明，按授权范围交付。"
     ),
     parameters={
         "type": "object",
@@ -1008,6 +1008,8 @@ async def get_weather(ctx: Context, city: str = "", days: int | None = None) -> 
     },
 )
 async def weather_card(ctx: Context, city: str = "", days: int | None = None) -> dict[str, Any]:
+    if requests_text_only(ctx.turn_input):
+        return {"error": "用户要求文字回复，请调用 get_weather 查询并用文字回答。"}
     target = (city or "").strip() or str(ctx.settings.get("default_city") or "").strip()
     if not target:
         return {"error": "用户没有说明城市，也没有配置默认城市；请先问清楚城市。"}

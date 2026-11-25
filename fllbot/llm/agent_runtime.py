@@ -4,14 +4,20 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import re
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .client import ContextOverflowError
 from .task_context import RepeatReminder, TaskContext
 from .tool_protocol import ToolProtocolError, contains_dsml, normalize_tool_calls
 
+if TYPE_CHECKING:
+    from ..delivery_policy import ReplyModeHint
+
 MAX_PARALLEL_READ_ONLY = 4
+_REPLY_OPEN = re.compile(r"^[ \t]*<REPLY_(TEXT|FORWARD)>(?:[ \t]*\r?\n)?")
+_REPLY_CLOSE = re.compile(r"(?:\r?\n[ \t]*)?</REPLY_(?:TEXT|FORWARD)>[ \t]*(?:\r?\n[ \t]*)*\Z")
 AGENT_RULES = (
     '\n\n以下是 QQ 群聊与工具执行规则，不是固定人格。身份、称呼、语气以本系统消息中的当前人格设定为准；'
     '通用称呼不覆盖人格，普通聊天体现当前人格。历史回答只作背景，不延续与当前人格冲突的旧身份或语气。'
@@ -38,6 +44,14 @@ def _merge_texts(values: list[str]) -> str:
     return '\n'.join(merged)[:400]
 
 
+def _parse_reply_format(text: str) -> tuple[str, ReplyModeHint | None]:
+    opening = _REPLY_OPEN.match(text)
+    if opening is None:
+        return _REPLY_CLOSE.sub("", text), None
+    mode: ReplyModeHint = "forward" if opening[1] == "FORWARD" else "split"
+    return _REPLY_CLOSE.sub("", text[opening.end():]), mode
+
+
 @dataclass(frozen=True)
 class RuntimeResult:
     response: Any = None
@@ -45,6 +59,7 @@ class RuntimeResult:
     spoken: str = ''
     reply: str = ''
     reason: str = ''
+    reply_mode: ReplyModeHint | None = None
 
 
 class AgentRuntime:
@@ -125,7 +140,8 @@ class AgentRuntime:
             if ctx is not None and not ctx.data_current:
                 return RuntimeResult(reason='context_cleared')
             if not agent:
-                return RuntimeResult(response=response, text=response.text)
+                text, reply_mode = _parse_reply_format(response.text)
+                return RuntimeResult(response=response, text=text, reply_mode=reply_mode)
             try:
                 calls = normalize_tool_calls(response.tool_calls)
             except ToolProtocolError:
@@ -138,18 +154,19 @@ class AgentRuntime:
                     messages.append(self._assistant_message(response))
                     await report('step', 'superseded')
                     continue
-                text = response.text.strip()
+                text, reply_mode = _parse_reply_format(response.text)
+                stripped = text.strip()
                 if contains_dsml(text):
                     return RuntimeResult(
                         response=response,
                         text="模型服务返回了未识别的工具调用格式，本次没有执行。请检查该模型服务的 OpenAI 工具调用兼容设置。",
                         reason="unparsed_tool_call",
                     )
-                if text == '<NO_REPLY>':
+                if stripped == '<NO_REPLY>':
                     return RuntimeResult(response=response, reason='explicit_silence')
-                if not text:
+                if not stripped:
                     return RuntimeResult(response=response, reason='empty_response')
-                return RuntimeResult(response=response, text=text)
+                return RuntimeResult(response=response, text=text if reply_mode else stripped, reply_mode=reply_mode)
             # Validate all calls before silence or another callback can act.
             for call in ([] if pending is not None and pending() else calls):
                 function = call.get('function') or {}

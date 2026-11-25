@@ -9,13 +9,16 @@ import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from ..rules import Rule, evaluate
 from ..rules import command as command_rule
 from ..sandbox import CapabilityError, effective_risk, normalize
 from .agent import AgentInstruction, ToolHook, validate_name
 from .settings import PluginSettings, SettingField
+
+if TYPE_CHECKING:
+    from ..delivery_policy import ChatDispatchPolicy
 
 HandlerKind = Literal["message", "notice", "request", "meta_event", "startup", "shutdown"]
 
@@ -146,6 +149,7 @@ class Plugin:
     author: str = ""
     enabled_by_default: bool = True
     category: str = "plugin"
+    chat_dispatch: ChatDispatchPolicy | None = None
 
     def __init__(
         self,

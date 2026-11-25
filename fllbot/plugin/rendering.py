@@ -2,7 +2,7 @@
 
 from ..rendering.code_render import code_rows
 from ..rendering.diagram_render import render_diagram
-from ..rendering.markdown_render import Run, inline_runs, render_markdown, wrap
+from ..rendering.markdown_render import Run, inline_runs, markdown_table_spans, render_markdown, wrap
 from ..rendering.text_image import MAX_CHARS, join_pages, load_font, render, validate
 
 __all__ = [
@@ -12,6 +12,7 @@ __all__ = [
     "inline_runs",
     "join_pages",
     "load_font",
+    "markdown_table_spans",
     "render",
     "render_diagram",
     "render_markdown",

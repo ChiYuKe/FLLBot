@@ -13,8 +13,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from ..conversation import ReceiveSnapshot, current_receive
-from ..onebot.connection import confirmed_message_id
-from ..onebot.models import Event, MessageEvent, Sender
+from ..onebot.connection import ActionError, confirmed_message_id
+from ..onebot.models import Event, MessageEvent, RequestEvent, Sender
 from ..onebot.segments import (
     MessageSegment,
     as_segments,
@@ -56,6 +56,7 @@ class Context:
     trigger_decision: Any = field(default=None, repr=False)
     reply_settings: Any = field(default=None, repr=False)
     reply_default_chunk_size: int = 0
+    temp_private_group_fallback: int | None = field(default=None, init=False, repr=False)
     context_snapshot: Any = field(default=None, repr=False)
     turn_input: str | None = None
     context_input: str | None = None
@@ -140,6 +141,18 @@ class Context:
     @property
     def is_private(self) -> bool:
         return isinstance(self.event, MessageEvent) and self.event.is_private
+
+    @property
+    def is_temp_private(self) -> bool:
+        return isinstance(self.event, MessageEvent) and self.event.is_private and self.event.sub_type == "group"
+
+    @property
+    def temp_private_group_id(self) -> int | None:
+        if not self.is_temp_private:
+            return None
+        if self.group_id and self.group_id > 0:
+            return self.group_id
+        return self.temp_private_group_fallback
 
     @property
     def group_id(self) -> int | None:
@@ -295,6 +308,12 @@ class Context:
                 receipt = await self.connection.send_private_msg(int(user_id), segments)
             elif self.is_group and self.group_id is not None:
                 receipt = await self.connection.send_group_msg(int(self.group_id), segments)
+            elif self.is_temp_private and self.user_id:
+                source_group = self.temp_private_group_id
+                if not source_group:
+                    self.trace_event("send", "temp_private_group_missing", "skipped")
+                    raise ValueError("临时私聊缺少来源群号")
+                receipt = await self.connection.send_private_msg(self.user_id, segments, group_id=source_group)
             elif self.is_private and self.user_id:
                 receipt = await self.connection.send_private_msg(self.user_id, segments)
             else:
@@ -389,6 +408,56 @@ class Context:
         if not target:
             raise ValueError("戳一戳需要目标用户 ID")
         return await self.connection.send_poke(target, group_id=self.group_id if self.is_group else None)
+
+    async def request_friendship(self) -> dict[str, str]:
+        """Use the current QQ group message sender as the only possible recipient."""
+        if (
+            self.entrypoint != "qq"
+            or not isinstance(self.event, MessageEvent)
+            or not self.is_group
+            or self.event.sub_type == "anonymous"
+            or (self.group_id or 0) <= 0
+            or not self.message_id
+            or self.user_id <= 0
+            or self.user_id == self.self_id
+            or not self.text
+            or not self.data_current
+        ):
+            return {"status": "ineligible", "message": "只有当前 QQ 群消息的发言者可以请求加本人为好友。"}
+
+        cooldown_key = ("qq", f"friend_request:{self.self_id}", self.user_id)
+        if not self.bot.permissions.cooldown_ok(cooldown_key, 60):
+            return {"status": "cooldown", "message": "刚处理过这位用户的好友申请请求，请稍后再试。"}
+
+        try:
+            await self.connection.send_friend_request(self.user_id, message="你好，我是群里收到你请求的机器人。")
+        except ActionError as exc:
+            if exc.retcode in (404, 1404):
+                return {
+                    "status": "unsupported",
+                    "message": "当前 QQ 协议端不支持主动发好友申请，请从群成员列表点开我的资料，向我发起好友申请。",
+                }
+            if exc.retcode not in (None, 1) and not re.search(r"超时|timed?\s*out|timeout", exc.message, re.I):
+                return {
+                    "status": "rejected",
+                    "message": "QQ 协议端拒绝了这次好友申请，可以从群成员列表向我发起申请。",
+                }
+            raise
+        return {"status": "submitted", "message": "已提交 QQ 好友申请，请在 QQ 好友通知里查看。"}
+
+    async def approve_friend_request(self) -> None:
+        """Approve an incoming friend request using its original OneBot flag."""
+        if (
+            self.entrypoint == "qq"
+            and isinstance(self.event, RequestEvent)
+            and self.event.request_type == "friend"
+            and self.self_id > 0
+            and self.user_id > 0
+            and self.user_id != self.self_id
+            and self.event.flag.strip()
+            and self.data_current
+        ):
+            await self.connection.set_friend_add_request(self.event.flag, approve=True)
 
     async def sleep(self, seconds: float) -> None:
         await asyncio.sleep(seconds)

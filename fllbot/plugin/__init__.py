@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..delivery_policy import delivery_allowed
+from ..delivery_policy import delivery_allowed, requests_text_only
 from ..onebot.segments import MessageSegment, as_segments, readable_text
 from ..rules import (
     all_rules,
@@ -64,6 +64,7 @@ __all__ = [
     "not_rule",
     "readable_text",
     "regex",
+    "requests_text_only",
     "send_media_reply",
     "startswith",
     "to_me",

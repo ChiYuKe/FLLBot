@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -62,14 +63,21 @@ class ReplyPlan:
 
 
 class ReplyService:
+    def split(self, text: str, size: int, *, preserve_whitespace: bool = False) -> list[str]:
+        return split_text(text, size, preserve_whitespace=preserve_whitespace)
+
     def build(self, text: str, *, turn_id: str, self_id: int, scene: str, scene_id: int,
               message_id: int, user_id: int, options: Any, default_chunk_size: int,
-              nickname: str = 'FLLBot') -> ReplyPlan:
-        chunks = split_text(text, options.reply_chunk_size or default_chunk_size)
+              nickname: str = 'FLLBot', preserve_whitespace: bool = False,
+              forward_if_fragmented: Callable[[str, int], bool] | None = None) -> ReplyPlan:
+        chunks = self.split(text, options.reply_chunk_size or default_chunk_size,
+                            preserve_whitespace=preserve_whitespace)
         image = options.reply_mode == 'image' or (
             options.reply_mode == 'auto_image' and len(text) >= options.forward_threshold)
         forward = options.reply_mode == 'forward' or (
             options.reply_mode == 'auto' and len(text) >= options.forward_threshold)
+        if forward_if_fragmented is not None and options.reply_mode == 'split':
+            forward = forward_if_fragmented(text, len(chunks))
         mode = 'image' if image else 'forward' if forward else 'split'
         parts = tuple(ReplyPart(index+int(forward),chunk,
                                 message_id if options.quote_reply and index==0 else 0,
@@ -79,16 +87,18 @@ class ReplyService:
                          nickname,options.reply_interval_ms)
 
 
-def split_text(text: str, size: int) -> list[str]:
+def split_text(text: str, size: int, *, preserve_whitespace: bool = False) -> list[str]:
     """按语义边界切分长回复。
 
     - 优先在段落、句子结束处断开，其次分句标点，最后按空格或长度硬切；
     - 不拆开行内 Markdown（加粗、行内代码、链接），超长代码块按行断开；
     - 过短的尾段并入前一段，避免最后一条只剩半句话。
     """
-    text = (text or "").strip()
-    if not text:
+    text = text or ""
+    if not text.strip():
         return []
+    if not preserve_whitespace:
+        text = text.strip()
     if size <= 0 or len(text) <= size:
         return [text]
 
@@ -100,21 +110,22 @@ def split_text(text: str, size: int) -> list[str]:
         cut = _break_position(text, start, start + size, spans)
         if cut is None or cut <= start:
             cut = start + size
-        chunk = text[start:cut].strip()
+        chunk = text[start:cut] if preserve_whitespace else text[start:cut].strip()
         if chunk:
             chunks.append(chunk)
             starts.append(start)
         start = cut
-        while start < len(text) and text[start].isspace():
-            start += 1
-    tail = text[start:].strip()
+        if not preserve_whitespace:
+            while start < len(text) and text[start].isspace():
+                start += 1
+    tail = text[start:] if preserve_whitespace else text[start:].strip()
     if tail:
         chunks.append(tail)
         starts.append(start)
 
     # 尾段过短说明切点落在一句话的末段，宁可让前一段略长也不要发一条碎片消息。
     if len(chunks) > 1 and len(chunks[-1]) < max(1, size // 8):
-        merged = text[starts[-2]:].strip()
+        merged = text[starts[-2]:] if preserve_whitespace else text[starts[-2]:].strip()
         chunks[-2:] = [merged]
     return chunks
 
